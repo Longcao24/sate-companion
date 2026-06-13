@@ -4,26 +4,26 @@ import { View } from "react-native";
 import { makeApi } from "./src/api/sateApi";
 import { makeLink } from "./src/ble/SateBle";
 import { ManagedDevice } from "./src/protocol";
-import { DeviceDetailScreen } from "./src/screens/DeviceDetailScreen";
 import { DevicePreviewScreen } from "./src/screens/DevicePreviewScreen";
-import { DevicesScreen } from "./src/screens/DevicesScreen";
+import { HomeScreen } from "./src/screens/HomeScreen";
 import { LoginScreen } from "./src/screens/LoginScreen";
 import { ProvisionScreen } from "./src/screens/ProvisionScreen";
+import { RecorderSettingsScreen } from "./src/screens/RecorderSettingsScreen";
 import { SettingsScreen } from "./src/screens/SettingsScreen";
 import { StoreProvider, useStore } from "./src/store";
 import { useAutoSync } from "./src/sync/AutoSync";
 import { D } from "./src/theme";
 
 type Screen =
-  | { name: "devices" }
-  | { name: "device"; device: ManagedDevice }
+  | { name: "home" }
   | { name: "provision" }
+  | { name: "recorderSettings"; device: ManagedDevice }
   | { name: "preview" }
   | { name: "settings" };
 
 function Root() {
   const { settings, ready } = useStore();
-  const [screen, setScreen] = useState<Screen>({ name: "devices" });
+  const [screen, setScreen] = useState<Screen>({ name: "home" });
 
   const api = useMemo(
     () => makeApi(settings.serverUrl, settings.token),
@@ -31,12 +31,14 @@ function Root() {
   );
   const link = useMemo(() => makeLink(), []);
 
-  // Auto BLE bridge sync runs whenever signed in + enabled, except while
-  // the provisioning flow or the device-detail screen (nearby BLE control)
-  // needs the radio.
+  // Background BLE bridge runs while signed in + enabled, except where a screen
+  // needs exclusive use of the radio (first-time setup or a recorder restart).
   const syncEnabled =
-    settings.autoSync && screen.name !== "provision" && screen.name !== "device";
-  const activity = useAutoSync(syncEnabled, link, api, !!settings.token);
+    settings.autoSync &&
+    screen.name !== "provision" &&
+    screen.name !== "recorderSettings";
+  // Kept mounted so the background BLE bridge keeps running across screens.
+  useAutoSync(syncEnabled, link, api, !!settings.token);
 
   if (!ready) return <View style={{ flex: 1, backgroundColor: D.bg }} />;
   if (!settings.token) {
@@ -51,36 +53,39 @@ function Root() {
   return (
     <>
       <StatusBar style="light" />
-      {screen.name === "devices" && (
-        <DevicesScreen
+      {screen.name === "home" && (
+        <HomeScreen
           api={api}
-          activity={activity}
-          onOpenDevice={(d) => setScreen({ name: "device", device: d })}
-          onAddDevice={() => setScreen({ name: "provision" })}
+          link={link}
           onOpenSettings={() => setScreen({ name: "settings" })}
           onOpenPreview={() => setScreen({ name: "preview" })}
+          onSetupNew={() => setScreen({ name: "provision" })}
+          onOpenRecorderSettings={(device) =>
+            setScreen({ name: "recorderSettings", device })
+          }
         />
       )}
-      {screen.name === "device" && (
-        <DeviceDetailScreen
+      {screen.name === "recorderSettings" && (
+        <RecorderSettingsScreen
           api={api}
           link={link}
           device={screen.device}
-          onClose={() => setScreen({ name: "devices" })}
+          onClose={() => setScreen({ name: "home" })}
+          onUnlinked={() => setScreen({ name: "home" })}
         />
       )}
       {screen.name === "provision" && (
         <ProvisionScreen
           api={api}
           link={link}
-          onClose={() => setScreen({ name: "devices" })}
+          onClose={() => setScreen({ name: "home" })}
         />
       )}
       {screen.name === "preview" && (
-        <DevicePreviewScreen onClose={() => setScreen({ name: "devices" })} />
+        <DevicePreviewScreen onClose={() => setScreen({ name: "home" })} />
       )}
       {screen.name === "settings" && (
-        <SettingsScreen onClose={() => setScreen({ name: "devices" })} />
+        <SettingsScreen onClose={() => setScreen({ name: "home" })} />
       )}
     </>
   );

@@ -101,11 +101,35 @@ app.get("/api/devices/:id/commands", (req, res) => {
   d.last_seen = new Date().toISOString();
   if (req.query.pending !== undefined) d.pending_sessions = Number(req.query.pending);
   if (req.query.state !== undefined) d.state = String(req.query.state); // live activity
-  res.json({ commands: (commands[d.id] || []).splice(0) });
+  // active_patient is the patient the SLP typed in the app for the next remote
+  // recording; the firmware reads it on a "record" op to tag the session.
+  res.json({
+    commands: (commands[d.id] || []).splice(0),
+    active_patient: d.active_patient || null,
+  });
 });
 
 app.post("/api/devices/:id/commands", (req, res) => {
-  (commands[req.params.id] ||= []).push(req.body.op);
+  const { op, patient } = req.body;
+  (commands[req.params.id] ||= []).push(op);
+  // A "record" can carry the patient the SLP typed in the app: remember it as
+  // the device's active patient and make sure it's in the roster so the next
+  // captured session is tagged to them.
+  if (patient && patient.patient_id) {
+    const d = devices.find((x) => x.id === req.params.id);
+    const full = {
+      patient_id: String(patient.patient_id),
+      name: patient.name || String(patient.patient_id),
+      age: patient.age || "",
+      session_type: patient.session_type || "",
+      clinician: patient.clinician || (d && d.slp) || "",
+    };
+    if (d) d.active_patient = full;
+    const i = patients.findIndex((p) => p.patient_id === full.patient_id);
+    if (i >= 0) patients[i] = { ...patients[i], ...full };
+    else patients.push(full);
+    persist();
+  }
   res.status(204).end();
 });
 
@@ -139,23 +163,45 @@ app.put("/api/patients", (req, res) => {
   res.status(204).end();
 });
 
-// Session upload: the WAV is written to uploads/ as a real playable file
-// with a .json metadata sidecar - same shape the recorder keeps on its SD.
-app.post("/api/sessions", (req, res) => {
-  const { wav_base64, ...meta } = req.body;
-  const wav = Buffer.from(wav_base64 || "", "base64");
+// Helper: persist one uploaded WAV + its metadata sidecar, return the id.
+function storeSession(meta, wav) {
   const id = "s-" + (sessions.length + 1);
   const stem = `${meta.device_serial || "unknown"}_${meta.patient_id || "PT"}_session_${String(
     meta.session_number ?? 0
   ).padStart(4, "0")}`;
-  const wavFile = path.join(UPLOAD_DIR, `${stem}.wav`);
-  fs.writeFileSync(wavFile, wav);
+  fs.writeFileSync(path.join(UPLOAD_DIR, `${stem}.wav`), wav);
   fs.writeFileSync(
     path.join(UPLOAD_DIR, `${stem}.json`),
     JSON.stringify({ id, ...meta, bytes: wav.length, at: new Date().toISOString() }, null, 2)
   );
   sessions.push({ id, ...meta, bytes: wav.length, file: `${stem}.wav`, at: new Date().toISOString() });
   persist();
+  return { id, stem };
+}
+
+// Raw streaming upload: the recorder POSTs the WAV bytes straight from its SD
+// card (Content-Type: audio/wav) with metadata in the query string. No base64,
+// so the device never has to hold the whole file (+1.34x) in RAM - which blew
+// past PSRAM on multi-minute recordings.
+app.post("/api/sessions/raw", express.raw({ type: () => true, limit: "40mb" }), (req, res) => {
+  const meta = {
+    device_serial: req.query.device_serial || "unknown",
+    patient_id: req.query.patient_id || "PT",
+    session_number: Number(req.query.session_number || 0),
+    sample_rate: Number(req.query.sample_rate || 16000),
+  };
+  const wav = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+  const { id, stem } = storeSession(meta, wav);
+  console.log(`session uploaded (raw) -> uploads/${stem}.wav (${wav.length} bytes)`);
+  res.json({ id });
+});
+
+// Session upload: the WAV is written to uploads/ as a real playable file
+// with a .json metadata sidecar - same shape the recorder keeps on its SD.
+app.post("/api/sessions", (req, res) => {
+  const { wav_base64, ...meta } = req.body;
+  const wav = Buffer.from(wav_base64 || "", "base64");
+  const { id, stem } = storeSession(meta, wav);
   console.log(`session uploaded -> uploads/${stem}.wav (${wav.length} bytes)`);
   res.json({ id });
 });

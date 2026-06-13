@@ -49,3 +49,11 @@ void        connFactoryReset();
 extern void sateHookPatientsUpdated(); // /sate/patients.json was rewritten
 extern void sateHookConnChanged();     // mode or pending count changed
 extern void sateHookRecord();          // app/server asked for a remote recording
+// Service the GUI for one tick. Called from inside long blocking connectivity
+// work (e.g. streaming a big upload) so the screen stays responsive.
+extern void sateHookGuiPump();
+// The patient the SLP typed in the app for the next remote recording. Staged by
+// the .ino and applied (selected/added to the roster) before the record runs.
+extern void sateHookSetActivePatient(const char *id, const char *name,
+                                     const char *age, const char *sessionType,
+                                     const char *clinician);

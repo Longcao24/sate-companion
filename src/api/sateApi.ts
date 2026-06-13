@@ -7,7 +7,7 @@
 //   POST  /api/devices/claim-token      -> { token }   (binds to this account)
 //   PATCH /api/devices/:id               { name }
 //   DELETE /api/devices/:id
-//   POST  /api/devices/:id/commands      { op: RemoteCommand }
+//   POST  /api/devices/:id/commands      { op: RemoteCommand, patient? }
 //   GET   /api/patients                  -> Patient[]
 //   POST  /api/sessions                  { device_serial, patient_id,
 //                                          session_number, sample_rate,
@@ -27,7 +27,16 @@ export interface SateApi {
   claimToken(): Promise<string>;
   renameDevice(id: string, name: string): Promise<void>;
   removeDevice(id: string): Promise<void>;
-  sendCommand(id: string, op: RemoteCommand): Promise<void>;
+  /**
+   * Queue a command for the recorder. For "record" you can pass the patient the
+   * SLP typed in so the captured session is tagged to them (the server also adds
+   * the patient to the roster if they're new).
+   */
+  sendCommand(
+    id: string,
+    op: RemoteCommand,
+    patient?: Partial<Patient>
+  ): Promise<void>;
   listPatients(): Promise<Patient[]>;
   /** Sessions uploaded to the account; pass a serial to filter to one device. */
   listUploads(deviceSerial?: string): Promise<UploadedSession[]>;
@@ -87,10 +96,10 @@ export class HttpApi implements SateApi {
   async removeDevice(id: string) {
     await this.req(`/api/devices/${id}`, { method: "DELETE" });
   }
-  async sendCommand(id: string, op: RemoteCommand) {
+  async sendCommand(id: string, op: RemoteCommand, patient?: Partial<Patient>) {
     await this.req(`/api/devices/${id}/commands`, {
       method: "POST",
-      body: JSON.stringify({ op }),
+      body: JSON.stringify(patient ? { op, patient } : { op }),
     });
   }
   listPatients() {

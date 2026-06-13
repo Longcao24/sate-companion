@@ -242,26 +242,6 @@ static void writeSyncMarker(const char *pid, uint32_t num)
   }
 }
 
-// ---- base64 -----------------------------------------------------------------
-
-static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-static size_t b64Encode(const uint8_t *in, size_t len, char *out)
-{
-  size_t o = 0;
-  for (size_t i = 0; i < len; i += 3) {
-    uint32_t v = in[i] << 16;
-    if (i + 1 < len) v |= in[i + 1] << 8;
-    if (i + 2 < len) v |= in[i + 2];
-    out[o++] = B64[(v >> 18) & 63];
-    out[o++] = B64[(v >> 12) & 63];
-    out[o++] = (i + 1 < len) ? B64[(v >> 6) & 63] : '=';
-    out[o++] = (i + 2 < len) ? B64[v & 63] : '=';
-  }
-  out[o] = '\0';
-  return o;
-}
-
 // =============================================================================
 // BLE
 // =============================================================================
@@ -431,6 +411,13 @@ static void statusErr(const char *op, const char *msg)
 // HTTP (device -> SATE server)
 // =============================================================================
 
+// One persistent client + HTTPClient reused across calls: with keep-alive the
+// 3 s command poll skips the TCP handshake every time, so the loop task (which
+// also drives LVGL) stalls for a request round-trip instead of a full connect.
+// Short timeouts cap the worst-case UI freeze if the link drops mid-poll.
+static WiFiClient s_httpClient;
+static HTTPClient s_http;
+
 static bool httpJson(const char *method, const char *path, const char *body,
                      char *resp, size_t respSize, int *codeOut)
 {
@@ -438,52 +425,58 @@ static bool httpJson(const char *method, const char *path, const char *body,
   char url[192];
   snprintf(url, sizeof(url), "%s%s", cfgServer, path);
 
-  WiFiClient client;
-  HTTPClient http;
-  http.setTimeout(8000);
-  if (!http.begin(client, url)) return false;
-  http.addHeader("Content-Type", "application/json");
+  s_http.setReuse(true);          // keep the socket open between calls
+  s_http.setConnectTimeout(2000); // don't hang the UI waiting to connect
+  s_http.setTimeout(2500);        // ...or waiting on a reply
+  if (!s_http.begin(s_httpClient, url)) return false;
+  s_http.addHeader("Content-Type", "application/json");
   if (cfgDeviceKey[0]) {
     char auth[80];
     snprintf(auth, sizeof(auth), "Bearer %s", cfgDeviceKey);
-    http.addHeader("Authorization", auth);
+    s_http.addHeader("Authorization", auth);
   }
-  int code = body ? http.sendRequest(method, (uint8_t *)body, strlen(body))
-                  : http.sendRequest(method);
+  int code = body ? s_http.sendRequest(method, (uint8_t *)body, strlen(body))
+                  : s_http.sendRequest(method);
   if (codeOut) *codeOut = code;
   bool ok = code >= 200 && code < 300;
   if (ok && resp && respSize) {
-    String s = http.getString();
-    snprintf(resp, respSize, "%s", s.c_str());
+    // Stream straight into the caller's buffer - avoids a String heap alloc
+    // (and the fragmentation it caused) on every poll.
+    WiFiClient *stream = s_http.getStreamPtr();
+    int len = s_http.getSize();
+    size_t o = 0;
+    uint32_t t0 = millis();
+    while (stream && o + 1 < respSize && (len < 0 || o < (size_t)len) &&
+           (s_http.connected() || stream->available()) &&
+           millis() - t0 < 2500) {
+      int avail = stream->available();
+      if (avail <= 0) { delay(1); continue; }
+      size_t room = respSize - 1 - o;
+      size_t rd = stream->readBytes(resp + o, avail < (int)room ? avail : room);
+      o += rd;
+    }
+    resp[o] = '\0';
   }
-  http.end();
+  s_http.end(); // with reuse(true) this returns the socket to the pool, not close
   return ok;
 }
 
-// Upload one pending session. WAV + base64 buffers live in PSRAM.
+// Upload one pending session by STREAMING the WAV straight from the SD card to
+// the server (Content-Type: audio/wav, metadata in the query string). The old
+// path base64-encoded the whole file into PSRAM (file + 1.34x) - a multi-minute
+// recording blew past the 8 MB PSRAM and the upload failed. Streaming keeps
+// memory flat regardless of length.
 static bool uploadSession(const PendingEntry &pe)
 {
   char wavPath[160], jsonPath[160];
   sessionPath(wavPath, sizeof(wavPath), pe.patientId, pe.num, "wav");
   sessionPath(jsonPath, sizeof(jsonPath), pe.patientId, pe.num, "json");
 
+  if (WiFi.status() != WL_CONNECTED) return false;
+
   File wf = SD_MMC.open(wavPath, FILE_READ);
   if (!wf) return false;
   size_t wavLen = wf.size();
-
-  uint8_t *wav = (uint8_t *)heap_caps_malloc(wavLen, MALLOC_CAP_SPIRAM);
-  size_t b64Cap = ((wavLen + 2) / 3) * 4 + 8;
-  char *body = (char *)heap_caps_malloc(b64Cap + 512, MALLOC_CAP_SPIRAM);
-  if (!wav || !body) {
-    if (wav) free(wav);
-    if (body) free(body);
-    wf.close();
-    Serial.println("[CONN] upload: PSRAM alloc failed");
-    return false;
-  }
-  size_t got = wf.read(wav, wavLen);
-  wf.close();
-  if (got != wavLen) { free(wav); free(body); return false; }
 
   // session_number / sample_rate from the metadata JSON (defaults if absent)
   uint32_t sessionNumber = pe.num, sampleRate = 16000;
@@ -497,27 +490,103 @@ static bool uploadSession(const PendingEntry &pe)
     jf.close();
   }
 
-  int n = snprintf(body, 512,
-                   "{\"device_serial\":\"%s\",\"patient_id\":\"%s\","
-                   "\"session_number\":%lu,\"sample_rate\":%lu,\"wav_base64\":\"",
-                   serialStr, pe.patientId,
-                   (unsigned long)sessionNumber, (unsigned long)sampleRate);
-  size_t o = (size_t)n;
-  o += b64Encode(wav, wavLen, body + o);
-  body[o++] = '"';
-  body[o++] = '}';
-  body[o] = '\0';
-  free(wav);
+  // Parse host:port and path out of cfgServer (e.g. "http://192.168.0.138:4000").
+  char host[80] = {0};
+  int  port = 80;
+  {
+    const char *h = strstr(cfgServer, "://");
+    h = h ? h + 3 : cfgServer;
+    size_t i = 0;
+    while (h[i] && h[i] != ':' && h[i] != '/' && i < sizeof(host) - 1) {
+      host[i] = h[i];
+      i++;
+    }
+    host[i] = '\0';
+    if (h[i] == ':') port = atoi(h + i + 1);
+  }
 
+  char path[224];
+  snprintf(path, sizeof(path),
+           "/api/sessions/raw?device_serial=%s&patient_id=%s"
+           "&session_number=%lu&sample_rate=%lu",
+           serialStr, pe.patientId,
+           (unsigned long)sessionNumber, (unsigned long)sampleRate);
+
+  // Manual chunked POST so we can service the GUI + feed the watchdog BETWEEN
+  // chunks. HTTPClient's one-shot stream upload blocks the loop task for the
+  // whole transfer, freezing the screen on a multi-MB file; this keeps the UI
+  // smooth no matter how long the recording is.
+  WiFiClient client;
+  client.setTimeout(20000);
+  if (!client.connect(host, port)) { wf.close(); return false; }
+
+  client.printf("POST %s HTTP/1.1\r\n", path);
+  client.printf("Host: %s:%d\r\n", host, port);
+  if (cfgDeviceKey[0]) client.printf("Authorization: Bearer %s\r\n", cfgDeviceKey);
+  client.print("Content-Type: audio/wav\r\n");
+  client.printf("Content-Length: %u\r\n", (unsigned)wavLen);
+  client.print("Connection: close\r\n\r\n");
+
+  static uint8_t upBuf[4096];
+  size_t   sent = 0;
+  uint32_t lastPump = millis();
+  bool     sendOk = true;
+  while (sent < wavLen) {
+    size_t want = wavLen - sent;
+    if (want > sizeof(upBuf)) want = sizeof(upBuf);
+    size_t got = wf.read(upBuf, want);
+    if (got == 0) { sendOk = false; break; }
+
+    size_t w = 0;
+    uint32_t t0 = millis();
+    while (w < got) {
+      int n = client.write(upBuf + w, got - w);
+      if (n > 0) { w += n; t0 = millis(); }
+      else if (!client.connected() || millis() - t0 > 8000) { sendOk = false; break; }
+      else { sateHookGuiPump(); delay(1); }
+    }
+    if (!sendOk) break;
+    sent += got;
+
+    // ~30 ms cadence: paint a GUI frame (also yields the loop task) so the
+    // screen stays smooth while a multi-MB upload streams out.
+    if (millis() - lastPump >= 30) {
+      lastPump = millis();
+      sateHookGuiPump();
+    }
+  }
+  wf.close();
+
+  // Read just the status line ("HTTP/1.1 200 OK").
   int code = 0;
-  bool ok = httpJson("POST", "/api/sessions", body, nullptr, 0, &code);
-  free(body);
+  if (sendOk) {
+    char line[80];
+    size_t li = 0;
+    uint32_t t0 = millis();
+    while (millis() - t0 < 8000) {
+      int c = client.read();
+      if (c < 0) {
+        if (!client.connected() && !client.available()) break;
+        sateHookGuiPump();
+        delay(1);
+        continue;
+      }
+      if (c == '\n') break;
+      if (c != '\r' && li < sizeof(line) - 1) line[li++] = (char)c;
+    }
+    line[li] = '\0';
+    sscanf(line, "HTTP/1.%*d %d", &code);
+  }
+  client.stop();
 
+  bool ok = code >= 200 && code < 300;
   if (ok) {
     writeSyncMarker(pe.patientId, pe.num);
-    Serial.printf("[CONN] uploaded %s session %lu\n", pe.patientId, (unsigned long)pe.num);
+    Serial.printf("[CONN] uploaded %s session %lu (%u bytes, chunked)\n",
+                  pe.patientId, (unsigned long)sessionNumber, (unsigned)wavLen);
   } else {
-    Serial.printf("[CONN] upload failed (HTTP %d)\n", code);
+    Serial.printf("[CONN] upload failed (HTTP %d, sent %u/%u)\n",
+                  code, (unsigned)sent, (unsigned)wavLen);
   }
   return ok;
 }
@@ -879,6 +948,15 @@ static void pollCommands()
   if (!httpJson("GET", path, nullptr, resp, sizeof(resp), nullptr)) return;
   JsonDocument doc;
   if (deserializeJson(doc, resp) != DeserializationError::Ok) return;
+  // The app can attach the patient the SLP typed for the next remote recording;
+  // stage it before running commands so a queued "record" tags the session to
+  // them.
+  JsonObject ap = doc["active_patient"].as<JsonObject>();
+  if (!ap.isNull()) {
+    sateHookSetActivePatient(ap["patient_id"] | "", ap["name"] | "",
+                             ap["age"] | "", ap["session_type"] | "",
+                             ap["clinician"] | "");
+  }
   for (JsonVariant v : doc["commands"].as<JsonArray>()) {
     runRemoteCommand(v.as<const char *>());
   }

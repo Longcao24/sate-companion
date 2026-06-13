@@ -82,10 +82,15 @@
 static const int      SERIAL_BAUD       = 115200;
 static const int      RECORD_SECONDS    = 30;
 static const int      REMOTE_RECORD_SECONDS = 8; // app/server-triggered captures
+// Recording runs until the SLP taps Stop. Both the capture loop and the upload
+// now feed the watchdog + service the GUI as they go, so length no longer
+// reboots or freezes the board; this is just a generous safety ceiling (30 min)
+// so a forgotten session can't fill the SD card.
+static const int      RECORD_MAX_SECONDS = 1800;
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "0.7.5";
+static const char    *FIRMWARE_VERSION  = "0.8.0";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -95,6 +100,7 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 
 static const uint32_t PCM_BYTES_PER_SEC = AUDIO_SAMPLE_RATE * (AUDIO_BIT_DEPTH / 8) * AUDIO_CHANNELS;
 static const uint32_t PCM_TOTAL_BYTES   = PCM_BYTES_PER_SEC * RECORD_SECONDS;
+static const uint32_t PCM_MAX_BYTES     = PCM_BYTES_PER_SEC * RECORD_MAX_SECONDS;
 
 // The ONLY audio working memory: one static 4 KB chunk, reused everywhere.
 static const size_t AUDIO_CHUNK_BYTES = 4096;
@@ -195,9 +201,46 @@ static volatile bool connPatientsReq = false;
 static volatile bool connStateReq    = false;
 static volatile bool connRecordReq   = false;
 
+// Patient the SLP typed in the app for the next remote recording, delivered in
+// the /commands poll. Staged here and applied by loop() (UI task) so we never
+// touch g_patients from the connLoop task.
+static volatile bool connActivePatientReq = false;
+static SatePatient   g_activePatientReq;
+
 void sateHookPatientsUpdated() { connPatientsReq = true; }
 void sateHookConnChanged()     { connStateReq = true; }
 void sateHookRecord()          { connRecordReq = true; }
+// sateHookGuiPump() is defined after the Display object below (it needs it).
+
+void sateHookSetActivePatient(const char *id, const char *name, const char *age,
+                              const char *sessionType, const char *clinician)
+{
+  if (!id || !id[0]) return;
+  SatePatient &p = g_activePatientReq;
+  snprintf(p.patientId,   sizeof(p.patientId),   "%s", id);
+  snprintf(p.displayName, sizeof(p.displayName), "%s", (name && name[0]) ? name : id);
+  snprintf(p.age,         sizeof(p.age),         "%s", (age && age[0]) ? age : "-");
+  snprintf(p.sessionType, sizeof(p.sessionType), "%s", (sessionType && sessionType[0]) ? sessionType : "-");
+  snprintf(p.clinician,   sizeof(p.clinician),   "%s", (clinician && clinician[0]) ? clinician : "-");
+  connActivePatientReq = true;
+}
+
+// Make the app-typed patient the current one: refresh in place if already on
+// the roster, otherwise append (or, if the small roster is full, replace the
+// current slot). Runs only from loop() (UI task).
+static void applyActivePatient()
+{
+  for (int i = 0; i < g_patientCount; i++) {
+    if (!strcmp(g_patients[i].patientId, g_activePatientReq.patientId)) {
+      g_patients[i] = g_activePatientReq;
+      currentPatientIndex = i;
+      return;
+    }
+  }
+  int idx = (g_patientCount < MAX_PATIENTS) ? g_patientCount++ : currentPatientIndex;
+  g_patients[idx] = g_activePatientReq;
+  currentPatientIndex = idx;
+}
 
 // The recorder is usable only once it has been claimed to a SATE account AND
 // has a real patient roster. Until then the user sees the onboarding screen
@@ -260,8 +303,11 @@ static void logHeap(const char *tag)
 static void runGui()
 {
   screen.routine();
-  delay(5);
+  delay(2); // short yield: keeps touch polling snappy without starving RTOS
 }
+
+// Service the GUI for one tick from inside long connectivity work (big upload).
+void sateHookGuiPump() { screen.routine(); }
 
 static void pumpGuiMs(unsigned long durationMs)
 {
@@ -340,6 +386,16 @@ static void actionEvent(lv_event_t *e)
   pendingArg    = (int)(packed >> 8);
 }
 
+// Set true by the Stop button while a recording is in progress. The capture
+// loop polls it directly (loop() is blocked inside the capture), so this can't
+// go through the normal pendingAction path.
+static volatile bool recordStopReq = false;
+
+static void recordStopEvent(lv_event_t *e)
+{
+  if (lv_event_get_code(e) == LV_EVENT_CLICKED) recordStopReq = true;
+}
+
 static lv_obj_t *makeActionButton(lv_obj_t *parent, const char *text,
                                   uint32_t bg, uint32_t fg,
                                   PendingAction act, int arg = 0)
@@ -350,6 +406,34 @@ static lv_obj_t *makeActionButton(lv_obj_t *parent, const char *text,
   lv_obj_add_event_cb(btn, actionEvent, LV_EVENT_CLICKED, (void *)packed);
   lv_obj_t *lbl = lv_label_create(btn);
   lv_label_set_text(lbl, text);
+  lv_obj_center(lbl);
+  return btn;
+}
+
+// The Home record control, drawn like a physical recorder's dial: a big red
+// circle with a white bezel ring and a soft red glow, "REC" in the middle.
+// Large hit target for the small touchscreen.
+static lv_obj_t *makeRecordButton()
+{
+  lv_obj_t *btn = lv_btn_create(lv_scr_act());
+  lv_obj_set_size(btn, 96, 96);
+  lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -56);
+  lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(btn, lv_color_hex(COL_REC), 0);
+  lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_color(btn, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_border_width(btn, 5, 0);
+  lv_obj_set_style_shadow_color(btn, lv_color_hex(COL_REC), 0);
+  lv_obj_set_style_shadow_width(btn, 24, 0);
+  lv_obj_set_style_shadow_opa(btn, LV_OPA_40, 0);
+  lv_obj_set_style_bg_color(btn, lv_color_hex(0xB91C1C), LV_STATE_PRESSED);
+  lv_obj_add_event_cb(btn, actionEvent, LV_EVENT_CLICKED,
+                      (void *)(intptr_t)ACT_RECORD);
+
+  lv_obj_t *lbl = lv_label_create(btn);
+  lv_label_set_text(lbl, "REC");
+  setFont(lbl, &lv_font_montserrat_20);
+  lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
   lv_obj_center(lbl);
   return btn;
 }
@@ -440,7 +524,8 @@ static void createHeader(const char *title, PendingAction backAction = ACT_NONE)
 // Progress overlay (record / playback): created on demand, deleted after.
 // -----------------------------------------------------------------------------
 
-static void showProgressOverlay(const char *caption, uint32_t arcColor)
+static void showProgressOverlay(const char *caption, uint32_t arcColor,
+                                bool withStop = false)
 {
   progressOverlay = lv_obj_create(lv_scr_act());
   lv_obj_set_size(progressOverlay, 240, 320);
@@ -475,6 +560,19 @@ static void showProgressOverlay(const char *caption, uint32_t arcColor)
   lv_label_set_text(progressSmall, caption);
   lv_obj_set_style_text_color(progressSmall, lv_color_hex(COL_TEXT_MUTED), 0);
   lv_obj_align(progressSmall, LV_ALIGN_CENTER, 0, -10);
+
+  // Big Stop button for open-ended recording: the SLP ends the take by tapping.
+  if (withStop) {
+    lv_obj_t *stopBtn = lv_btn_create(progressOverlay);
+    styleButton(stopBtn, COL_REC, 0xFFFFFF);
+    lv_obj_set_size(stopBtn, 168, 60);
+    lv_obj_align(stopBtn, LV_ALIGN_BOTTOM_MID, 0, -26);
+    lv_obj_add_event_cb(stopBtn, recordStopEvent, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lbl = lv_label_create(stopBtn);
+    lv_label_set_text(lbl, LV_SYMBOL_STOP "  Stop");
+    setFont(lbl, &lv_font_montserrat_20);
+    lv_obj_center(lbl);
+  }
 
   lv_obj_move_foreground(progressOverlay);
 }
@@ -882,11 +980,14 @@ static bool initAudio()
 // STREAMED recording: mic -> 4 KB chunk -> SD, live countdown ring.
 // -----------------------------------------------------------------------------
 
+// Records until the SLP taps Stop (or the safety cap pcmTotal is hit). The WAV
+// header is sized for the cap up front, then patched down to the real length.
 static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
-                                uint32_t pcmTotal = PCM_TOTAL_BYTES)
+                                uint32_t pcmTotal = PCM_MAX_BYTES)
 {
   *outPcmBytes = 0;
   currentState = RECORDING;
+  recordStopReq = false;
   setStatePill("REC", COL_REC_BG, COL_REC);
   logHeap("record start");
 
@@ -897,7 +998,7 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
   }
 
   writeWavHeader(file, pcmTotal);
-  showProgressOverlay("recording  -  speak clearly", COL_REC);
+  showProgressOverlay("recording  -  tap Stop when done", COL_REC, true /*Stop*/);
 
   // Drain stale I2S DMA samples so the recording starts clean.
   es8311_i2s.readBytes((char *)audioChunk, sizeof(audioChunk));
@@ -906,7 +1007,7 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
   uint32_t lastUiMs = 0;
   bool ok = true;
 
-  while (written < pcmTotal) {
+  while (written < pcmTotal && !recordStopReq) {
     size_t want = pcmTotal - written;
     if (want > AUDIO_CHUNK_BYTES) want = AUDIO_CHUNK_BYTES;
 
@@ -920,11 +1021,15 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
     uint32_t now = millis();
     if (now - lastUiMs >= 120) {
       lastUiMs = now;
-      uint32_t secLeft = (pcmTotal - written + PCM_BYTES_PER_SEC - 1) / PCM_BYTES_PER_SEC;
+      // Count UP elapsed seconds; the arc fills slowly toward the safety cap.
+      uint32_t elapsed = written / PCM_BYTES_PER_SEC;
       char big[8];
-      snprintf(big, sizeof(big), "%lu", (unsigned long)secLeft);
+      snprintf(big, sizeof(big), "%lu", (unsigned long)elapsed);
       updateProgress((uint16_t)((written * 1000ULL) / pcmTotal), big);
       lv_timer_handler();
+      // Yield to the scheduler so a multi-minute capture can't starve the idle
+      // task (and trip its watchdog) - this is what keeps long records stable.
+      delay(1);
     }
   }
 
@@ -1109,8 +1214,8 @@ static void showHomeScreen()
 
   // Patient card
   patientCard = lv_obj_create(lv_scr_act());
-  lv_obj_set_size(patientCard, 220, 118);
-  lv_obj_align(patientCard, LV_ALIGN_TOP_MID, 0, 48);
+  lv_obj_set_size(patientCard, 220, 92);
+  lv_obj_align(patientCard, LV_ALIGN_TOP_MID, 0, 40);
   stylePanel(patientCard);
   lv_obj_set_style_pad_all(patientCard, 12, 0);
 
@@ -1156,37 +1261,37 @@ static void showHomeScreen()
   lv_obj_set_width(statusLabel, 220);
   lv_label_set_long_mode(statusLabel, LV_LABEL_LONG_WRAP);
   lv_obj_set_style_text_align(statusLabel, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_align(statusLabel, LV_ALIGN_TOP_MID, 0, 172);
+  lv_obj_align(statusLabel, LV_ALIGN_TOP_MID, 0, 134);
 
   hintLabel = lv_label_create(lv_scr_act());
   lv_obj_set_style_text_color(hintLabel, lv_color_hex(COL_TEXT_MUTED), 0);
   lv_obj_set_width(hintLabel, 220);
   lv_label_set_long_mode(hintLabel, LV_LABEL_LONG_WRAP);
   lv_obj_set_style_text_align(hintLabel, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_align(hintLabel, LV_ALIGN_TOP_MID, 0, 193);
+  lv_obj_align(hintLabel, LV_ALIGN_TOP_MID, 0, 150);
 
-  // Buttons: 2 x 2 grid
-  lv_obj_t *btnRecord = makeActionButton(lv_scr_act(), LV_SYMBOL_AUDIO "  Record",
-                                         COL_PRIMARY, 0xFFFFFF, ACT_RECORD);
-  lv_obj_set_size(btnRecord, 104, 42);
-  lv_obj_align(btnRecord, LV_ALIGN_BOTTOM_LEFT, 12, -62);
+  // The record control: a real recorder-style big red circle with a white ring
+  // and a soft red glow. Tapping it starts a capture (runs until Stop).
+  lv_obj_t *btnRecord = makeRecordButton();
 
+  // Secondary actions: a row of big, easy-to-hit buttons beneath the dial.
   lv_obj_t *btnNext = makeActionButton(lv_scr_act(), "Next " LV_SYMBOL_RIGHT,
                                        COL_PRIMARY_BG, COL_PRIMARY_DK, ACT_NEXT_PATIENT);
-  lv_obj_set_size(btnNext, 104, 42);
-  lv_obj_align(btnNext, LV_ALIGN_BOTTOM_RIGHT, -12, -62);
+  lv_obj_set_size(btnNext, 70, 44);
+  lv_obj_align(btnNext, LV_ALIGN_BOTTOM_LEFT, 10, -8);
 
-  lv_obj_t *btnSessions = makeActionButton(lv_scr_act(), LV_SYMBOL_LIST "  Sessions",
+  lv_obj_t *btnSessions = makeActionButton(lv_scr_act(), LV_SYMBOL_LIST,
                                            COL_PRIMARY_BG, COL_PRIMARY_DK, ACT_OPEN_SESSIONS);
-  lv_obj_set_size(btnSessions, 104, 42);
-  lv_obj_align(btnSessions, LV_ALIGN_BOTTOM_LEFT, 12, -12);
+  lv_obj_set_size(btnSessions, 70, 44);
+  lv_obj_align(btnSessions, LV_ALIGN_BOTTOM_MID, 0, -8);
 
-  lv_obj_t *btnSync = makeActionButton(lv_scr_act(), LV_SYMBOL_UPLOAD "  Sync",
+  lv_obj_t *btnSync = makeActionButton(lv_scr_act(), LV_SYMBOL_UPLOAD,
                                        pending > 0 ? COL_OK : COL_PRIMARY_BG,
                                        pending > 0 ? 0xFFFFFF : COL_PRIMARY_DK,
                                        ACT_OPEN_SYNC);
-  lv_obj_set_size(btnSync, 104, 42);
-  lv_obj_align(btnSync, LV_ALIGN_BOTTOM_RIGHT, -12, -12);
+  lv_obj_set_size(btnSync, 70, 44);
+  lv_obj_align(btnSync, LV_ALIGN_BOTTOM_RIGHT, -10, -8);
+  (void)btnRecord;
 
   setStatePill("READY", COL_OK_BG, COL_OK);
 
@@ -1575,7 +1680,7 @@ static void showResultsScreen()
 // pcmTotal = capture size; remote (app/server) captures are shorter and skip
 //            the review playback since nobody is holding the unit.
 static void runRecordSavePlaySession(bool review = true,
-                                     uint32_t pcmTotal = PCM_TOTAL_BYTES)
+                                     uint32_t pcmTotal = PCM_MAX_BYTES)
 {
   char dir[96];
   patientDirPath(dir, sizeof(dir));
@@ -1773,6 +1878,14 @@ void loop()
         showHomeScreen();
       }
     }
+    // App-typed patient for the next remote recording: select it (adding to the
+    // roster if new) so the captured session is tagged to the right person.
+    if (connActivePatientReq && uiIdle) {
+      connActivePatientReq = false;
+      applyActivePatient();
+      if (currentState == HOME) showHomeScreen();
+      else if (currentState == ONBOARDING && deviceReady()) showHomeScreen();
+    }
     // Remote record (app/server "record" command). Only from Home, with the
     // recorder fully set up; the capture blocks ~8 s while it streams to SD,
     // then connNotifyNewSession() uploads it. liveState lets the app show
@@ -1781,11 +1894,14 @@ void loop()
       connRecordReq = false;
       if (currentState == HOME && deviceReady()) {
         connSetLiveState("recording");
-        runRecordSavePlaySession(false /*review*/,
-                                 (uint32_t)PCM_BYTES_PER_SEC * REMOTE_RECORD_SECONDS);
+        runRecordSavePlaySession(false /*review*/); // runs until Stop is tapped
         connSetLiveState("idle");
       }
     }
+
+    // Immediate GUI tick after any network/SD work so a screen rebuilt by the
+    // flag handlers above paints now instead of waiting a whole loop.
+    screen.routine();
   }
 
   PendingAction act = pendingAction;
