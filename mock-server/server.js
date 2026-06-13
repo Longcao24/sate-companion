@@ -183,7 +183,7 @@ function storeSession(meta, wav) {
 // card (Content-Type: audio/wav) with metadata in the query string. No base64,
 // so the device never has to hold the whole file (+1.34x) in RAM - which blew
 // past PSRAM on multi-minute recordings.
-app.post("/api/sessions/raw", express.raw({ type: () => true, limit: "40mb" }), (req, res) => {
+app.post("/api/sessions/raw", express.raw({ type: () => true, limit: "200mb" }), (req, res) => {
   const meta = {
     device_serial: req.query.device_serial || "unknown",
     patient_id: req.query.patient_id || "PT",
@@ -194,6 +194,53 @@ app.post("/api/sessions/raw", express.raw({ type: () => true, limit: "40mb" }), 
   const { id, stem } = storeSession(meta, wav);
   console.log(`session uploaded (raw) -> uploads/${stem}.wav (${wav.length} bytes)`);
   res.json({ id });
+});
+
+// Resumable chunked upload: the recorder sends the WAV in ~1 MB pieces, each
+// tagged with its byte offset, so a dropped connection only costs that piece
+// (retried at the same offset) instead of the whole multi-MB file. The server
+// appends in order; offset 0 (re)starts the file, and ?final=1 registers it.
+function registerExistingSession(meta, wavPath) {
+  const bytes = fs.existsSync(wavPath) ? fs.statSync(wavPath).size : 0;
+  const id = "s-" + (sessions.length + 1);
+  fs.writeFileSync(
+    wavPath.replace(/\.wav$/, ".json"),
+    JSON.stringify({ id, ...meta, bytes, at: new Date().toISOString() }, null, 2)
+  );
+  sessions.push({ id, ...meta, bytes, file: path.basename(wavPath), at: new Date().toISOString() });
+  persist();
+  return id;
+}
+
+app.post("/api/sessions/chunk", express.raw({ type: () => true, limit: "8mb" }), (req, res) => {
+  const meta = {
+    device_serial: req.query.device_serial || "unknown",
+    patient_id: req.query.patient_id || "PT",
+    session_number: Number(req.query.session_number || 0),
+    sample_rate: Number(req.query.sample_rate || 16000),
+  };
+  const offset = Number(req.query.offset || 0);
+  const isFinal = req.query.final === "1";
+  const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+
+  const stem = `${meta.device_serial}_${meta.patient_id}_session_${String(
+    meta.session_number
+  ).padStart(4, "0")}`;
+  const wavPath = path.join(UPLOAD_DIR, `${stem}.wav`);
+  const have = fs.existsSync(wavPath) ? fs.statSync(wavPath).size : 0;
+
+  if (offset === 0) fs.writeFileSync(wavPath, body);        // (re)start
+  else if (offset === have) fs.appendFileSync(wavPath, body); // next in order
+  else if (offset < have) { /* already have this piece - idempotent */ }
+  else return res.status(409).json({ error: "offset gap", expected: have });
+
+  if (isFinal) {
+    const id = registerExistingSession(meta, wavPath);
+    const sz = fs.statSync(wavPath).size;
+    console.log(`session uploaded (chunked) -> uploads/${stem}.wav (${sz} bytes)`);
+    return res.json({ id, done: true });
+  }
+  res.json({ ok: true, received: fs.statSync(wavPath).size });
 });
 
 // Session upload: the WAV is written to uploads/ as a real playable file

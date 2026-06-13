@@ -198,9 +198,17 @@ static void sessionPath(char *out, size_t n, const char *pid, uint32_t num, cons
   snprintf(out, n, "/sate/patients/%s/session_%04lu.%s", pid, (unsigned long)num, ext);
 }
 
-// Scan all patient dirs for WAVs without a .synced marker.
+// True when the pending set may have changed (new recording, a sync, a roster
+// change) and scanPending() must re-walk the SD card. While false, scanPending
+// returns the cached count instead of walking every patient dir - that walk was
+// running every 15 s heartbeat and was the periodic UI hitch.
+static bool pendDirty = true;
+
+// Scan all patient dirs for WAVs without a .synced marker. Cheap no-op when the
+// cached count is still valid.
 static int scanPending()
 {
+  if (!pendDirty) return pendCount;
   pendCount = 0;
   File root = SD_MMC.open("/sate/patients");
   if (!root) return 0;
@@ -228,6 +236,7 @@ static int scanPending()
     entry.close();
   }
   root.close();
+  pendDirty = false; // cache is now valid until the pending set changes again
   return pendCount;
 }
 
@@ -240,6 +249,7 @@ static void writeSyncMarker(const char *pid, uint32_t num)
     f.print("synced");
     f.close();
   }
+  pendDirty = true; // a session just synced - pending count changed
 }
 
 // =============================================================================
@@ -461,105 +471,51 @@ static bool httpJson(const char *method, const char *path, const char *body,
   return ok;
 }
 
-// Upload one pending session by STREAMING the WAV straight from the SD card to
-// the server (Content-Type: audio/wav, metadata in the query string). The old
-// path base64-encoded the whole file into PSRAM (file + 1.34x) - a multi-minute
-// recording blew past the 8 MB PSRAM and the upload failed. Streaming keeps
-// memory flat regardless of length.
-static bool uploadSession(const PendingEntry &pe)
+// POST one ~1 MB slice of the WAV at byte `offset` to /api/sessions/chunk. The
+// GUI is serviced between writes so the screen stays smooth; returns true on a
+// 2xx. The server appends in order (and is idempotent if a slice is re-sent), so
+// a dropped connection only costs this slice - retried at the same offset.
+static bool sendSessionChunk(const char *host, int port, const char *metaQuery,
+                             size_t offset, size_t len, bool isFinal, File &wf)
 {
-  char wavPath[160], jsonPath[160];
-  sessionPath(wavPath, sizeof(wavPath), pe.patientId, pe.num, "wav");
-  sessionPath(jsonPath, sizeof(jsonPath), pe.patientId, pe.num, "json");
-
-  if (WiFi.status() != WL_CONNECTED) return false;
-
-  File wf = SD_MMC.open(wavPath, FILE_READ);
-  if (!wf) return false;
-  size_t wavLen = wf.size();
-
-  // session_number / sample_rate from the metadata JSON (defaults if absent)
-  uint32_t sessionNumber = pe.num, sampleRate = 16000;
-  File jf = SD_MMC.open(jsonPath, FILE_READ);
-  if (jf) {
-    JsonDocument meta;
-    if (deserializeJson(meta, jf) == DeserializationError::Ok) {
-      sessionNumber = meta["session_number"] | pe.num;
-      sampleRate    = meta["sample_rate"] | 16000;
-    }
-    jf.close();
-  }
-
-  // Parse host:port and path out of cfgServer (e.g. "http://192.168.0.138:4000").
-  char host[80] = {0};
-  int  port = 80;
-  {
-    const char *h = strstr(cfgServer, "://");
-    h = h ? h + 3 : cfgServer;
-    size_t i = 0;
-    while (h[i] && h[i] != ':' && h[i] != '/' && i < sizeof(host) - 1) {
-      host[i] = h[i];
-      i++;
-    }
-    host[i] = '\0';
-    if (h[i] == ':') port = atoi(h + i + 1);
-  }
-
-  char path[224];
-  snprintf(path, sizeof(path),
-           "/api/sessions/raw?device_serial=%s&patient_id=%s"
-           "&session_number=%lu&sample_rate=%lu",
-           serialStr, pe.patientId,
-           (unsigned long)sessionNumber, (unsigned long)sampleRate);
-
-  // Manual chunked POST so we can service the GUI + feed the watchdog BETWEEN
-  // chunks. HTTPClient's one-shot stream upload blocks the loop task for the
-  // whole transfer, freezing the screen on a multi-MB file; this keeps the UI
-  // smooth no matter how long the recording is.
   WiFiClient client;
-  client.setTimeout(20000);
-  if (!client.connect(host, port)) { wf.close(); return false; }
+  client.setTimeout(15000);
+  if (!client.connect(host, port)) return false;
 
-  client.printf("POST %s HTTP/1.1\r\n", path);
+  client.printf("POST %s&offset=%u&final=%d HTTP/1.1\r\n",
+                metaQuery, (unsigned)offset, isFinal ? 1 : 0);
   client.printf("Host: %s:%d\r\n", host, port);
   if (cfgDeviceKey[0]) client.printf("Authorization: Bearer %s\r\n", cfgDeviceKey);
   client.print("Content-Type: audio/wav\r\n");
-  client.printf("Content-Length: %u\r\n", (unsigned)wavLen);
+  client.printf("Content-Length: %u\r\n", (unsigned)len);
   client.print("Connection: close\r\n\r\n");
+
+  if (!wf.seek(offset)) { client.stop(); return false; }
 
   static uint8_t upBuf[4096];
   size_t   sent = 0;
   uint32_t lastPump = millis();
-  bool     sendOk = true;
-  while (sent < wavLen) {
-    size_t want = wavLen - sent;
+  bool     ok = true;
+  while (sent < len) {
+    size_t want = len - sent;
     if (want > sizeof(upBuf)) want = sizeof(upBuf);
     size_t got = wf.read(upBuf, want);
-    if (got == 0) { sendOk = false; break; }
-
+    if (got == 0) { ok = false; break; }
     size_t w = 0;
     uint32_t t0 = millis();
     while (w < got) {
       int n = client.write(upBuf + w, got - w);
       if (n > 0) { w += n; t0 = millis(); }
-      else if (!client.connected() || millis() - t0 > 8000) { sendOk = false; break; }
+      else if (!client.connected() || millis() - t0 > 8000) { ok = false; break; }
       else { sateHookGuiPump(); delay(1); }
     }
-    if (!sendOk) break;
+    if (!ok) break;
     sent += got;
-
-    // ~30 ms cadence: paint a GUI frame (also yields the loop task) so the
-    // screen stays smooth while a multi-MB upload streams out.
-    if (millis() - lastPump >= 30) {
-      lastPump = millis();
-      sateHookGuiPump();
-    }
+    if (millis() - lastPump >= 30) { lastPump = millis(); sateHookGuiPump(); }
   }
-  wf.close();
 
-  // Read just the status line ("HTTP/1.1 200 OK").
   int code = 0;
-  if (sendOk) {
+  if (ok) {
     char line[80];
     size_t li = 0;
     uint32_t t0 = millis();
@@ -578,17 +534,97 @@ static bool uploadSession(const PendingEntry &pe)
     sscanf(line, "HTTP/1.%*d %d", &code);
   }
   client.stop();
+  return code >= 200 && code < 300;
+}
 
-  bool ok = code >= 200 && code < 300;
-  if (ok) {
-    writeSyncMarker(pe.patientId, pe.num);
-    Serial.printf("[CONN] uploaded %s session %lu (%u bytes, chunked)\n",
-                  pe.patientId, (unsigned long)sessionNumber, (unsigned)wavLen);
-  } else {
-    Serial.printf("[CONN] upload failed (HTTP %d, sent %u/%u)\n",
-                  code, (unsigned)sent, (unsigned)wavLen);
+// Upload one pending session in ~1 MB resumable chunks. A big single POST means
+// any wifi hiccup fails the whole multi-MB transfer; sending small slices (each
+// retried at its own offset) makes a long recording's upload far more robust.
+// Memory stays flat - slices stream straight from SD.
+static const size_t UPLOAD_CHUNK_BYTES = 1024 * 1024;
+
+// Cooperative upload: ONE ~1 MB slice is sent per connLoop pass, then control
+// returns to loop() so the GUI gets a full frame and command polling keeps
+// running. A big recording therefore uploads in the background without the
+// device feeling laggy. State persists across passes.
+static bool     upActive = false;
+static File     upFile;
+static size_t   upWavLen = 0, upOffset = 0;
+static int      upRetries = 0, upPort = 80;
+static char     upHost[80], upMetaQuery[224], upPid[24];
+static uint32_t upNum = 0, upStartMs = 0;
+
+static bool beginUpload(const PendingEntry &pe)
+{
+  if (WiFi.status() != WL_CONNECTED) return false;
+  char wavPath[160], jsonPath[160];
+  sessionPath(wavPath, sizeof(wavPath), pe.patientId, pe.num, "wav");
+  sessionPath(jsonPath, sizeof(jsonPath), pe.patientId, pe.num, "json");
+
+  upFile = SD_MMC.open(wavPath, FILE_READ);
+  if (!upFile) return false;
+  upWavLen = upFile.size();
+  if (upWavLen == 0) { upFile.close(); return false; }
+
+  uint32_t sessionNumber = pe.num, sampleRate = 16000;
+  File jf = SD_MMC.open(jsonPath, FILE_READ);
+  if (jf) {
+    JsonDocument meta;
+    if (deserializeJson(meta, jf) == DeserializationError::Ok) {
+      sessionNumber = meta["session_number"] | pe.num;
+      sampleRate    = meta["sample_rate"] | 16000;
+    }
+    jf.close();
   }
-  return ok;
+
+  // host:port from cfgServer (e.g. "http://192.168.0.138:4000")
+  const char *h = strstr(cfgServer, "://");
+  h = h ? h + 3 : cfgServer;
+  size_t i = 0;
+  while (h[i] && h[i] != ':' && h[i] != '/' && i < sizeof(upHost) - 1) { upHost[i] = h[i]; i++; }
+  upHost[i] = '\0';
+  upPort = (h[i] == ':') ? atoi(h + i + 1) : 80;
+
+  snprintf(upMetaQuery, sizeof(upMetaQuery),
+           "/api/sessions/chunk?device_serial=%s&patient_id=%s"
+           "&session_number=%lu&sample_rate=%lu",
+           serialStr, pe.patientId,
+           (unsigned long)sessionNumber, (unsigned long)sampleRate);
+  snprintf(upPid, sizeof(upPid), "%s", pe.patientId);
+  upNum = pe.num;
+  upOffset = 0;
+  upRetries = 0;
+  upActive = true;
+  upStartMs = millis();
+  setStatus("Uploading session to SATE...");
+  return true;
+}
+
+static void uploadStep()
+{
+  if (!upActive) return;
+  size_t len = upWavLen - upOffset;
+  if (len > UPLOAD_CHUNK_BYTES) len = UPLOAD_CHUNK_BYTES;
+  bool isFinal = (upOffset + len >= upWavLen);
+
+  if (sendSessionChunk(upHost, upPort, upMetaQuery, upOffset, len, isFinal, upFile)) {
+    upOffset += len;
+    upRetries = 0;
+    if (upOffset >= upWavLen) {
+      upFile.close();
+      upActive = false;
+      writeSyncMarker(upPid, upNum);
+      Serial.printf("[CONN] uploaded %s session %lu (%u bytes) in %lu ms\n",
+                    upPid, (unsigned long)upNum, (unsigned)upWavLen,
+                    (unsigned long)(millis() - upStartMs));
+      setStatus("Online (Wi-Fi) - %s", ipText);
+    }
+  } else if (++upRetries >= 8) {
+    upFile.close();
+    upActive = false; // give up for now; the sweep retries this session later
+    Serial.printf("[CONN] upload stalled at %u/%u, will retry\n",
+                  (unsigned)upOffset, (unsigned)upWavLen);
+  }
 }
 
 static void fetchPatients()
@@ -600,6 +636,7 @@ static void fetchPatients()
   if (f) {
     f.print(resp);
     f.close();
+    pendDirty = true; // roster changed - new patient dirs may hold sessions
     sateHookPatientsUpdated();
   }
 }
@@ -1080,15 +1117,16 @@ void connLoop()
         patientsFetchDue = false;
         fetchPatients();
       }
-      if (uploadSweepDue) {
-        // one session per loop pass keeps the UI responsive between files
+      if (upActive) {
+        // Send ONE slice this pass, then return to loop() - GUI + command poll
+        // keep running, so a big upload doesn't make the device feel laggy.
+        uploadStep();
+      } else if (uploadSweepDue) {
         scanPending();
         if (pendCount > 0) {
-          setStatus("Uploading session to SATE...");
-          uploadSession(pendTable[0]);
-          setStatus("Online (Wi-Fi) - %s", ipText);
+          if (!beginUpload(pendTable[0])) uploadSweepDue = false; // can't open; stop
         } else {
-          uploadSweepDue = false;
+          uploadSweepDue = false; // nothing left to send
         }
       }
       break;
@@ -1153,6 +1191,7 @@ void connSetLiveState(const char *s)
 
 void connNotifyNewSession()
 {
+  pendDirty = true; // a new recording was just saved
   if (mode == CONN_WIFI_ONLINE) uploadSweepDue = true;
   else if (bleInited && !bleClientConnected) {
     scanPending();

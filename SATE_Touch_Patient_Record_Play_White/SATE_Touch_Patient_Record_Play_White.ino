@@ -86,11 +86,11 @@ static const int      REMOTE_RECORD_SECONDS = 8; // app/server-triggered capture
 // now feed the watchdog + service the GUI as they go, so length no longer
 // reboots or freezes the board; this is just a generous safety ceiling (30 min)
 // so a forgotten session can't fill the SD card.
-static const int      RECORD_MAX_SECONDS = 1800;
+static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "0.8.2";
+static const char    *FIRMWARE_VERSION  = "0.8.6";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -983,6 +983,9 @@ static uint32_t mergeSessionParts(const char *finalWav, bool pumpUi)
   if (!out) return 0;
   writeWavHeader(out, total);
 
+  // Big copy buffer: 4 KB reads/writes made the stitch crawl (~30 s for 6 MB);
+  // 32 KB cuts the SD op count ~8x. Static so it stays off the loop-task stack.
+  static uint8_t mergeBuf[32768];
   uint32_t lastUiMs = 0;
   for (int k = 0;; k++) {
     sessionPartPath(pp, sizeof(pp), finalWav, k);
@@ -992,9 +995,9 @@ static uint32_t mergeSessionParts(const char *finalWav, bool pumpUi)
       if (in.size() > 44) {
         in.seek(44); // skip the part's WAV header, copy PCM only
         for (;;) {
-          size_t got = in.read(audioChunk, AUDIO_CHUNK_BYTES);
+          size_t got = in.read(mergeBuf, sizeof(mergeBuf));
           if (got == 0) break;
-          out.write(audioChunk, got);
+          out.write(mergeBuf, got);
           if (pumpUi) {
             uint32_t now = millis();
             if (now - lastUiMs >= 120) { lastUiMs = now; lv_timer_handler(); delay(1); }
@@ -1222,9 +1225,10 @@ static bool playWavStreamFromSd(const char *path, const char *caption)
   uint32_t sent = 0;
   uint32_t lastUiMs = 0;
 
-  showProgressOverlay(caption, COL_PRIMARY);
+  recordStopReq = false; // the overlay Stop button stops playback too
+  showProgressOverlay(caption, COL_PRIMARY, true /*Stop = back out of playback*/);
 
-  while (sent < pcmTotal) {
+  while (sent < pcmTotal && !recordStopReq) {
     size_t got = file.read(audioChunk, AUDIO_CHUNK_BYTES);
     if (got == 0) break;
 
@@ -1855,8 +1859,9 @@ static void runRecordSavePlaySession(bool review = true,
   saveMetadataToSd(jsonPath, wavPath, pcmBytes, durationSec, sessionNum);
   connNotifyNewSession(); // Wi-Fi mode uploads it; BLE mode updates the advert
 
-  // Quick review playback so the SLP can confirm the sample, then home.
-  if (review) playWavStreamFromSd(wavPath, "review playback");
+  // No auto-playback after recording - it was intrusive. The SLP plays a
+  // session on demand from the Sessions screen (where playback has a Stop).
+  (void)review;
 
   showHomeScreen();
   logHeap("session done");
