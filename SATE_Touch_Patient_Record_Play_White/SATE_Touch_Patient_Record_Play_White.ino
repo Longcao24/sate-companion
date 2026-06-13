@@ -90,7 +90,7 @@ static const int      RECORD_MAX_SECONDS = 1800;
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "0.8.0";
+static const char    *FIRMWARE_VERSION  = "0.8.2";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -101,6 +101,14 @@ SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 static const uint32_t PCM_BYTES_PER_SEC = AUDIO_SAMPLE_RATE * (AUDIO_BIT_DEPTH / 8) * AUDIO_CHANNELS;
 static const uint32_t PCM_TOTAL_BYTES   = PCM_BYTES_PER_SEC * RECORD_SECONDS;
 static const uint32_t PCM_MAX_BYTES     = PCM_BYTES_PER_SEC * RECORD_MAX_SECONDS;
+
+// A recording is written as a chain of 1-minute segment files
+// (session_NNNN.part00.wav, .part01.wav, ...) and merged into the final
+// session_NNNN.wav when it ends. Each finished minute is safely on the SD card,
+// so a crash/power-loss mid-session only loses the current minute - the rest is
+// recovered + merged on the next boot.
+static const int      SEGMENT_SECONDS   = 60;
+static const uint32_t PCM_SEGMENT_BYTES = PCM_BYTES_PER_SEC * SEGMENT_SECONDS;
 
 // The ONLY audio working memory: one static 4 KB chunk, reused everywhere.
 static const size_t AUDIO_CHUNK_BYTES = 4096;
@@ -820,6 +828,15 @@ static void sessionSyncMarkPath(char *out, size_t outSize, const char *dir, uint
   snprintf(out, outSize, "%s/session_%04lu.synced", dir, (unsigned long)n);
 }
 
+// Build the path of segment `part` for a final ".wav" path, e.g.
+// "session_0001.wav" + part 2 -> "session_0001.part02.wav".
+static void sessionPartPath(char *out, size_t outSize, const char *finalWav, int part)
+{
+  size_t len = strlen(finalWav);
+  if (len >= 4) len -= 4; // strip ".wav"
+  snprintf(out, outSize, "%.*s.part%02d.wav", (int)len, finalWav, part);
+}
+
 // Sessions are numbered contiguously from 1; first missing wav = next free.
 static uint32_t findNextSessionIndex(const char *dir)
 {
@@ -946,6 +963,91 @@ static void patchWavHeader(File &file, uint32_t pcmBytes)
   file.seek(40); file.write((uint8_t *)&pcmBytes, 4);
 }
 
+// Concatenate the PCM from all session_NNNN.partKK.wav segments into one final
+// session_NNNN.wav, then delete the parts. Returns the merged PCM byte count (0
+// on failure / no parts). When pumpUi is set, the GUI is serviced during the
+// copy so the screen stays responsive while a long session is stitched.
+static uint32_t mergeSessionParts(const char *finalWav, bool pumpUi)
+{
+  char pp[200];
+  uint32_t total = 0;
+  for (int k = 0;; k++) {
+    sessionPartPath(pp, sizeof(pp), finalWav, k);
+    if (!SD_MMC.exists(pp)) break;
+    File f = SD_MMC.open(pp, FILE_READ);
+    if (f) { uint32_t sz = f.size(); total += (sz > 44) ? (sz - 44) : 0; f.close(); }
+  }
+  if (total == 0) return 0;
+
+  File out = SD_MMC.open(finalWav, FILE_WRITE);
+  if (!out) return 0;
+  writeWavHeader(out, total);
+
+  uint32_t lastUiMs = 0;
+  for (int k = 0;; k++) {
+    sessionPartPath(pp, sizeof(pp), finalWav, k);
+    if (!SD_MMC.exists(pp)) break;
+    File in = SD_MMC.open(pp, FILE_READ);
+    if (in) {
+      if (in.size() > 44) {
+        in.seek(44); // skip the part's WAV header, copy PCM only
+        for (;;) {
+          size_t got = in.read(audioChunk, AUDIO_CHUNK_BYTES);
+          if (got == 0) break;
+          out.write(audioChunk, got);
+          if (pumpUi) {
+            uint32_t now = millis();
+            if (now - lastUiMs >= 120) { lastUiMs = now; lv_timer_handler(); delay(1); }
+          }
+        }
+      }
+      in.close();
+    }
+    SD_MMC.remove(pp);
+  }
+  out.flush();
+  out.close();
+  return total;
+}
+
+// On boot, look for sessions that have segment files but no final WAV (a crash
+// or power-loss during recording) and stitch what was captured into a normal
+// session, so it uploads like any other instead of being lost.
+static void recoverOrphanSegments()
+{
+  File root = SD_MMC.open("/sate/patients");
+  if (!root) return;
+  File entry;
+  char dir[120], finalWav[160], pp[200];
+  while ((entry = root.openNextFile())) {
+    if (!entry.isDirectory()) { entry.close(); continue; }
+    const char *full = entry.name();
+    const char *pid = strrchr(full, '/');
+    pid = pid ? pid + 1 : full;
+    snprintf(dir, sizeof(dir), "/sate/patients/%s", pid);
+    entry.close();
+    for (uint32_t n = 1; n <= 9999; n++) {
+      sessionWavPath(finalWav, sizeof(finalWav), dir, n);
+      sessionPartPath(pp, sizeof(pp), finalWav, 0);
+      bool hasPart0 = SD_MMC.exists(pp);
+      bool hasFinal = SD_MMC.exists(finalWav);
+      if (!hasPart0 && !hasFinal) break; // sessions are contiguous; done here
+      if (hasPart0 && !hasFinal) {
+        Serial.printf("[REC] recovering orphan segments: %s session %lu\n",
+                      pid, (unsigned long)n);
+        mergeSessionParts(finalWav, false); // build the final + delete parts
+      } else if (hasPart0 && hasFinal) {
+        for (int k = 0;; k++) { // stray parts beside a finished session: drop
+          sessionPartPath(pp, sizeof(pp), finalWav, k);
+          if (!SD_MMC.exists(pp)) break;
+          SD_MMC.remove(pp);
+        }
+      }
+    }
+  }
+  root.close();
+}
+
 // -----------------------------------------------------------------------------
 // Audio init
 // -----------------------------------------------------------------------------
@@ -991,19 +1093,24 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
   setStatePill("REC", COL_REC_BG, COL_REC);
   logHeap("record start");
 
-  File file = SD_MMC.open(wavPath, FILE_WRITE);
+  // Write into 1-minute segment files; each finished minute is flushed to SD so
+  // a crash only loses the current minute (the rest is recovered on next boot).
+  char partPath[200];
+  int  part = 0;
+  sessionPartPath(partPath, sizeof(partPath), wavPath, part);
+  File file = SD_MMC.open(partPath, FILE_WRITE);
   if (!file) {
     showStatus("Record failed", "Cannot create WAV on SD");
     return false;
   }
-
-  writeWavHeader(file, pcmTotal);
+  writeWavHeader(file, PCM_SEGMENT_BYTES);
   showProgressOverlay("recording  -  tap Stop when done", COL_REC, true /*Stop*/);
 
   // Drain stale I2S DMA samples so the recording starts clean.
   es8311_i2s.readBytes((char *)audioChunk, sizeof(audioChunk));
 
-  uint32_t written = 0;
+  uint32_t written = 0;      // total PCM across all segments
+  uint32_t partWritten = 0;  // PCM in the current segment
   uint32_t lastUiMs = 0;
   bool ok = true;
 
@@ -1017,6 +1124,20 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
     size_t put = file.write(audioChunk, got);
     if (put != got) { ok = false; break; }
     written += put;
+    partWritten += put;
+
+    // Roll to the next 1-minute segment.
+    if (partWritten >= PCM_SEGMENT_BYTES) {
+      patchWavHeader(file, partWritten);
+      file.flush();
+      file.close();
+      part++;
+      partWritten = 0;
+      sessionPartPath(partPath, sizeof(partPath), wavPath, part);
+      file = SD_MMC.open(partPath, FILE_WRITE);
+      if (!file) { ok = false; break; }
+      writeWavHeader(file, PCM_SEGMENT_BYTES);
+    }
 
     uint32_t now = millis();
     if (now - lastUiMs >= 120) {
@@ -1033,20 +1154,40 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
     }
   }
 
-  patchWavHeader(file, written);
-  file.flush();
-  file.close();
-
-  *outPcmBytes = written;
+  if (file) {
+    patchWavHeader(file, partWritten);
+    file.flush();
+    file.close();
+  }
   logHeap("record end");
 
   if (!ok || written == 0) {
     hideProgressOverlay();
     showStatus("Record failed", "I2S read or SD write error");
+    for (int k = 0; k <= part; k++) { // clean up partial segments
+      sessionPartPath(partPath, sizeof(partPath), wavPath, k);
+      SD_MMC.remove(partPath);
+    }
     return false;
   }
 
-  Serial.printf("Recording complete. PCM bytes: %lu\n", (unsigned long)written);
+  // Stitch the 1-minute segments into the final session WAV. Done WITHOUT
+  // servicing LVGL: rendering from this deep in the record->merge call chain
+  // overflows the loop-task stack and reboots. The merge is bounded SD I/O
+  // (and blocks on the card, which yields), so a static "Saving..." is fine.
+  hideProgressOverlay();
+  setStatePill("SAVE", COL_WARN_BG, COL_WARN);
+  showStatus("Saving session", "Merging segments...");
+  lv_timer_handler(); // paint the "Saving..." frame once, before the merge
+  uint32_t merged = mergeSessionParts(wavPath, false);
+  if (merged == 0) {
+    showStatus("Save failed", "Could not merge segments");
+    return false;
+  }
+
+  *outPcmBytes = merged;
+  Serial.printf("Recording complete. %d segment(s), %lu PCM bytes\n",
+                part + 1, (unsigned long)merged);
   return true;
 }
 
@@ -1815,6 +1956,7 @@ void setup()
     return;
   }
   loadPatientsFromSd();                   // server/app-pushed list, if any
+  recoverOrphanSegments();                // stitch any session left mid-record
 
   bootStepBegin(2);                       // audio codec (real init)
   bool audioOk = initAudio();
