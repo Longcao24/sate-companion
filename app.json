@@ -1,0 +1,39 @@
+{
+  "expo": {
+    "name": "SATE Companion",
+    "slug": "sate-companion",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "backgroundColor": "#FFFFFF",
+    "ios": {
+      "bundleIdentifier": "com.auspexmedix.satecompanion",
+      "infoPlist": {
+        "NSBluetoothAlwaysUsageDescription": "SATE Companion uses Bluetooth to set up your SATE Recorder and connect it to Wi-Fi.",
+        "NSLocalNetworkUsageDescription": "SATE Companion connects to your SATE Recorder and dev server on the local network.",
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true,
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "package": "com.auspexmedix.satecompanion",
+      "permissions": [
+        "android.permission.BLUETOOTH_SCAN",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.ACCESS_FINE_LOCATION"
+      ]
+    },
+    "plugins": [
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": false,
+          "bluetoothAlwaysPermission": "SATE Companion uses Bluetooth to set up your SATE Recorder."
+        }
+      ],
+      "expo-asset"
+    ]
+  }
+}
