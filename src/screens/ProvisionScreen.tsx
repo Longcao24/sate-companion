@@ -2,23 +2,37 @@ import React, { useEffect, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
+  KeyboardAvoidingView,
+  Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
-import { MockApi, SateApi } from "../api/sateApi";
+import { SateApi } from "../api/sateApi";
 import { FoundDevice, ProvisionProgress, SateLink } from "../ble/SateBle";
-import { Button, Card, Field, Muted, Pill, Title } from "../components/ui";
+import {
+  Button,
+  Card,
+  Field,
+  GlassBackground,
+  Muted,
+  Pill,
+  Title,
+} from "../components/ui";
 import { WifiNetwork } from "../protocol";
 import { useStore } from "../store";
-import { C } from "../theme";
+import { D } from "../theme";
 
-type Step = "scan" | "wifi" | "creds" | "provisioning" | "done" | "failed";
+// Flow: find the recorder over BLE -> the "creds" screen lets you EITHER tap a
+// nearby network (the board scans in the background) OR just type the SSID and
+// go. The SSID field + Send button are usable immediately, so you never have to
+// wait for the scan; tapping a scanned network simply fills the field for you.
+type Step = "scan" | "creds" | "provisioning" | "done" | "failed";
 
-// Multiple access points can share an SSID (e.g. mesh / band-steering), so the
-// recorder's scan returns the same name more than once. Keep the strongest one
-// so each network shows a single, stable row.
+// Mesh / band-steering APs advertise one SSID from several radios, so the
+// board's scan returns duplicates. Keep the strongest per name.
 function dedupeNetworks(nets: WifiNetwork[]): WifiNetwork[] {
   const best = new Map<string, WifiNetwork>();
   for (const n of nets) {
@@ -41,13 +55,11 @@ export function ProvisionScreen({
   const [step, setStep] = useState<Step>("scan");
   const [found, setFound] = useState<FoundDevice[]>([]);
   const [chosen, setChosen] = useState<FoundDevice | null>(null);
-  const [networks, setNetworks] = useState<WifiNetwork[]>([]);
-  const [scanning, setScanning] = useState(false);
-  const [scanFailed, setScanFailed] = useState(false);
-  const [manual, setManual] = useState(false);
   const [ssid, setSsid] = useState("");
   const [pass, setPass] = useState("");
   const [name, setName] = useState("Therapy Room");
+  const [networks, setNetworks] = useState<WifiNetwork[]>([]);
+  const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState<ProvisionProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -77,21 +89,14 @@ export function ProvisionScreen({
     };
   }, [step, link]);
 
-  // Ask the recorder to scan Wi-Fi. Never leaves the UI dead-ended: a thrown
-  // timeout or an empty result both land on the "no networks" state (Rescan +
-  // manual entry), and the BLE connection stays open so the user can retry
-  // without starting over.
+  // Board-side Wi-Fi scan. Runs in the background on the creds screen; the
+  // screen is fully usable (type + Send) whether or not this ever returns.
   const runWifiScan = async () => {
     setScanning(true);
-    setScanFailed(false);
-    setError(null);
     try {
-      const nets = dedupeNetworks(await link.scanWifi());
-      setNetworks(nets);
-      setScanFailed(nets.length === 0);
+      setNetworks(dedupeNetworks(await link.scanWifi()));
     } catch {
-      setNetworks([]);
-      setScanFailed(true);
+      /* leave the list empty - typing still works */
     } finally {
       setScanning(false);
     }
@@ -102,8 +107,8 @@ export function ProvisionScreen({
     setError(null);
     try {
       await link.connect(d.id);
-      setStep("wifi");
-      runWifiScan();
+      setStep("creds");
+      runWifiScan(); // populate the pick-list in the background
     } catch (e: any) {
       setError(e?.message ?? "Could not connect to the recorder");
       setStep("scan");
@@ -126,7 +131,7 @@ export function ProvisionScreen({
     try {
       const final = await link.provision(
         {
-          ssid,
+          ssid: ssid.trim(),
           pass,
           server: settings.serverUrl,
           claim_token: claimToken,
@@ -134,7 +139,8 @@ export function ProvisionScreen({
         setProgress
       );
       if (final.state === "registered") {
-        if (settings.demoMode) MockApi.addClaimed("SATE-7C3A09", name);
+        // The board registers itself with the server over Wi-Fi; it shows up in
+        // the fleet on the next GET /api/devices poll.
         setStep("done");
       } else {
         setError(final.msg ?? "Setup failed");
@@ -149,10 +155,19 @@ export function ProvisionScreen({
   };
 
   return (
-    <View style={s.wrap}>
+    <KeyboardAvoidingView
+      style={s.wrap}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
+    >
+      <GlassBackground />
       <View style={s.header}>
         <Title>Set up a recorder</Title>
-        <Pressable onPress={onClose}>
+        <Pressable
+          onPress={onClose}
+          hitSlop={10}
+          accessibilityRole="button"
+          style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}
+        >
           <Text style={s.close}>Close</Text>
         </Pressable>
       </View>
@@ -169,7 +184,11 @@ export function ProvisionScreen({
             keyExtractor={(d) => d.id}
             ListEmptyComponent={<Muted>Looking for recorders nearby...</Muted>}
             renderItem={({ item }) => (
-              <Pressable onPress={() => pickDevice(item)}>
+              <Pressable
+                onPress={() => pickDevice(item)}
+                accessibilityRole="button"
+                style={({ pressed }) => ({ opacity: pressed ? 0.85 : 1 })}
+              >
                 <Card>
                   <View style={s.row}>
                     <Text style={s.devName}>{item.name}</Text>
@@ -183,103 +202,81 @@ export function ProvisionScreen({
         </>
       )}
 
-      {step === "wifi" && manual && (
-        <Card>
-          <Muted style={{ marginBottom: 10 }}>
-            Type the exact Wi-Fi network name (case-sensitive):
-          </Muted>
-          <Field
-            label="Network name (SSID)"
-            value={ssid}
-            onChangeText={setSsid}
-            autoCapitalize="none"
-          />
-          <Button
-            title="Next"
-            onPress={() => ssid.trim() && setStep("creds")}
-          />
-          <Pressable onPress={() => setManual(false)}>
-            <Text style={[s.link, { marginTop: 12 }]}>
-              Back to scanned networks
-            </Text>
-          </Pressable>
-        </Card>
-      )}
+      {step === "creds" && (
+        <ScrollView keyboardShouldPersistTaps="handled">
+          <Card>
+            <Muted style={{ marginBottom: 8, color: D.amber }}>
+              2.4 GHz Wi-Fi only (not 5 GHz). Tap a network below, or type the
+              name - it is case-sensitive.
+            </Muted>
 
-      {step === "wifi" && !manual && (
-        <>
-          <Muted style={{ marginBottom: 10 }}>
-            Pick the Wi-Fi network the recorder should use:
-          </Muted>
-
-          {scanning ? (
-            <View style={s.center}>
-              <ActivityIndicator color={C.sky} />
-              <Muted style={{ marginTop: 10 }}>
-                Recorder is scanning Wi-Fi...
-              </Muted>
-            </View>
-          ) : networks.length === 0 ? (
-            <View style={s.center}>
-              <Muted style={{ textAlign: "center" }}>
-                {scanFailed
-                  ? "No networks found. The recorder only sees 2.4 GHz Wi-Fi. Move it closer to the router and rescan, or enter the network by hand."
-                  : "No networks yet."}
-              </Muted>
-              <Button title="Rescan" onPress={runWifiScan} />
-            </View>
-          ) : (
-            <FlatList
-              data={networks}
-              keyExtractor={(n, i) => `${n.ssid}-${i}`}
-              renderItem={({ item }) => (
+            <View style={s.netHead}>
+              <Muted>Nearby networks</Muted>
+              {scanning ? (
+                <ActivityIndicator color={D.sky} size="small" />
+              ) : (
                 <Pressable
-                  onPress={() => {
-                    setSsid(item.ssid);
-                    setStep("creds");
-                  }}
+                  onPress={runWifiScan}
+                  hitSlop={10}
+                  accessibilityRole="button"
+                  style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}
                 >
-                  <Card>
-                    <View style={s.row}>
-                      <Text style={s.devName}>{item.ssid}</Text>
-                      <Muted>{item.rssi} dBm</Muted>
-                    </View>
-                  </Card>
+                  <Text style={s.link}>Rescan</Text>
                 </Pressable>
               )}
-              ListFooterComponent={
-                <Pressable onPress={runWifiScan} disabled={scanning}>
-                  <Text style={[s.link, { marginTop: 14 }]}>Rescan</Text>
-                </Pressable>
-              }
+            </View>
+            {networks.length > 0 && (
+              <View style={s.netList}>
+                {networks.map((n, i) => {
+                  const active = n.ssid === ssid;
+                  return (
+                    <Pressable
+                      key={`${n.ssid}-${i}`}
+                      onPress={() => setSsid(n.ssid)}
+                      accessibilityRole="button"
+                      style={[s.netRow, active && s.netRowActive]}
+                    >
+                      <Text style={[s.netName, active && { color: D.sky }]}>
+                        {n.ssid}
+                      </Text>
+                      <Muted>{n.rssi} dBm</Muted>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            )}
+            {!scanning && networks.length === 0 && (
+              <Muted style={{ marginBottom: 10 }}>
+                None found yet - just type the name below.
+              </Muted>
+            )}
+
+            <Field
+              label="Network name (SSID)"
+              value={ssid}
+              onChangeText={setSsid}
+              autoCapitalize="none"
+              placeholder="e.g. Clinic-2.4G"
             />
-          )}
-
-          <Pressable onPress={() => setManual(true)}>
-            <Text style={[s.link, { marginTop: 16 }]}>
-              Network not listed? Enter it manually
-            </Text>
-          </Pressable>
-        </>
-      )}
-
-      {step === "creds" && (
-        <Card>
-          <Muted style={{ marginBottom: 10 }}>Network: {ssid}</Muted>
-          <Field
-            label="Wi-Fi password"
-            value={pass}
-            onChangeText={setPass}
-            secure
-          />
-          <Field
-            label="Recorder name"
-            value={name}
-            onChangeText={setName}
-            autoCapitalize="sentences"
-          />
-          <Button title="Connect recorder" onPress={startProvision} />
-        </Card>
+            <Field
+              label="Wi-Fi password"
+              value={pass}
+              onChangeText={setPass}
+              secure
+            />
+            <Field
+              label="Recorder name"
+              value={name}
+              onChangeText={setName}
+              autoCapitalize="sentences"
+            />
+            <Button
+              title="Send to recorder"
+              onPress={startProvision}
+              disabled={!ssid.trim()}
+            />
+          </Card>
+        </ScrollView>
       )}
 
       {step === "provisioning" && (
@@ -322,41 +319,70 @@ export function ProvisionScreen({
           <Muted style={{ marginTop: 8 }}>
             {error ?? "Something went wrong. Please try again."}
           </Muted>
-          <Button title="Try again" onPress={() => setStep("scan")} />
+          <Button title="Try Wi-Fi again" onPress={() => setStep("creds")} />
+          <Pressable
+            onPress={() => setStep("scan")}
+            hitSlop={10}
+            accessibilityRole="button"
+            style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}
+          >
+            <Text style={[s.link, { marginTop: 12 }]}>
+              Start over (find recorder)
+            </Text>
+          </Pressable>
         </Card>
       )}
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
 function StepLine({ done, label }: { done: boolean; label: string }) {
   return (
     <View style={s.stepLine}>
-      <Text style={{ color: done ? C.green : C.slate, width: 22, fontSize: 15 }}>
-        {done ? "\u2713" : "\u25CB"}
+      <Text style={{ color: done ? D.green : D.sub, width: 22, fontSize: 15 }}>
+        {done ? "✓" : "○"}
       </Text>
-      <Text style={{ color: done ? C.ink : C.slate, fontSize: 14 }}>{label}</Text>
+      <Text style={{ color: done ? D.ink : D.sub, fontSize: 14 }}>{label}</Text>
     </View>
   );
 }
 
 const s = StyleSheet.create({
-  wrap: { flex: 1, backgroundColor: C.bg, padding: 16, paddingTop: 56 },
+  wrap: { flex: 1, backgroundColor: D.bg, padding: 16, paddingTop: 56 },
   header: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
     marginBottom: 12,
   },
-  close: { color: C.sky, fontSize: 14, fontWeight: "600" },
+  close: { color: D.sky, fontSize: 14, fontWeight: "600" },
   row: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
   },
-  devName: { fontSize: 16, fontWeight: "700", color: C.ink },
-  error: { color: C.red, marginBottom: 8 },
-  center: { alignItems: "center", paddingVertical: 24 },
-  link: { color: C.sky, fontSize: 14, fontWeight: "600", textAlign: "center" },
+  devName: { fontSize: 16, fontWeight: "700", color: D.ink },
+  error: { color: D.red, marginBottom: 8 },
+  link: { color: D.sky, fontSize: 14, fontWeight: "600", textAlign: "center" },
   stepLine: { flexDirection: "row", alignItems: "center", marginVertical: 6 },
+  netHead: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 6,
+  },
+  netList: { marginBottom: 12 },
+  netRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 9,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: D.line,
+    marginBottom: 6,
+  },
+  netRowActive: { borderColor: D.sky, backgroundColor: D.skyBg },
+  netName: { fontSize: 15, fontWeight: "600", color: D.ink },
 });

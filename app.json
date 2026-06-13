@@ -33,7 +33,8 @@
           "bluetoothAlwaysPermission": "SATE Companion uses Bluetooth to set up your SATE Recorder."
         }
       ],
-      "expo-asset"
+      "expo-asset",
+      "expo-audio"
     ]
   }
 }

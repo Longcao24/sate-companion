@@ -85,6 +85,7 @@ app.post("/api/devices/register", (req, res) => {
   devices.push({
     id, name: serial, serial, fw, online: true,
     ip: req.ip, last_seen: new Date().toISOString(), pending_sessions: 0,
+    state: "idle",                       // live activity (idle/recording/uploading)
     slp: slp.name, slp_id: slp.id,       // auto-assigned to the SLP
   });
   commands[id] = [];
@@ -99,6 +100,7 @@ app.get("/api/devices/:id/commands", (req, res) => {
   d.online = true;
   d.last_seen = new Date().toISOString();
   if (req.query.pending !== undefined) d.pending_sessions = Number(req.query.pending);
+  if (req.query.state !== undefined) d.state = String(req.query.state); // live activity
   res.json({ commands: (commands[d.id] || []).splice(0) });
 });
 
@@ -158,13 +160,30 @@ app.post("/api/sessions", (req, res) => {
   res.json({ id });
 });
 
-// Inspection helper: list everything that has been uploaded.
-app.get("/api/sessions", (_q, res) => res.json(sessions));
+// Stream a session's WAV so the app can play it back. Auth still applies (the
+// global auth middleware accepts the app token or a device key).
+app.get("/api/sessions/:id/audio", (req, res) => {
+  const s = sessions.find((x) => x.id === req.params.id);
+  if (!s || !s.file) return res.status(404).json({ error: "not found" });
+  const wavPath = path.join(UPLOAD_DIR, s.file);
+  if (!fs.existsSync(wavPath)) return res.status(404).json({ error: "file gone" });
+  res.setHeader("Content-Type", "audio/wav");
+  res.sendFile(wavPath);
+});
+
+// List uploaded sessions, newest first. ?device=<serial> filters to one unit.
+app.get("/api/sessions", (req, res) => {
+  const serial = req.query.device;
+  const list = serial ? sessions.filter((s) => s.device_serial === serial) : sessions;
+  res.json([...list].reverse());
+});
 
 // mark devices offline if silent > 45 s
 setInterval(() => {
   const cutoff = Date.now() - 45000;
-  devices.forEach((d) => { if (Date.parse(d.last_seen) < cutoff) d.online = false; });
+  devices.forEach((d) => {
+    if (Date.parse(d.last_seen) < cutoff) { d.online = false; d.state = "idle"; }
+  });
 }, 10000);
 
 app.listen(4000, () => console.log("SATE mock server on :4000  (token: dev-token)"));

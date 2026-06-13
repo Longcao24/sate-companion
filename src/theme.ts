@@ -19,3 +19,35 @@ export const C = {
 };
 
 export const radius = { card: 14, button: 12, pill: 11, chip: 8 };
+
+// Dark "device dashboard" palette (Bambu-style) - used by the Device detail
+// screen so a single recorder reads like a premium connected-hardware console.
+export const D = {
+  bg: "#0B0E13", // app background, near-black
+  hero: "#10141B", // hero panel base
+  panel: "#15191F", // card surface
+  tile: "#1C212A", // elevated tile / control
+  line: "#262C36", // hairline borders
+  ink: "#F3F4F6", // primary text
+  sub: "#9AA3AF", // secondary text
+  faint: "#6B7280", // tertiary text
+  sky: "#3B9EFF",
+  green: "#22C55E",
+  greenBg: "rgba(34,197,94,0.14)",
+  red: "#EF4444",
+  redBg: "rgba(239,68,68,0.15)",
+  amber: "#F59E0B",
+  amberBg: "rgba(245,158,11,0.15)",
+  skyBg: "rgba(59,158,255,0.15)", // info tint / sky-filled surfaces
+  chip: "rgba(8,11,16,0.78)", // floating chip over hero
+
+  // --- Apple "Liquid Glass" material tokens ---
+  // Frosted panels are a BlurView + a faint white fill + a specular top edge,
+  // floated over a dark base seeded with soft color blobs so the blur has
+  // something to refract (that color pickup is what reads as "liquid glass").
+  glass: "rgba(255,255,255,0.06)", // fill laid over the blur
+  glassStrong: "rgba(255,255,255,0.10)", // raised tiles / pressed
+  glassBorder: "rgba(255,255,255,0.12)", // hairline edge
+  glassEdge: "rgba(255,255,255,0.22)", // brighter specular top edge
+  violet: "#7C5CFF", // ambient blob accent
+};

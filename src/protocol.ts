@@ -100,15 +100,35 @@ export interface ManagedDevice {
   ip?: string;
   last_seen: string; // ISO timestamp
   pending_sessions: number;
+  state?: DeviceLiveState; // live activity, reported in the recorder's heartbeat
   slp?: string; // clinician the recorder is assigned to (set at registration)
   slp_id?: string;
 }
 
-export type RemoteCommand = "sync_now" | "reload_patients" | "identify" | "reboot";
+// Live activity the recorder reports in its heartbeat so the app can show what
+// it is doing right now (default "idle" when nothing else is going on).
+export type DeviceLiveState = "idle" | "recording" | "uploading";
+
+// A session the recorder uploaded to the server (GET /api/sessions).
+export interface UploadedSession {
+  id: string;
+  device_serial: string;
+  patient_id: string;
+  session_number: number;
+  sample_rate?: number;
+  bytes: number;
+  at: string; // ISO timestamp the server stored it
+}
+
+export type RemoteCommand =
+  | "sync_now"
+  | "reload_patients"
+  | "reboot"
+  | "record"; // start a recording now + upload it (device must be online)
 
 // Commands the app can also deliver directly over BLE when the recorder
 // has no Wi-Fi (subset of RemoteCommand that makes sense point-to-point).
-export type BleCommand = "identify" | "reboot";
+export type BleCommand = "reboot";
 
 export interface User {
   id: string;

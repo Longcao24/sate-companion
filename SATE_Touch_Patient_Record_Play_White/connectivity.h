@@ -36,7 +36,16 @@ const char *connStatusText();        // e.g. "Connecting to Wi-Fi \"Clinic\"..."
 const char *connIp();                // "" when not connected
 bool        connSetupActive();       // app connected over BLE / provisioning
 
+// Report what the recorder is doing right now ("idle" / "recording" /
+// "uploading"). Pushed to the server in the heartbeat so the app can show it;
+// when online it also forces an immediate heartbeat so the change is instant.
+void        connSetLiveState(const char *state);
+
+// Wipe stored Wi-Fi + account config and reboot, so the recorder comes back up
+// unprovisioned (back to first-time setup). Triggered by holding BOOT 5 s.
+void        connFactoryReset();
+
 // UI hooks implemented by the .ino — invoked from loop() context only.
-extern void sateHookIdentify();        // beep + flash
 extern void sateHookPatientsUpdated(); // /sate/patients.json was rewritten
 extern void sateHookConnChanged();     // mode or pending count changed
+extern void sateHookRecord();          // app/server asked for a remote recording

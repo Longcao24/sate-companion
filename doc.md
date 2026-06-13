@@ -121,6 +121,22 @@ cd mock-server && node server.js       # listens on :4000, token "dev-token"
   Added a **60 s guard** so a mid-setup BLE drop can't freeze the provisioning
   screen (firmware worst case ≈ 28 s connect + retry + 8 s register).
 
+### 3.7 Remote record + live status (full demo)
+End-to-end "tap a button → recorder captures + uploads → app watches it land":
+- `src/protocol.ts`: `RemoteCommand` gained `"record"`; `ManagedDevice` gained
+  `state` (`idle` | `recording` | `uploading`); new `UploadedSession` type for
+  `GET /api/sessions`.
+- `src/api/sateApi.ts`: `listUploads(serial?)` on the interface + `HttpApi`.
+  `MockApi` simulates the whole loop (`simulateRecord`: device → `recording` →
+  `uploading` → a new session appears) so the demo runs **with no hardware**
+  (Demo mode). `MockApi.uploadSession` now also records the bridge-synced file.
+- `src/screens/DeviceDetailScreen.tsx`: now polls the server every 4 s for a
+  **live** view of this recorder + its uploads. Added a **Record a session
+  now** button (online-only; goes out as the `record` remote command), a status
+  pill that flips to **RECORDING / UPLOADING**, and a **Recent recordings**
+  card listing the last 5 uploads (patient, session #, duration, "uploaded …").
+  Wrapped in a `ScrollView` (six cards now).
+
 ---
 
 ## 4. Firmware changes (`SATE_Touch_Patient_Record_Play_White/`)
@@ -204,6 +220,20 @@ BLE until the app disconnects, then `enterWifiOnline()` takes over.
 - A separate live **Connection** screen (tap the header Bluetooth/Wi-Fi icon)
   shows mode, serial, IP, pending count, setup state.
 
+### 4.8 Remote record command (`record`) — **firmware 0.7.0**
+- `connectivity.cpp`: the Wi-Fi command poll now handles `record` →
+  `sateHookRecord()`. New `connSetLiveState("recording"|"idle")` is reported to
+  the server in the heartbeat (`&state=…`) and, when online, forces an immediate
+  heartbeat so the app sees the change without waiting the 15 s cycle.
+- Sketch: new `connRecordReq` flag (set by the hook) is consumed in `loop()`
+  only when the UI is idle on **Home** and `deviceReady()`. It records via
+  `runRecordSavePlaySession(review=false, …)` — a new shorter
+  `REMOTE_RECORD_SECONDS` (8 s) capture that **skips the review playback**
+  (nobody is holding the unit) and auto-uploads through the normal
+  `connNotifyNewSession()` sweep. `recordWavStreamToSd` / the record flow are
+  now parameterized by capture size; the on-device 30 s tap path is unchanged.
+- Builds at **50 % flash / 28 % RAM**.
+
 ---
 
 ## 5. Dev server (`mock-server/`)
@@ -218,6 +248,10 @@ BLE until the app disconnects, then `enterWifiOnline()` takes over.
   `POST /api/devices/claim-token`, `POST /api/devices/register`,
   `GET/POST /api/devices/:id/commands`, `GET/PUT /api/patients`,
   `POST/GET /api/sessions`.
+- Heartbeat `GET /api/devices/:id/commands` now also reads `&state=` and stores
+  it on the device (surfaced as `ManagedDevice.state`); the offline sweep resets
+  it to `idle`. `GET /api/sessions?device=<serial>` filters to one recorder and
+  returns newest-first. A queued `record` op rides the existing command queue.
 - `PUT /api/patients` sets the clinic's real roster (the recorder picks it up on
   reconnect / `reload_patients`).
 - `e2e-test.js`: 22 protocol tests, all passing; writes real WAVs to `uploads/`.

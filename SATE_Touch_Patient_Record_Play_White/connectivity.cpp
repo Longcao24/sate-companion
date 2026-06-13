@@ -43,7 +43,11 @@ static const uint32_t WIFI_BOOT_TIMEOUT_MS  = 18000;
 static const uint32_t WIFI_PROV_TIMEOUT_MS  = 28000;
 static const uint32_t WIFI_PROV_RETRY_MS    = 11000;   // re-begin once if stalled
 static const uint32_t WIFI_RETRY_PERIOD_MS  = 90000;
-static const uint32_t HEARTBEAT_PERIOD_MS   = 15000;
+// Command poll is FAST so app->device commands (record / sync) feel
+// near-instant. The heavy pending-scan (walks the SD) stays slow and reports a
+// cached count, so the fast poll adds only a tiny HTTP GET each time.
+static const uint32_t CMD_POLL_PERIOD_MS    = 3000;
+static const uint32_t HEARTBEAT_PERIOD_MS   = 15000;  // pending-scan cadence
 static const uint32_t ADV_REFRESH_PERIOD_MS = 30000;
 
 // ---- state -------------------------------------------------------------------
@@ -62,7 +66,8 @@ static Preferences prefs;
 
 static uint32_t wifiDeadline   = 0;
 static uint32_t nextWifiRetry  = 0;
-static uint32_t nextHeartbeat  = 0;
+static uint32_t nextHeartbeat  = 0;   // next full pending-scan
+static uint32_t nextCmdPoll    = 0;   // next fast command poll
 static uint32_t nextAdvRefresh = 0;
 static bool     uploadSweepDue = false;
 static bool     patientsFetchDue = false;
@@ -120,6 +125,9 @@ static uint8_t ioChunk[4096]; // connectivity's own SD/BLE work buffer
 // Live status line for the on-device Connection screen.
 static char statusText[72] = "Starting...";
 static char ipText[20] = "";
+
+// Live activity reported to the server in the heartbeat (idle/recording/uploading).
+static char liveState[16] = "idle";
 
 static void setStatus(const char *fmt, ...)
 {
@@ -516,7 +524,8 @@ static bool uploadSession(const PendingEntry &pe)
 
 static void fetchPatients()
 {
-  char resp[2048];
+  // static: keeps 2 KB off the shared loop-task stack (connLoop is single-threaded).
+  static char resp[2048];
   if (!httpJson("GET", "/api/patients", nullptr, resp, sizeof(resp), nullptr)) return;
   File f = SD_MMC.open("/sate/patients.json", FILE_WRITE);
   if (f) {
@@ -554,7 +563,8 @@ static void enterWifiOnline()
 {
   mode = CONN_WIFI_ONLINE;
   bleStop(); // Wi-Fi mode does not advertise; frees NimBLE RAM
-  nextHeartbeat = 0;       // heartbeat immediately
+  nextHeartbeat = 0;       // scan pending immediately
+  nextCmdPoll = 0;         // and poll commands immediately
   uploadSweepDue = true;   // push pending sessions right away
   patientsFetchDue = true; // pull the latest patient list
   snprintf(ipText, sizeof(ipText), "%s", WiFi.localIP().toString().c_str());
@@ -831,10 +841,6 @@ static void handleBleOp(const char *json)
       statusErr("set_patients", "bad payload");
     }
 
-  } else if (!strcmp(op, "identify")) {
-    statusOk("identify");
-    sateHookIdentify();
-
   } else if (!strcmp(op, "reboot")) {
     statusOk("reboot");
     rebootRequested = true;
@@ -853,19 +859,23 @@ static void runRemoteCommand(const char *op)
     uploadSweepDue = true;
   } else if (!strcmp(op, "reload_patients")) {
     fetchPatients();
-  } else if (!strcmp(op, "identify")) {
-    sateHookIdentify();
+  } else if (!strcmp(op, "record")) {
+    sateHookRecord();        // loop() runs the capture when the UI is idle
   } else if (!strcmp(op, "reboot")) {
     rebootRequested = true;
     rebootAtMs = millis() + 300;
   }
 }
 
-static void heartbeat()
+// Fast path: report pending(cached)+state and run any queued commands. No SD
+// access, so it is cheap enough to run every few seconds for snappy control.
+static void pollCommands()
 {
-  scanPending();
-  char path[128], resp[1024];
-  snprintf(path, sizeof(path), "/api/devices/%s/commands?pending=%d", cfgDeviceId, pendCount);
+  // static resp: keeps 1 KB off the loop-task stack (single-threaded connLoop).
+  char path[160];
+  static char resp[1024];
+  snprintf(path, sizeof(path), "/api/devices/%s/commands?pending=%d&state=%s",
+           cfgDeviceId, pendCount, liveState);
   if (!httpJson("GET", path, nullptr, resp, sizeof(resp), nullptr)) return;
   JsonDocument doc;
   if (deserializeJson(doc, resp) != DeserializationError::Ok) return;
@@ -980,9 +990,13 @@ void connLoop()
         enterBleMode();
         break;
       }
+      if (now > nextCmdPoll) {
+        nextCmdPoll = now + CMD_POLL_PERIOD_MS;
+        pollCommands();          // fast: pick up app commands within ~3 s
+      }
       if (now > nextHeartbeat) {
         nextHeartbeat = now + HEARTBEAT_PERIOD_MS;
-        heartbeat();
+        scanPending();           // slow: refresh the cached pending count
       }
       if (patientsFetchDue) {
         patientsFetchDue = false;
@@ -1040,6 +1054,24 @@ uint32_t connPendingTotal()
 const char *connStatusText() { return statusText; }
 const char *connIp() { return ipText; }
 bool connSetupActive() { return bleClientConnected || provState != PROV_IDLE; }
+
+void connFactoryReset()
+{
+  Serial.println("[CONN] FACTORY RESET - clearing config, rebooting");
+  prefs.begin("sate", false);
+  prefs.clear();              // drop ssid/pass/server/dev_id/dev_key
+  prefs.end();
+  delay(150);
+  ESP.restart();              // comes back unprovisioned -> setup screen
+}
+
+void connSetLiveState(const char *s)
+{
+  snprintf(liveState, sizeof(liveState), "%s", s ? s : "idle");
+  // Push it right away when online so the app sees the change instantly.
+  // (pollCommands() no-ops if Wi-Fi is down.)
+  if (mode == CONN_WIFI_ONLINE) pollCommands();
+}
 
 void connNotifyNewSession()
 {

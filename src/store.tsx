@@ -12,15 +12,15 @@ export interface Settings {
   serverUrl: string;
   token: string | null;
   user: User | null;
-  demoMode: boolean;
   autoSync: boolean;
 }
 
 const DEFAULTS: Settings = {
-  serverUrl: "https://api.sate.example.com",
+  // Real SATE server. In dev this is the mock-server on the Mac's LAN IP - the
+  // board hits the SAME URL over Wi-Fi to register, so it can't be localhost.
+  serverUrl: "http://192.168.0.138:4000",
   token: null,
   user: null,
-  demoMode: true, // ships demo-first so the app works before backend/hardware
   autoSync: true,
 };
 
@@ -32,7 +32,8 @@ interface Store {
 }
 
 const Ctx = createContext<Store | null>(null);
-const KEY = "sate-companion-settings";
+// v2: dropped demo mode; bump invalidates any stale demo token / server URL.
+const KEY = "sate-companion-settings-v2";
 
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<Settings>(DEFAULTS);

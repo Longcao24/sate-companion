@@ -8,10 +8,18 @@ import {
   View,
 } from "react-native";
 import { SateApi } from "../api/sateApi";
-import { Button, Card, Muted, Pill, ProgressBar, Title } from "../components/ui";
+import {
+  Button,
+  Card,
+  GlassBackground,
+  Muted,
+  Pill,
+  ProgressBar,
+  Title,
+} from "../components/ui";
 import { ManagedDevice } from "../protocol";
 import { SyncActivity } from "../sync/AutoSync";
-import { C } from "../theme";
+import { D } from "../theme";
 
 function timeAgo(iso: string): string {
   const mins = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000));
@@ -27,12 +35,14 @@ export function DevicesScreen({
   onOpenDevice,
   onAddDevice,
   onOpenSettings,
+  onOpenPreview,
 }: {
   api: SateApi;
   activity: SyncActivity;
   onOpenDevice: (d: ManagedDevice) => void;
   onAddDevice: () => void;
   onOpenSettings: () => void;
+  onOpenPreview: () => void;
 }) {
   const [devices, setDevices] = useState<ManagedDevice[]>([]);
   const [refreshing, setRefreshing] = useState(false);
@@ -47,7 +57,7 @@ export function DevicesScreen({
 
   useEffect(() => {
     load();
-    const t = setInterval(load, 10000); // auto-refresh fleet status
+    const t = setInterval(load, 5000); // auto-refresh fleet status
     return () => clearInterval(t);
   }, [load]);
 
@@ -59,11 +69,13 @@ export function DevicesScreen({
 
   return (
     <View style={s.wrap}>
+      <GlassBackground />
       <View style={s.header}>
         <Title>My recorders</Title>
-        <Pressable onPress={onOpenSettings}>
-          <Text style={s.gear}>Settings</Text>
-        </Pressable>
+        <View style={s.headerActions}>
+          <HeaderBtn label="Preview" onPress={onOpenPreview} />
+          <HeaderBtn label="Settings" onPress={onOpenSettings} />
+        </View>
       </View>
 
       <SyncBanner activity={activity} />
@@ -72,11 +84,15 @@ export function DevicesScreen({
         data={devices}
         keyExtractor={(d) => d.id}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={refresh} />
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={refresh}
+            tintColor={D.sub}
+          />
         }
         ListEmptyComponent={
           <Card>
-            <Text style={{ color: C.ink, fontSize: 15, marginBottom: 4 }}>
+            <Text style={{ color: D.ink, fontSize: 15, marginBottom: 4 }}>
               No recorders yet
             </Text>
             <Muted>
@@ -85,7 +101,11 @@ export function DevicesScreen({
           </Card>
         }
         renderItem={({ item }) => (
-          <Pressable onPress={() => onOpenDevice(item)}>
+          <Pressable
+            onPress={() => onOpenDevice(item)}
+            accessibilityRole="button"
+            style={({ pressed }) => ({ opacity: pressed ? 0.85 : 1 })}
+          >
             <Card>
               <View style={s.row}>
                 <Text style={s.devName}>{item.name}</Text>
@@ -98,7 +118,7 @@ export function DevicesScreen({
                 {item.serial} - fw {item.fw} - seen {timeAgo(item.last_seen)}
               </Muted>
               {item.pending_sessions > 0 && (
-                <Muted style={{ color: C.amber, marginTop: 4 }}>
+                <Muted style={{ color: D.amber, marginTop: 4 }}>
                   {item.pending_sessions} session(s) waiting to sync
                 </Muted>
               )}
@@ -109,6 +129,19 @@ export function DevicesScreen({
 
       <Button title="+  Set up a new recorder" onPress={onAddDevice} />
     </View>
+  );
+}
+
+function HeaderBtn({ label, onPress }: { label: string; onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      hitSlop={10}
+      accessibilityRole="button"
+      style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}
+    >
+      <Text style={s.gear}>{label}</Text>
+    </Pressable>
   );
 }
 
@@ -141,7 +174,7 @@ function SyncBanner({ activity }: { activity: SyncActivity }) {
   }
 
   return (
-    <View style={[s.banner, tone === "err" && { borderColor: C.red }]}>
+    <View style={[s.banner, tone === "err" && { borderColor: D.red }]}>
       <Text style={s.bannerText}>{text}</Text>
       {activity.phase === "pulling" && (
         <ProgressBar value={activity.progress ?? 0} />
@@ -151,28 +184,29 @@ function SyncBanner({ activity }: { activity: SyncActivity }) {
 }
 
 const s = StyleSheet.create({
-  wrap: { flex: 1, backgroundColor: C.bg, padding: 16, paddingTop: 56 },
+  wrap: { flex: 1, backgroundColor: D.bg, padding: 16, paddingTop: 56 },
   header: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
     marginBottom: 10,
   },
-  gear: { color: C.sky, fontSize: 14, fontWeight: "600" },
+  gear: { color: D.sky, fontSize: 14, fontWeight: "600" },
+  headerActions: { flexDirection: "row", gap: 18, alignItems: "center" },
   row: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
     marginBottom: 4,
   },
-  devName: { fontSize: 16, fontWeight: "700", color: C.ink },
+  devName: { fontSize: 16, fontWeight: "700", color: D.ink },
   banner: {
     borderWidth: 1,
-    borderColor: C.line,
-    backgroundColor: C.ice,
+    borderColor: D.line,
+    backgroundColor: D.skyBg,
     borderRadius: 12,
     padding: 10,
     marginBottom: 10,
   },
-  bannerText: { fontSize: 13, color: C.navy },
+  bannerText: { fontSize: 13, color: D.ink },
 });

@@ -30,7 +30,7 @@
  *
  * Connectivity (v0.5.0, see connectivity.h):
  *   - Wi-Fi mode: auto-uploads sessions to the SATE server, polls remote
- *     commands (sync_now / reload_patients / identify / reboot)
+ *     commands (sync_now / reload_patients / record / reboot)
  *   - BLE mode: when Wi-Fi is unavailable, advertises to the companion app
  *     for provisioning, bridge sync, and nearby control
  *   - Patient list is loaded from /sate/patients.json when the server (or
@@ -77,13 +77,21 @@
 #define I2C_SCL   15
 #define I2C_SDA   16
 #define I2C_SPEED 400000
+#define BOOT_BTN_PIN 0          // on-board BOOT button (GPIO0), active LOW
 
 static const int      SERIAL_BAUD       = 115200;
 static const int      RECORD_SECONDS    = 30;
+static const int      REMOTE_RECORD_SECONDS = 8; // app/server-triggered captures
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "0.6.4";
+static const char    *FIRMWARE_VERSION  = "0.7.5";
+
+// The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
+// one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
+// the patient roster + parse), crashing with a corrupted backtrace right after
+// "Connecting to Wi-Fi". Give it room.
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);
 
 static const uint32_t PCM_BYTES_PER_SEC = AUDIO_SAMPLE_RATE * (AUDIO_BIT_DEPTH / 8) * AUDIO_CHANNELS;
 static const uint32_t PCM_TOTAL_BYTES   = PCM_BYTES_PER_SEC * RECORD_SECONDS;
@@ -183,13 +191,13 @@ static volatile PendingAction pendingAction = ACT_NONE;
 static volatile int           pendingArg    = 0;
 
 // Connectivity hook flags: set from connLoop() handlers, consumed by loop().
-static volatile bool connIdentifyReq = false;
 static volatile bool connPatientsReq = false;
 static volatile bool connStateReq    = false;
+static volatile bool connRecordReq   = false;
 
-void sateHookIdentify()        { connIdentifyReq = true; }
 void sateHookPatientsUpdated() { connPatientsReq = true; }
 void sateHookConnChanged()     { connStateReq = true; }
+void sateHookRecord()          { connRecordReq = true; }
 
 // The recorder is usable only once it has been claimed to a SATE account AND
 // has a real patient roster. Until then the user sees the onboarding screen
@@ -216,6 +224,7 @@ static lv_obj_t *progressSmall   = nullptr;
 static lv_obj_t *syncBar         = nullptr;
 static lv_obj_t *syncBarText     = nullptr;
 static lv_obj_t *connIcon        = nullptr;
+static lv_obj_t *resetBanner     = nullptr; // hold-BOOT-to-reset overlay
 
 static void uiResetPointers()
 {
@@ -225,6 +234,7 @@ static void uiResetPointers()
   progressOverlay = progressArc = progressBig = progressSmall = nullptr;
   syncBar = syncBarText = nullptr;
   connIcon = nullptr;
+  resetBanner = nullptr; // screen rebuild deletes it; drop the dangling ptr
 }
 
 // -----------------------------------------------------------------------------
@@ -284,14 +294,27 @@ static void showStatus(const char *status, const char *hint = "")
   for (int i = 0; i < 3; i++) runGui();
 }
 
+// Shortcut: set the font on any label/button.
+static inline void setFont(lv_obj_t *o, const lv_font_t *f)
+{
+  lv_obj_set_style_text_font(o, f, 0);
+}
+
 static void styleButton(lv_obj_t *btn, uint32_t bgColor, uint32_t textColor)
 {
-  lv_obj_set_style_radius(btn, 12, 0);
+  lv_obj_set_style_radius(btn, 14, 0);
   lv_obj_set_style_bg_color(btn, lv_color_hex(bgColor), 0);
   lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
   lv_obj_set_style_border_width(btn, 0, 0);
-  lv_obj_set_style_shadow_width(btn, 0, 0);
   lv_obj_set_style_text_color(btn, lv_color_hex(textColor), 0);
+  // Soft drop shadow for depth + a clear pressed state.
+  lv_obj_set_style_shadow_width(btn, 10, 0);
+  lv_obj_set_style_shadow_ofs_y(btn, 3, 0);
+  lv_obj_set_style_shadow_color(btn, lv_color_hex(0x9CA3AF), 0);
+  lv_obj_set_style_shadow_opa(btn, LV_OPA_30, 0);
+  lv_obj_set_style_bg_opa(btn, LV_OPA_80, LV_STATE_PRESSED);
+  lv_obj_set_style_shadow_width(btn, 2, LV_STATE_PRESSED);
+  lv_obj_set_style_translate_y(btn, 1, LV_STATE_PRESSED);
 }
 
 static void stylePanel(lv_obj_t *panel)
@@ -299,8 +322,12 @@ static void stylePanel(lv_obj_t *panel)
   lv_obj_set_style_bg_color(panel, lv_color_hex(COL_CARD_BG), 0);
   lv_obj_set_style_border_color(panel, lv_color_hex(COL_CARD_BORDER), 0);
   lv_obj_set_style_border_width(panel, 1, 0);
-  lv_obj_set_style_radius(panel, 14, 0);
-  lv_obj_set_style_shadow_width(panel, 0, 0);
+  lv_obj_set_style_radius(panel, 16, 0);
+  // Subtle elevation so cards lift off the white background.
+  lv_obj_set_style_shadow_width(panel, 14, 0);
+  lv_obj_set_style_shadow_ofs_y(panel, 4, 0);
+  lv_obj_set_style_shadow_color(panel, lv_color_hex(0xCBD5E1), 0);
+  lv_obj_set_style_shadow_opa(panel, LV_OPA_40, 0);
   lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
 }
 
@@ -375,6 +402,7 @@ static void createHeader(const char *title, PendingAction backAction = ACT_NONE)
 
   lv_obj_t *titleLbl = lv_label_create(header);
   lv_label_set_text(titleLbl, title);
+  setFont(titleLbl, &lv_font_montserrat_14);
   lv_obj_set_style_text_color(titleLbl, lv_color_hex(COL_PRIMARY_DK), 0);
   lv_obj_align(titleLbl, LV_ALIGN_LEFT_MID, titleX, 0);
 
@@ -439,6 +467,7 @@ static void showProgressOverlay(const char *caption, uint32_t arcColor)
 
   progressBig = lv_label_create(progressOverlay);
   lv_label_set_text(progressBig, "");
+  setFont(progressBig, &lv_font_montserrat_20);
   lv_obj_set_style_text_color(progressBig, lv_color_hex(COL_TEXT_DARK), 0);
   lv_obj_align(progressBig, LV_ALIGN_CENTER, 0, -34);
 
@@ -543,6 +572,15 @@ static void bootScreenCreate()
   lv_obj_set_style_arc_color(bootSpinner, lv_color_hex(COL_TRACK), LV_PART_MAIN);
   lv_obj_set_style_arc_color(bootSpinner, lv_color_hex(COL_PRIMARY), LV_PART_INDICATOR);
   lv_obj_remove_style(bootSpinner, NULL, LV_PART_KNOB);
+
+  // Small firmware version, pinned bottom-center.
+  lv_obj_t *ver = lv_label_create(bootRoot);
+  char vtxt[24];
+  snprintf(vtxt, sizeof(vtxt), "v%s", FIRMWARE_VERSION);
+  lv_label_set_text(ver, vtxt);
+  setFont(ver, &lv_font_montserrat_12);
+  lv_obj_set_style_text_color(ver, lv_color_hex(COL_TEXT_MUTED), 0);
+  lv_obj_align(ver, LV_ALIGN_BOTTOM_MID, 0, -8);
 
   for (int i = 0; i < 4; i++) {
     bootStepLbl[i] = lv_label_create(bootRoot);
@@ -844,7 +882,8 @@ static bool initAudio()
 // STREAMED recording: mic -> 4 KB chunk -> SD, live countdown ring.
 // -----------------------------------------------------------------------------
 
-static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes)
+static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
+                                uint32_t pcmTotal = PCM_TOTAL_BYTES)
 {
   *outPcmBytes = 0;
   currentState = RECORDING;
@@ -857,7 +896,7 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes)
     return false;
   }
 
-  writeWavHeader(file, PCM_TOTAL_BYTES);
+  writeWavHeader(file, pcmTotal);
   showProgressOverlay("recording  -  speak clearly", COL_REC);
 
   // Drain stale I2S DMA samples so the recording starts clean.
@@ -867,8 +906,8 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes)
   uint32_t lastUiMs = 0;
   bool ok = true;
 
-  while (written < PCM_TOTAL_BYTES) {
-    size_t want = PCM_TOTAL_BYTES - written;
+  while (written < pcmTotal) {
+    size_t want = pcmTotal - written;
     if (want > AUDIO_CHUNK_BYTES) want = AUDIO_CHUNK_BYTES;
 
     size_t got = es8311_i2s.readBytes((char *)audioChunk, want);
@@ -881,10 +920,10 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes)
     uint32_t now = millis();
     if (now - lastUiMs >= 120) {
       lastUiMs = now;
-      uint32_t secLeft = (PCM_TOTAL_BYTES - written + PCM_BYTES_PER_SEC - 1) / PCM_BYTES_PER_SEC;
+      uint32_t secLeft = (pcmTotal - written + PCM_BYTES_PER_SEC - 1) / PCM_BYTES_PER_SEC;
       char big[8];
       snprintf(big, sizeof(big), "%lu", (unsigned long)secLeft);
-      updateProgress((uint16_t)((written * 1000ULL) / PCM_TOTAL_BYTES), big);
+      updateProgress((uint16_t)((written * 1000ULL) / pcmTotal), big);
       lv_timer_handler();
     }
   }
@@ -965,46 +1004,6 @@ static bool playWavStreamFromSd(const char *path, const char *caption)
 }
 
 // -----------------------------------------------------------------------------
-// Identify (remote command): three beeps + blue screen flashes so the SLP
-// can spot the recorder. Only runs from loop() while the UI is idle.
-// -----------------------------------------------------------------------------
-
-static void identifyBeepFlash()
-{
-  lv_obj_t *ov = lv_obj_create(lv_scr_act());
-  lv_obj_set_size(ov, 240, 320);
-  lv_obj_align(ov, LV_ALIGN_TOP_LEFT, 0, 0);
-  lv_obj_set_style_bg_color(ov, lv_color_hex(COL_PRIMARY), 0);
-  lv_obj_set_style_bg_opa(ov, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_width(ov, 0, 0);
-  lv_obj_set_style_radius(ov, 0, 0);
-
-  lv_obj_t *lbl = lv_label_create(ov);
-  lv_label_set_text(lbl, LV_SYMBOL_BELL "  Here I am!");
-  lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
-  lv_obj_center(lbl);
-
-  // 1 kHz tone, 16-bit mono @ 16 kHz; one chunk = 128 ms of audio.
-  const int samples = AUDIO_CHUNK_BYTES / 2;
-  int16_t *pcm = (int16_t *)audioChunk;
-  for (int i = 0; i < samples; i++) {
-    pcm[i] = (int16_t)(9000.0f * sinf(2.0f * PI * 1000.0f * i / AUDIO_SAMPLE_RATE));
-  }
-
-  for (int b = 0; b < 3; b++) {
-    lv_obj_clear_flag(ov, LV_OBJ_FLAG_HIDDEN);
-    runGui();
-    es8311_i2s.write(audioChunk, AUDIO_CHUNK_BYTES);  // ~128 ms beep
-    es8311_i2s.write(audioChunk, AUDIO_CHUNK_BYTES);  // ~256 ms total
-    lv_obj_add_flag(ov, LV_OBJ_FLAG_HIDDEN);
-    pumpGuiMs(180);
-  }
-
-  lv_obj_del(ov);
-  runGui();
-}
-
-// -----------------------------------------------------------------------------
 // Screens
 // -----------------------------------------------------------------------------
 
@@ -1049,8 +1048,9 @@ static void showOnboardingScreen()
 
   lv_obj_t *title = lv_label_create(lv_scr_act());
   lv_label_set_text(title, "Set up recorder");
+  setFont(title, &lv_font_montserrat_14);
   lv_obj_set_style_text_color(title, lv_color_hex(COL_PRIMARY_DK), 0);
-  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 14);
+  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 12);
 
   lv_obj_t *sub = lv_label_create(lv_scr_act());
   char subTxt[40];
@@ -1118,6 +1118,7 @@ static void showHomeScreen()
 
   patientName = lv_label_create(patientCard);
   lv_label_set_text(patientName, p.displayName);
+  setFont(patientName, &lv_font_montserrat_14);
   lv_obj_set_style_text_color(patientName, lv_color_hex(COL_TEXT_DARK), 0);
   lv_obj_align(patientName, LV_ALIGN_TOP_LEFT, 0, 0);
 
@@ -1570,7 +1571,11 @@ static void showResultsScreen()
 // Record session flow
 // -----------------------------------------------------------------------------
 
-static void runRecordSavePlaySession()
+// review  = play the sample back so the SLP can confirm it (on-device tap).
+// pcmTotal = capture size; remote (app/server) captures are shorter and skip
+//            the review playback since nobody is holding the unit.
+static void runRecordSavePlaySession(bool review = true,
+                                     uint32_t pcmTotal = PCM_TOTAL_BYTES)
 {
   char dir[96];
   patientDirPath(dir, sizeof(dir));
@@ -1588,7 +1593,7 @@ static void runRecordSavePlaySession()
   sessionJsonPath(jsonPath, sizeof(jsonPath), dir, sessionNum);
 
   uint32_t pcmBytes = 0;
-  bool ok = recordWavStreamToSd(wavPath, &pcmBytes);
+  bool ok = recordWavStreamToSd(wavPath, &pcmBytes, pcmTotal);
 
   if (!ok) {
     SD_MMC.remove(wavPath);
@@ -1605,7 +1610,7 @@ static void runRecordSavePlaySession()
   connNotifyNewSession(); // Wi-Fi mode uploads it; BLE mode updates the advert
 
   // Quick review playback so the SLP can confirm the sample, then home.
-  playWavStreamFromSd(wavPath, "review playback");
+  if (review) playWavStreamFromSd(wavPath, "review playback");
 
   showHomeScreen();
   logHeap("session done");
@@ -1629,6 +1634,47 @@ static void playSessionFromList(int sessionNum)
 }
 
 // -----------------------------------------------------------------------------
+// Hold BOOT 5 s -> factory reset (wipe Wi-Fi + account, reboot to setup).
+// A red countdown banner shows while held; releasing before 5 s cancels.
+// -----------------------------------------------------------------------------
+
+static uint32_t bootHoldStart = 0;
+
+static void serviceFactoryResetButton()
+{
+  if (digitalRead(BOOT_BTN_PIN) == LOW) {          // pressed (active LOW)
+    if (bootHoldStart == 0) bootHoldStart = millis();
+    uint32_t held = millis() - bootHoldStart;
+
+    if (held >= 700 && !resetBanner) {             // show banner after a beat
+      resetBanner = lv_obj_create(lv_scr_act());
+      lv_obj_set_size(resetBanner, 200, 76);
+      lv_obj_center(resetBanner);
+      stylePanel(resetBanner);
+      lv_obj_set_style_bg_color(resetBanner, lv_color_hex(COL_REC_BG), 0);
+      lv_obj_set_style_border_color(resetBanner, lv_color_hex(COL_REC), 0);
+      lv_obj_t *l = lv_label_create(resetBanner);
+      setFont(l, &lv_font_montserrat_14);
+      lv_obj_set_style_text_color(l, lv_color_hex(COL_REC), 0);
+      lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+      lv_obj_center(l);
+      lv_obj_move_foreground(resetBanner);
+    }
+    if (resetBanner) {
+      int secLeft = 5 - (int)(held / 1000);
+      if (secLeft < 0) secLeft = 0;
+      char t[40];
+      snprintf(t, sizeof(t), LV_SYMBOL_TRASH "  Reset in %d", secLeft);
+      lv_label_set_text(lv_obj_get_child(resetBanner, 0), t);
+    }
+    if (held >= 5000) connFactoryReset();           // wipes config + reboots
+  } else {
+    bootHoldStart = 0;
+    if (resetBanner) { lv_obj_del(resetBanner); resetBanner = nullptr; }
+  }
+}
+
+// -----------------------------------------------------------------------------
 // Arduino setup / loop
 // -----------------------------------------------------------------------------
 
@@ -1643,6 +1689,7 @@ void setup()
   Serial.println(FIRMWARE_VERSION);
 
   currentState = BOOTING;
+  pinMode(BOOT_BTN_PIN, INPUT_PULLUP); // hold 5 s to factory-reset
   logHeap("boot");
 
   // One shared Wire bus for touch + ES8311. Begin once, before display init.
@@ -1689,6 +1736,7 @@ void setup()
 void loop()
 {
   runGui();
+  serviceFactoryResetButton(); // hold BOOT 5 s -> wipe config + reboot
 
   if (currentState != ERROR_STATE) {
     connLoop();
@@ -1725,9 +1773,18 @@ void loop()
         showHomeScreen();
       }
     }
-    if (connIdentifyReq && uiIdle) {
-      connIdentifyReq = false;
-      identifyBeepFlash();
+    // Remote record (app/server "record" command). Only from Home, with the
+    // recorder fully set up; the capture blocks ~8 s while it streams to SD,
+    // then connNotifyNewSession() uploads it. liveState lets the app show
+    // "recording" while it happens.
+    if (connRecordReq) {
+      connRecordReq = false;
+      if (currentState == HOME && deviceReady()) {
+        connSetLiveState("recording");
+        runRecordSavePlaySession(false /*review*/,
+                                 (uint32_t)PCM_BYTES_PER_SEC * REMOTE_RECORD_SECONDS);
+        connSetLiveState("idle");
+      }
     }
   }
 

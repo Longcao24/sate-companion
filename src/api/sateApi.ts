@@ -1,7 +1,5 @@
 // SATE server API client. The companion app signs in with the SAME SLP
-// account as the SATE web app; claimed devices are stored under that
-// account. A full in-memory mock implements the same interface so the
-// whole app runs in demo mode with no backend.
+// account as the SATE web app; claimed devices are stored under that account.
 //
 // REST endpoints (Bearer <token> unless noted):
 //   POST  /api/auth/login                { email, password } -> { token, user }
@@ -19,6 +17,7 @@ import {
   ManagedDevice,
   Patient,
   RemoteCommand,
+  UploadedSession,
   User,
 } from "../protocol";
 
@@ -30,6 +29,10 @@ export interface SateApi {
   removeDevice(id: string): Promise<void>;
   sendCommand(id: string, op: RemoteCommand): Promise<void>;
   listPatients(): Promise<Patient[]>;
+  /** Sessions uploaded to the account; pass a serial to filter to one device. */
+  listUploads(deviceSerial?: string): Promise<UploadedSession[]>;
+  /** Playable audio source (URL + auth header) for one uploaded session. */
+  audioSource(sessionId: string): { uri: string; headers: Record<string, string> };
   uploadSession(args: {
     device_serial: string;
     patient_id: string;
@@ -93,6 +96,15 @@ export class HttpApi implements SateApi {
   listPatients() {
     return this.req<Patient[]>("/api/patients");
   }
+  listUploads(deviceSerial?: string) {
+    const q = deviceSerial ? `?device=${encodeURIComponent(deviceSerial)}` : "";
+    return this.req<UploadedSession[]>(`/api/sessions${q}`);
+  }
+  audioSource(sessionId: string) {
+    const headers: Record<string, string> = {};
+    if (this.token) headers.Authorization = `Bearer ${this.token}`;
+    return { uri: `${this.baseUrl}/api/sessions/${sessionId}/audio`, headers };
+  }
   async uploadSession(args: {
     device_serial: string;
     patient_id: string;
@@ -107,89 +119,6 @@ export class HttpApi implements SateApi {
   }
 }
 
-// ---------------------------------------------------------------- mock API
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-export class MockApi implements SateApi {
-  private static devices: ManagedDevice[] = [
-    {
-      id: "dev-001",
-      name: "Therapy Room 1",
-      serial: "SATE-7C3A01",
-      fw: "0.5.0",
-      online: true,
-      ip: "192.168.1.42",
-      last_seen: new Date().toISOString(),
-      pending_sessions: 0,
-    },
-    {
-      id: "dev-002",
-      name: "Therapy Room 2",
-      serial: "SATE-7C3A02",
-      fw: "0.5.0",
-      online: false,
-      last_seen: new Date(Date.now() - 3600e3).toISOString(),
-      pending_sessions: 2,
-    },
-  ];
-
-  async login(email: string, _password: string) {
-    await sleep(500);
-    return {
-      token: "demo-token",
-      user: { id: "u-1", name: "SLP Morgan", email },
-    };
-  }
-  async listDevices() {
-    await sleep(300);
-    return MockApi.devices.map((d) => ({ ...d }));
-  }
-  async claimToken() {
-    await sleep(200);
-    return "claim-" + Math.random().toString(36).slice(2, 8);
-  }
-  async renameDevice(id: string, name: string) {
-    const d = MockApi.devices.find((x) => x.id === id);
-    if (d) d.name = name;
-  }
-  async removeDevice(id: string) {
-    MockApi.devices = MockApi.devices.filter((x) => x.id !== id);
-  }
-  async sendCommand(id: string, op: RemoteCommand) {
-    await sleep(400);
-    const d = MockApi.devices.find((x) => x.id === id);
-    if (!d) throw new Error("device not found");
-    if (!d.online) throw new Error("Device is offline - command queued");
-    if (op === "sync_now") d.pending_sessions = 0;
-  }
-  async listPatients() {
-    await sleep(200);
-    return [
-      { patient_id: "PT-1001", name: "Maya Nguyen", age: "7y 4m", session_type: "Articulation", clinician: "Dr. Taylor" },
-      { patient_id: "PT-1002", name: "Ethan Brooks", age: "5y 9m", session_type: "Language Sample", clinician: "SLP Morgan" },
-      { patient_id: "PT-1003", name: "Sophia Patel", age: "9y 1m", session_type: "Fluency", clinician: "SLP Rivera" },
-    ];
-  }
-  async uploadSession() {
-    await sleep(700);
-  }
-
-  /** demo helper: a freshly provisioned device appears in the account */
-  static addClaimed(serial: string, name: string) {
-    MockApi.devices.push({
-      id: "dev-" + serial.toLowerCase(),
-      name,
-      serial,
-      fw: "0.5.0",
-      online: true,
-      ip: "192.168.1.77",
-      last_seen: new Date().toISOString(),
-      pending_sessions: 0,
-    });
-  }
-}
-
-export function makeApi(serverUrl: string, token: string | null, demo: boolean): SateApi {
-  return demo ? new MockApi() : new HttpApi(serverUrl, token);
+export function makeApi(serverUrl: string, token: string | null): SateApi {
+  return new HttpApi(serverUrl, token);
 }
