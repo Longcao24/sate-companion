@@ -203,7 +203,7 @@ const s = StyleSheet.create({
   banner: {
     borderWidth: 1,
     borderColor: D.line,
-    backgroundColor: D.skyBg,
+    backgroundColor: D.panel,
     borderRadius: 12,
     padding: 10,
     marginBottom: 10,

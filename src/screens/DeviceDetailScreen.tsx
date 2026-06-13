@@ -16,7 +16,6 @@ import {
   useAudioPlayer,
   useAudioPlayerStatus,
 } from "expo-audio";
-import { BlurView } from "expo-blur";
 import { StatusBar } from "expo-status-bar";
 import { SateApi } from "../api/sateApi";
 import { Glass, GlassBackground } from "../components/ui";
@@ -359,8 +358,6 @@ export function DeviceDetailScreen({
         disabled={!latest}
         onPress={() => latest && togglePlay(latest)}
       >
-        <BlurView intensity={28} tint="dark" style={StyleSheet.absoluteFill} />
-        <View style={[StyleSheet.absoluteFill, s.glassFill]} />
         <View style={s.jobThumb}>
           <Text style={s.jobThumbGlyph}>
             {latest && playingId === latest.id ? "❚❚" : "▶"}
@@ -542,10 +539,6 @@ function Tile({
         { opacity: disabled ? 0.45 : pressed ? 0.8 : 1 },
       ]}
     >
-      <BlurView intensity={28} tint="dark" style={StyleSheet.absoluteFill} />
-      <View
-        style={[StyleSheet.absoluteFill, accent ? s.tileFillAccent : s.glassFill]}
-      />
       <View style={s.tileTop}>
         <Text style={[s.tileLabel, accent && { color: D.sky }]}>{label}</Text>
         {loading ? (
@@ -572,7 +565,6 @@ const s = StyleSheet.create({
   flex: { flex: 1, backgroundColor: D.bg },
   scroll: { flex: 1, backgroundColor: "transparent" },
   content: { padding: 16, paddingTop: 56, paddingBottom: 48 },
-  glassFill: { backgroundColor: D.glass },
 
   topbar: {
     flexDirection: "row",
@@ -594,8 +586,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 7,
     borderWidth: 1,
-    borderColor: D.glassBorder,
-    borderTopColor: D.glassEdge,
+    borderColor: D.line,
     zIndex: 2,
   },
   chipTL: { top: 16, left: 16 },
@@ -633,10 +624,10 @@ const s = StyleSheet.create({
   jobCard: {
     flexDirection: "row",
     alignItems: "center",
+    backgroundColor: D.panel,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: D.glassBorder,
-    borderTopColor: D.glassEdge,
+    borderColor: D.line,
     padding: 12,
     marginBottom: 22,
     overflow: "hidden",
@@ -679,17 +670,19 @@ const s = StyleSheet.create({
   tile: {
     width: "47.5%",
     flexGrow: 1,
+    backgroundColor: D.tile,
     borderRadius: 16,
     borderWidth: 1,
-    borderColor: D.glassBorder,
-    borderTopColor: D.glassEdge,
+    borderColor: D.line,
     padding: 14,
     minHeight: 92,
     justifyContent: "space-between",
     overflow: "hidden",
   },
-  tileAccent: { borderColor: "rgba(59,158,255,0.55)" },
-  tileFillAccent: { backgroundColor: D.skyBg },
+  tileAccent: {
+    backgroundColor: D.skyBg,
+    borderColor: "rgba(59,158,255,0.45)",
+  },
   tileTop: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -734,20 +727,19 @@ const s = StyleSheet.create({
 
   input: {
     borderWidth: 1,
-    borderColor: D.glassBorder,
+    borderColor: D.line,
     borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 11,
     fontSize: 15,
     color: D.ink,
-    backgroundColor: "rgba(255,255,255,0.05)",
+    backgroundColor: D.tile,
     marginBottom: 12,
   },
   saveBtn: {
-    backgroundColor: D.glassStrong,
+    backgroundColor: D.tile,
     borderWidth: 1,
-    borderColor: D.glassBorder,
-    borderTopColor: D.glassEdge,
+    borderColor: D.line,
     borderRadius: 12,
     paddingVertical: 13,
     alignItems: "center",

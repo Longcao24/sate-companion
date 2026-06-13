@@ -8,56 +8,37 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { BlurView } from "expo-blur";
 import { D, radius } from "../theme";
 
-// Liquid-glass material: frosted blur + faint white fill + a brighter specular
-// top edge. Drop children straight in (they sit above the blur). `style` sizes
-// the box (margins/width); `contentStyle` pads the contents.
+// Apple-style grouped surface: a solid elevated card on the dark background with
+// a hairline border. `raised` is a brighter fill for nested/elevated controls.
+// `style` sizes the box (margins/width); `contentStyle` pads the contents.
 export function Glass({
   children,
   style,
   contentStyle,
-  intensity = 28,
   r = radius.card,
   raised,
 }: {
   children?: ReactNode;
   style?: any;
   contentStyle?: any;
-  intensity?: number;
+  intensity?: number; // accepted for call-site compatibility; unused
   r?: number;
   raised?: boolean;
 }) {
   return (
-    <View style={[s.glass, { borderRadius: r }, style]}>
-      <BlurView
-        intensity={intensity}
-        tint="dark"
-        style={StyleSheet.absoluteFill}
-      />
-      <View
-        style={[
-          StyleSheet.absoluteFill,
-          { backgroundColor: raised ? D.glassStrong : D.glass },
-        ]}
-      />
+    <View
+      style={[raised ? s.surfaceRaised : s.surface, { borderRadius: r }, style]}
+    >
       <View style={contentStyle}>{children}</View>
     </View>
   );
 }
 
-// Ambient backdrop: dark base seeded with soft color blobs. Sits behind a
-// screen's content so the glass panels in front pick up real color.
+// Solid dark backdrop behind a screen's content.
 export function GlassBackground() {
-  return (
-    <View style={StyleSheet.absoluteFill} pointerEvents="none">
-      <View style={s.base} />
-      <View style={[s.blob, s.blobA]} />
-      <View style={[s.blob, s.blobB]} />
-      <View style={[s.blob, s.blobC]} />
-    </View>
-  );
+  return <View style={s.base} pointerEvents="none" />;
 }
 
 export function Card({ children, style }: { children: ReactNode; style?: any }) {
@@ -101,8 +82,7 @@ export function Button({
   disabled?: boolean;
   loading?: boolean;
 }) {
-  const bg =
-    kind === "primary" ? D.sky : kind === "danger" ? D.redBg : D.glassStrong;
+  const bg = kind === "primary" ? D.sky : kind === "danger" ? D.redBg : D.tile;
   const fg = kind === "primary" ? "#FFFFFF" : kind === "danger" ? D.red : D.ink;
   return (
     <Pressable
@@ -169,20 +149,22 @@ export function ProgressBar({ value }: { value: number }) {
 }
 
 const s = StyleSheet.create({
-  glass: {
+  surface: {
     overflow: "hidden",
+    backgroundColor: D.panel,
     borderWidth: 1,
-    borderColor: D.glassBorder,
-    borderTopColor: D.glassEdge, // specular highlight along the top edge
+    borderColor: D.line,
+  },
+  surfaceRaised: {
+    overflow: "hidden",
+    backgroundColor: D.tile,
+    borderWidth: 1,
+    borderColor: D.line,
   },
   cardBox: { marginBottom: 12 },
   cardPad: { padding: 14 },
 
   base: { ...StyleSheet.absoluteFillObject, backgroundColor: D.bg },
-  blob: { position: "absolute", width: 360, height: 360, borderRadius: 180 },
-  blobA: { backgroundColor: D.sky, top: -130, right: -90, opacity: 0.20 },
-  blobB: { backgroundColor: D.violet, top: 260, left: -130, opacity: 0.18 },
-  blobC: { backgroundColor: D.green, bottom: -120, right: -70, opacity: 0.12 },
   pill: {
     borderRadius: radius.pill,
     paddingHorizontal: 9,
@@ -197,18 +179,18 @@ const s = StyleSheet.create({
     justifyContent: "center",
     marginTop: 8,
   },
-  btnBordered: { borderWidth: 1, borderColor: D.glassBorder },
+  btnBordered: { borderWidth: 1, borderColor: D.line },
   btnText: { fontSize: 15, fontWeight: "600" },
   fieldLabel: { fontSize: 12, color: D.sub, marginBottom: 5 },
   input: {
     borderWidth: 1,
-    borderColor: D.glassBorder,
+    borderColor: D.line,
     borderRadius: 10,
     paddingHorizontal: 12,
     paddingVertical: 11,
     fontSize: 15,
     color: D.ink,
-    backgroundColor: "rgba(255,255,255,0.05)",
+    backgroundColor: D.tile,
   },
   title: { fontSize: 22, fontWeight: "700", color: D.ink, marginBottom: 4 },
   muted: { fontSize: 13, color: D.sub },
