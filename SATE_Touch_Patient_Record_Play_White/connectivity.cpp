@@ -597,6 +597,7 @@ static bool beginUpload(const PendingEntry &pe)
   upActive = true;
   upStartMs = millis();
   setStatus("Uploading session to SATE...");
+  sateHookUploadBegin();
   return true;
 }
 
@@ -610,10 +611,12 @@ static void uploadStep()
   if (sendSessionChunk(upHost, upPort, upMetaQuery, upOffset, len, isFinal, upFile)) {
     upOffset += len;
     upRetries = 0;
+    sateHookUploadProgress((int)((uint64_t)upOffset * 100 / upWavLen));
     if (upOffset >= upWavLen) {
       upFile.close();
       upActive = false;
       writeSyncMarker(upPid, upNum);
+      sateHookUploadEnd();
       Serial.printf("[CONN] uploaded %s session %lu (%u bytes) in %lu ms\n",
                     upPid, (unsigned long)upNum, (unsigned)upWavLen,
                     (unsigned long)(millis() - upStartMs));
@@ -622,6 +625,7 @@ static void uploadStep()
   } else if (++upRetries >= 8) {
     upFile.close();
     upActive = false; // give up for now; the sweep retries this session later
+    sateHookUploadEnd();
     Serial.printf("[CONN] upload stalled at %u/%u, will retry\n",
                   (unsigned)upOffset, (unsigned)upWavLen);
   }

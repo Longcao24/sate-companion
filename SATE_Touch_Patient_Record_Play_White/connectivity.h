@@ -52,6 +52,12 @@ extern void sateHookRecord();          // app/server asked for a remote recordin
 // Service the GUI for one tick. Called from inside long blocking connectivity
 // work (e.g. streaming a big upload) so the screen stays responsive.
 extern void sateHookGuiPump();
+
+// Upload progress UI: shown while a session streams to the server, updated per
+// ~1 MB slice with the percent complete.
+extern void sateHookUploadBegin();
+extern void sateHookUploadProgress(int pct);
+extern void sateHookUploadEnd();
 // The patient the SLP typed in the app for the next remote recording. Staged by
 // the .ino and applied (selected/added to the roster) before the record runs.
 extern void sateHookSetActivePatient(const char *id, const char *name,

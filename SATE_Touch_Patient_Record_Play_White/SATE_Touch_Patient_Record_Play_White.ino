@@ -90,7 +90,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "0.8.6";
+static const char    *FIRMWARE_VERSION  = "0.8.7";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -597,6 +597,30 @@ static void updateProgress(uint16_t permille, const char *bigText)
   if (!progressOverlay) return;
   lv_arc_set_value(progressArc, permille);
   if (bigText) lv_label_set_text(progressBig, bigText);
+}
+
+// Upload progress overlay (driven from connectivity per ~1 MB slice).
+void sateHookUploadBegin()
+{
+  showProgressOverlay("Uploading to SATE", COL_PRIMARY);
+  updateProgress(0, "0%");
+  screen.routine();
+}
+
+void sateHookUploadProgress(int pct)
+{
+  if (pct < 0) pct = 0;
+  if (pct > 100) pct = 100;
+  char b[8];
+  snprintf(b, sizeof(b), "%d%%", pct);
+  updateProgress((uint16_t)(pct * 10), b);
+  screen.routine(); // paint the new percentage now
+}
+
+void sateHookUploadEnd()
+{
+  hideProgressOverlay();
+  screen.routine();
 }
 
 // -----------------------------------------------------------------------------
