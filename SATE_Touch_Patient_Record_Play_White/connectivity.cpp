@@ -228,14 +228,20 @@ static int scanPending()
     pid = pid ? pid + 1 : full;
     char wav[160], part0[200], mark[160], pp[200];
     for (uint32_t i = 1; i <= 9999; i++) {
-      // A session exists if it has segment files (new) or a merged .wav (legacy).
+      // A session exists if it has segment files (new), a merged .wav (legacy),
+      // OR a .synced marker (its audio was purged after upload but the slot is
+      // still taken). We must check the marker BEFORE deciding we've hit the end
+      // - otherwise a synced+purged session looks like "no session here" and we
+      // stop early, missing every later session. That bug made Home report
+      // "all synced" while a real later recording sat queued and never uploaded.
       sessionPath(wav, sizeof(wav), pid, i, "wav");
       sessionPartFile(part0, sizeof(part0), pid, i, 0);
+      sessionPath(mark, sizeof(mark), pid, i, "synced");
       bool hasWav   = SD_MMC.exists(wav);
       bool hasParts = SD_MMC.exists(part0);
-      if (!hasWav && !hasParts) break; // sessions are contiguous; done here
-      sessionPath(mark, sizeof(mark), pid, i, "synced");
-      if (SD_MMC.exists(mark)) continue;
+      bool hasMark  = SD_MMC.exists(mark);
+      if (!hasWav && !hasParts && !hasMark) break; // nothing in slot i = end
+      if (hasMark) continue;                       // already on the server
 
       uint32_t bytes = 0;
       if (hasWav) {
