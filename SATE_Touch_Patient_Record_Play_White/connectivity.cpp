@@ -1280,6 +1280,23 @@ bool connUploadProgress(uint32_t *sent, uint32_t *total)
   return true;
 }
 
+// Which patient/session is uploading right now, so the Sessions list can mark
+// the exact row live. Returns false when nothing is in flight.
+bool connUploadingSession(char *pidOut, size_t pidLen, uint32_t *numOut)
+{
+  if (!upActive) return false;
+  if (pidOut && pidLen) snprintf(pidOut, pidLen, "%s", upPid);
+  if (numOut) *numOut = upNum;
+  return true;
+}
+
+// Percent (0-100) of the session in flight, or -1 if no upload is active.
+int connUploadPercent()
+{
+  if (!upActive || upTotal == 0) return -1;
+  return (int)((uint64_t)upServerOffset * 100 / upTotal);
+}
+
 const char *connStatusText() { return statusText; }
 const char *connIp() { return ipText; }
 bool connSetupActive() { return bleClientConnected || provState != PROV_IDLE; }

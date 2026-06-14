@@ -32,6 +32,10 @@ uint32_t    connPendingTotal();      // unsynced sessions across all patients
 // Byte progress of the session uploading right now. true while in flight;
 // fills sent/total so the UI animates smoothly for a single small session.
 bool        connUploadProgress(uint32_t *sent, uint32_t *total);
+// Which patient/session is uploading right now (to mark the exact list row).
+bool        connUploadingSession(char *pidOut, size_t pidLen, uint32_t *numOut);
+// Percent (0-100) of the in-flight upload, or -1 when idle.
+int         connUploadPercent();
 void        connNotifyNewSession();  // a recording was just saved
 
 // Live status for the on-device Connection screen.

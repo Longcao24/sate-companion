@@ -90,7 +90,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "0.9.1";
+static const char    *FIRMWARE_VERSION  = "0.9.2";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -277,6 +277,18 @@ static lv_obj_t *syncBarText     = nullptr;
 static lv_obj_t *connIcon        = nullptr;
 static lv_obj_t *resetBanner     = nullptr; // hold-BOOT-to-reset overlay
 
+// Home upload status (always visible, refreshed live without rebuilding Home).
+static lv_obj_t *homeUpBar       = nullptr;
+static lv_obj_t *homeUpText      = nullptr;
+static lv_obj_t *homeUpDot       = nullptr;
+
+// Sessions list: per-row status badges, refreshed live for the uploading row.
+static const int  SESS_ROW_MAX   = 6;
+static lv_obj_t  *sessRowBadge[SESS_ROW_MAX] = {nullptr};
+static uint32_t   sessRowNum[SESS_ROW_MAX]   = {0};
+static int        sessRowCount   = 0;
+static char       sessRowPid[24] = "";
+
 static void uiResetPointers()
 {
   statePill = statePillText = nullptr;
@@ -286,6 +298,9 @@ static void uiResetPointers()
   syncBar = syncBarText = nullptr;
   connIcon = nullptr;
   resetBanner = nullptr; // screen rebuild deletes it; drop the dangling ptr
+  homeUpBar = homeUpText = homeUpDot = nullptr;
+  for (int i = 0; i < SESS_ROW_MAX; i++) sessRowBadge[i] = nullptr;
+  sessRowCount = 0;
 }
 
 // -----------------------------------------------------------------------------
@@ -1381,6 +1396,96 @@ static void showSessionsScreen();
 static void showSyncScreen();
 static void showResultsScreen();
 static void showConnectionScreen();
+static void refreshHomeUpload();
+static void refreshSessionsUpload();
+
+// -----------------------------------------------------------------------------
+// Live upload status: updated every loop tick on Home / Sessions WITHOUT
+// rebuilding the screen, so uploading is always visible and never confusing.
+// -----------------------------------------------------------------------------
+
+// Home footer: a coloured dot + one status line + a thin byte-level bar that
+// only appears while a session is actually streaming to the server.
+static void refreshHomeUpload()
+{
+  if (!homeUpText || !homeUpBar || !homeUpDot) return;
+
+  uint32_t sent = 0, total = 0;
+  bool uploading = connUploadProgress(&sent, &total);
+  int  pct       = connUploadPercent();
+  uint32_t pending = connPendingTotal();
+  ConnMode m = connGetMode();
+  bool online = (m == CONN_WIFI_ONLINE);
+
+  char t[72];
+  if (uploading && pct >= 0) {
+    if (pending > 1)
+      snprintf(t, sizeof(t), "Uploading to SATE  %d%%   -   %lu left",
+               pct, (unsigned long)pending);
+    else
+      snprintf(t, sizeof(t), "Uploading to SATE  %d%%", pct);
+    lv_label_set_text(homeUpText, t);
+    lv_obj_set_style_text_color(homeUpText, lv_color_hex(COL_PRIMARY_DK), 0);
+    lv_obj_set_style_bg_color(homeUpDot, lv_color_hex(COL_PRIMARY), 0);
+    lv_obj_clear_flag(homeUpBar, LV_OBJ_FLAG_HIDDEN);
+    lv_bar_set_value(homeUpBar, pct * 10, LV_ANIM_ON);
+  } else if (pending > 0) {
+    lv_obj_add_flag(homeUpBar, LV_OBJ_FLAG_HIDDEN);
+    if (online) {
+      snprintf(t, sizeof(t), "Syncing %lu session(s) to SATE...",
+               (unsigned long)pending);
+      lv_obj_set_style_text_color(homeUpText, lv_color_hex(COL_PRIMARY_DK), 0);
+      lv_obj_set_style_bg_color(homeUpDot, lv_color_hex(COL_PRIMARY), 0);
+    } else {
+      snprintf(t, sizeof(t), "%lu pending  -  syncs when online",
+               (unsigned long)pending);
+      lv_obj_set_style_text_color(homeUpText, lv_color_hex(COL_WARN), 0);
+      lv_obj_set_style_bg_color(homeUpDot, lv_color_hex(COL_WARN), 0);
+    }
+    lv_label_set_text(homeUpText, t);
+  } else {
+    lv_obj_add_flag(homeUpBar, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(homeUpText, LV_SYMBOL_OK "  All sessions synced to SATE");
+    lv_obj_set_style_text_color(homeUpText, lv_color_hex(COL_OK), 0);
+    lv_obj_set_style_bg_color(homeUpDot, lv_color_hex(COL_OK), 0);
+  }
+}
+
+// Sessions list: recompute each visible row's badge so the one in flight shows
+// a live percent, freshly-synced rows flip to the SATE tick, and the rest read
+// "queued" instead of a vague "pending".
+static void refreshSessionsUpload()
+{
+  if (sessRowCount <= 0) return;
+
+  char upPid[24];
+  uint32_t upNum = 0;
+  bool uploading = connUploadingSession(upPid, sizeof(upPid), &upNum);
+  int  pct       = connUploadPercent();
+
+  char dir[96];
+  patientDirPath(dir, sizeof(dir));
+
+  for (int i = 0; i < sessRowCount; i++) {
+    lv_obj_t *badge = sessRowBadge[i];
+    if (!badge) continue;
+    uint32_t n = sessRowNum[i];
+
+    if (uploading && upNum == n && pct >= 0 &&
+        !strcmp(upPid, sessRowPid)) {
+      char b[16];
+      snprintf(b, sizeof(b), LV_SYMBOL_UPLOAD " %d%%", pct);
+      lv_label_set_text(badge, b);
+      lv_obj_set_style_text_color(badge, lv_color_hex(COL_PRIMARY_DK), 0);
+    } else if (isSessionSynced(dir, n)) {
+      lv_label_set_text(badge, LV_SYMBOL_OK " SATE");
+      lv_obj_set_style_text_color(badge, lv_color_hex(COL_OK), 0);
+    } else {
+      lv_label_set_text(badge, "queued");
+      lv_obj_set_style_text_color(badge, lv_color_hex(COL_WARN), 0);
+    }
+  }
+}
 
 // --- Onboarding gate ------------------------------------------------------
 // Shown until the recorder is claimed to an account and has a patient roster.
@@ -1518,58 +1623,53 @@ static void showHomeScreen()
            p.age, p.sessionType, p.clinician);
   lv_label_set_text(patientRows, rows);
 
-  // Status + hint
-  statusLabel = lv_label_create(lv_scr_act());
-  lv_obj_set_style_text_color(statusLabel, lv_color_hex(0x0F766E), 0);
-  lv_obj_set_width(statusLabel, 220);
-  lv_label_set_long_mode(statusLabel, LV_LABEL_LONG_WRAP);
-  lv_obj_set_style_text_align(statusLabel, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_align(statusLabel, LV_ALIGN_TOP_MID, 0, 134);
+  (void)total; (void)pending;   // live footer reads counts via connectivity
 
-  hintLabel = lv_label_create(lv_scr_act());
-  lv_obj_set_style_text_color(hintLabel, lv_color_hex(COL_TEXT_MUTED), 0);
-  lv_obj_set_width(hintLabel, 220);
-  lv_label_set_long_mode(hintLabel, LV_LABEL_LONG_WRAP);
-  lv_obj_set_style_text_align(hintLabel, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_align(hintLabel, LV_ALIGN_TOP_MID, 0, 150);
+  // Always-visible upload status: a coloured dot + one plain-language line, with
+  // a thin byte-level bar that appears only while a session is streaming. No
+  // hidden Sync screen, no guessing - the device tells you what it's doing.
+  homeUpDot = lv_obj_create(lv_scr_act());
+  lv_obj_set_size(homeUpDot, 10, 10);
+  lv_obj_set_style_radius(homeUpDot, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_border_width(homeUpDot, 0, 0);
+  lv_obj_set_style_bg_color(homeUpDot, lv_color_hex(COL_OK), 0);
+  lv_obj_clear_flag(homeUpDot, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_align(homeUpDot, LV_ALIGN_TOP_LEFT, 14, 142);
+
+  homeUpText = lv_label_create(lv_scr_act());
+  setFont(homeUpText, &lv_font_montserrat_14);
+  lv_obj_set_style_text_color(homeUpText, lv_color_hex(COL_OK), 0);
+  lv_obj_align(homeUpText, LV_ALIGN_TOP_LEFT, 32, 138);
+
+  homeUpBar = lv_bar_create(lv_scr_act());
+  lv_obj_set_size(homeUpBar, 212, 6);
+  lv_obj_align(homeUpBar, LV_ALIGN_TOP_MID, 0, 162);
+  lv_obj_set_style_radius(homeUpBar, 3, LV_PART_MAIN);
+  lv_obj_set_style_radius(homeUpBar, 3, LV_PART_INDICATOR);
+  lv_bar_set_range(homeUpBar, 0, 1000);
+  lv_obj_set_style_bg_color(homeUpBar, lv_color_hex(COL_TRACK), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(homeUpBar, lv_color_hex(COL_PRIMARY), LV_PART_INDICATOR);
+  lv_obj_add_flag(homeUpBar, LV_OBJ_FLAG_HIDDEN);
 
   // The record control: a real recorder-style big red circle with a white ring
   // and a soft red glow. Tapping it starts a capture (runs until Stop).
   lv_obj_t *btnRecord = makeRecordButton();
-
-  // Secondary actions: a row of big, easy-to-hit buttons beneath the dial.
-  lv_obj_t *btnNext = makeActionButton(lv_scr_act(), "Next " LV_SYMBOL_RIGHT,
-                                       COL_PRIMARY_BG, COL_PRIMARY_DK, ACT_NEXT_PATIENT);
-  lv_obj_set_size(btnNext, 70, 44);
-  lv_obj_align(btnNext, LV_ALIGN_BOTTOM_LEFT, 10, -8);
-
-  lv_obj_t *btnSessions = makeActionButton(lv_scr_act(), LV_SYMBOL_LIST,
-                                           COL_PRIMARY_BG, COL_PRIMARY_DK, ACT_OPEN_SESSIONS);
-  lv_obj_set_size(btnSessions, 70, 44);
-  lv_obj_align(btnSessions, LV_ALIGN_BOTTOM_MID, 0, -8);
-
-  lv_obj_t *btnSync = makeActionButton(lv_scr_act(), LV_SYMBOL_UPLOAD,
-                                       pending > 0 ? COL_OK : COL_PRIMARY_BG,
-                                       pending > 0 ? 0xFFFFFF : COL_PRIMARY_DK,
-                                       ACT_OPEN_SYNC);
-  lv_obj_set_size(btnSync, 70, 44);
-  lv_obj_align(btnSync, LV_ALIGN_BOTTOM_RIGHT, -10, -8);
   (void)btnRecord;
 
-  setStatePill("READY", COL_OK_BG, COL_OK);
+  // Two big, easy-to-hit nav buttons. Uploading is automatic now, so there is
+  // no Sync button to find: Next patient + Sessions are all that's left.
+  lv_obj_t *btnNext = makeActionButton(lv_scr_act(), "Next " LV_SYMBOL_RIGHT,
+                                       COL_PRIMARY_BG, COL_PRIMARY_DK, ACT_NEXT_PATIENT);
+  lv_obj_set_size(btnNext, 104, 44);
+  lv_obj_align(btnNext, LV_ALIGN_BOTTOM_LEFT, 10, -8);
 
-  char status[80];
-  if (pending > 0) {
-    snprintf(status, sizeof(status), "%lu session(s)  -  %lu pending sync",
-             (unsigned long)total, (unsigned long)pending);
-    showStatus(status, "Tap Sync to send to SATE");
-  } else if (total > 0) {
-    snprintf(status, sizeof(status), "%lu session(s)  -  all synced to SATE",
-             (unsigned long)total);
-    showStatus(status, "Tap Record to start a new session");
-  } else {
-    showStatus("No sessions yet", "Tap Record to start a session");
-  }
+  lv_obj_t *btnSessions = makeActionButton(lv_scr_act(), LV_SYMBOL_LIST "  Sessions",
+                                           COL_PRIMARY_BG, COL_PRIMARY_DK, ACT_OPEN_SESSIONS);
+  lv_obj_set_size(btnSessions, 104, 44);
+  lv_obj_align(btnSessions, LV_ALIGN_BOTTOM_RIGHT, -10, -8);
+
+  setStatePill("READY", COL_OK_BG, COL_OK);
+  refreshHomeUpload();   // paint the live status immediately
 
   currentState = HOME;
 }
@@ -1609,13 +1709,15 @@ static void showSessionsScreen()
     return;
   }
 
-  // Show up to the 6 most recent sessions, newest first.
+  // Show up to the 6 most recent sessions, newest first. Each row's status
+  // badge is tracked so refreshSessionsUpload() can drive it live: the session
+  // in flight shows a percent, freshly-synced rows flip to the SATE tick.
   uint32_t first = (total > SESSIONS_LIST_MAX) ? total - SESSIONS_LIST_MAX + 1 : 1;
   int rowY = 76;
+  sessRowCount = 0;
+  snprintf(sessRowPid, sizeof(sessRowPid), "%s", p.patientId);
 
   for (uint32_t n = total; n >= first && n >= 1; n--) {
-    bool synced = isSessionSynced(dir, n);
-
     lv_obj_t *row = makeActionButton(lv_scr_act(), "", COL_CARD_BG, COL_TEXT_DARK,
                                      ACT_PLAY_SESSION, (int)n);
     lv_obj_set_size(row, 216, 34);
@@ -1632,13 +1734,18 @@ static void showSessionsScreen()
     lv_obj_align(name, LV_ALIGN_LEFT_MID, 6, 0);
 
     lv_obj_t *badge = lv_label_create(row);
-    lv_label_set_text(badge, synced ? LV_SYMBOL_OK " SATE" : "pending");
-    lv_obj_set_style_text_color(badge, lv_color_hex(synced ? COL_OK : COL_WARN), 0);
     lv_obj_align(badge, LV_ALIGN_RIGHT_MID, -6, 0);
+    if (sessRowCount < SESS_ROW_MAX) {
+      sessRowBadge[sessRowCount] = badge;
+      sessRowNum[sessRowCount]   = n;
+      sessRowCount++;
+    }
 
     rowY += 40;
     if (n == 1) break;   // avoid uint32 underflow
   }
+
+  refreshSessionsUpload();   // paint each badge's live status now
 
   lv_obj_t *hint = lv_label_create(lv_scr_act());
   lv_label_set_text(hint, "Tap a session to play it back");
@@ -2183,6 +2290,17 @@ void loop()
         runRecordSavePlaySession(false /*review*/); // runs until Stop is tapped
         connSetLiveState("idle");
       }
+    }
+
+    // Live upload status: drive the always-visible Home footer / Sessions
+    // badges every ~250 ms without rebuilding the screen, so uploading is
+    // visible and never confusing. Cheap (a couple of label/bar updates).
+    static uint32_t lastUpRefresh = 0;
+    uint32_t nowMs = millis();
+    if (nowMs - lastUpRefresh >= 250) {
+      lastUpRefresh = nowMs;
+      if (currentState == HOME)          refreshHomeUpload();
+      else if (currentState == SESSIONS) refreshSessionsUpload();
     }
 
     // Immediate GUI tick after any network/SD work so a screen rebuilt by the
