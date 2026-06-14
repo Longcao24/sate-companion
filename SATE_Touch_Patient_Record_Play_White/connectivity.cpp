@@ -674,10 +674,22 @@ static bool beginUpload(const PendingEntry &pe)
   upPort = (h[i] == ':') ? atoi(h + i + 1)
                          : (strncmp(cfgServer, "https", 5) == 0 ? 443 : 80);
 
+  // Path prefix from cfgServer after the host:port. The raw upload socket talks
+  // to the host directly, so it must carry the full path - e.g. Supabase needs
+  // "/functions/v1/device-api/api/sessions/chunk", while the mock-server has no
+  // prefix and uses "/api/sessions/chunk".
+  char prefix[80] = "";
+  const char *slash = strchr(h + i, '/');
+  if (slash) {
+    snprintf(prefix, sizeof(prefix), "%s", slash);
+    size_t pl = strlen(prefix);
+    while (pl > 0 && prefix[pl - 1] == '/') prefix[--pl] = '\0'; // trim trailing /
+  }
+
   snprintf(upMetaQuery, sizeof(upMetaQuery),
-           "/api/sessions/chunk?device_serial=%s&patient_id=%s"
+           "%s/api/sessions/chunk?device_serial=%s&patient_id=%s"
            "&session_number=%lu&sample_rate=%lu",
-           serialStr, pe.patientId,
+           prefix, serialStr, pe.patientId,
            (unsigned long)sessionNumber, (unsigned long)sampleRate);
   snprintf(upPid, sizeof(upPid), "%s", pe.patientId);
   upNum = pe.num;

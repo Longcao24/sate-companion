@@ -7,6 +7,7 @@ import React, {
 } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { User } from "./protocol";
+import { DEVICE_API_URL } from "./api/sateApi";
 
 export interface Settings {
   serverUrl: string;
@@ -16,9 +17,11 @@ export interface Settings {
 }
 
 const DEFAULTS: Settings = {
-  // Real SATE server. In dev this is the mock-server on the Mac's LAN IP - the
-  // board hits the SAME URL over Wi-Fi to register, so it can't be localhost.
-  serverUrl: "http://192.168.0.138:4000",
+  // Production SATE backend: the Supabase `device-api` Edge Function. The
+  // recorder is provisioned with this SAME URL, so it registers + auto-claims to
+  // the signed-in account. (Override with a mock-server URL on the Login screen
+  // for local dev.)
+  serverUrl: DEVICE_API_URL,
   token: null,
   user: null,
   autoSync: true,
@@ -32,8 +35,9 @@ interface Store {
 }
 
 const Ctx = createContext<Store | null>(null);
-// v2: dropped demo mode; bump invalidates any stale demo token / server URL.
-const KEY = "sate-companion-settings-v2";
+// v3: default server is now the Supabase device-api; bump invalidates any stale
+// mock-server URL / token saved under v2.
+const KEY = "sate-companion-settings-v3";
 
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [settings, setSettings] = useState<Settings>(DEFAULTS);

@@ -21,6 +21,15 @@ import {
   User,
 } from "../protocol";
 
+// SATE production backend (Supabase). The companion app talks to the `device-api`
+// Edge Function and authenticates with a real Supabase user session - the SAME
+// account as the web app, so a recorder provisioned here is auto-claimed to it.
+// The anon key is public by design (the web app ships it in its JS bundle).
+export const SUPABASE_URL = "https://zlgdpivcbmaodgokkdvz.supabase.co";
+export const SUPABASE_ANON_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpsZ2RwaXZjYm1hb2Rnb2trZHZ6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDk3NTY5NTgsImV4cCI6MjA2NTMzMjk1OH0.x58hiBi5EeRwbedrsrBzRkw7y2tFBw5ztIdmujZoPMQ";
+export const DEVICE_API_URL = `${SUPABASE_URL}/functions/v1/device-api`;
+
 export interface SateApi {
   login(email: string, password: string): Promise<{ token: string; user: User }>;
   listDevices(): Promise<ManagedDevice[]>;
@@ -61,6 +70,8 @@ export class HttpApi implements SateApi {
       ...init,
       headers: {
         "Content-Type": "application/json",
+        // Supabase Edge Functions gateway requires the apikey header.
+        apikey: SUPABASE_ANON_KEY,
         ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
         ...(init?.headers || {}),
       },
@@ -72,11 +83,29 @@ export class HttpApi implements SateApi {
     return res.status === 204 ? (undefined as T) : res.json();
   }
 
-  login(email: string, password: string) {
-    return this.req<{ token: string; user: User }>("/api/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ email, password }),
-    });
+  // Sign in against Supabase Auth (not device-api): returns a real user JWT that
+  // device-api validates, so every claimed device is bound to this account.
+  async login(email: string, password: string) {
+    const res = await fetch(
+      `${SUPABASE_URL}/auth/v1/token?grant_type=password`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
+        body: JSON.stringify({ email, password }),
+      }
+    );
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`${res.status} ${body || res.statusText}`);
+    }
+    const j = await res.json();
+    const u = j.user || {};
+    const user: User = {
+      id: u.id,
+      email: u.email,
+      name: u.user_metadata?.full_name || u.user_metadata?.name || u.email,
+    };
+    return { token: j.access_token as string, user };
   }
   listDevices() {
     return this.req<ManagedDevice[]>("/api/devices");
@@ -110,7 +139,7 @@ export class HttpApi implements SateApi {
     return this.req<UploadedSession[]>(`/api/sessions${q}`);
   }
   audioSource(sessionId: string) {
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { apikey: SUPABASE_ANON_KEY };
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
     return { uri: `${this.baseUrl}/api/sessions/${sessionId}/audio`, headers };
   }
