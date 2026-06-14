@@ -90,7 +90,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "0.9.0";
+static const char    *FIRMWARE_VERSION  = "0.9.1";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -1848,11 +1848,31 @@ static void runSync()
     runGui();
     pending = connPendingTotal();
     uint32_t done = (startPending > pending) ? (startPending - pending) : 0;
-    lv_bar_set_value(syncBar, startPending ? (int32_t)((done * 1000ULL) / startPending) : 1000,
-                     LV_ANIM_ON);
-    char t[48];
-    snprintf(t, sizeof(t), "%lu / %lu uploaded",
-             (unsigned long)done, (unsigned long)startPending);
+
+    // Smooth byte-level progress: blend completed sessions with the fraction of
+    // the session in flight, so a single small session still animates 0->100%
+    // instead of sitting at "0 / 1" until it lands all at once.
+    uint32_t permille;
+    uint32_t sent = 0, total = 0;
+    if (connUploadProgress(&sent, &total) && total) {
+      uint32_t base = (done * 1000ULL) / startPending;          // sessions done
+      uint32_t span = (startPending ? (1000ULL / startPending) : 1000);
+      permille = base + (uint32_t)((uint64_t)sent * span / total); // + current
+    } else {
+      permille = startPending ? (uint32_t)((done * 1000ULL) / startPending) : 1000;
+    }
+    if (permille > 1000) permille = 1000;
+    lv_bar_set_value(syncBar, (int32_t)permille, LV_ANIM_ON);
+
+    char t[64];
+    if (total) {
+      snprintf(t, sizeof(t), "%lu / %lu  -  %lu%%",
+               (unsigned long)done, (unsigned long)startPending,
+               (unsigned long)(permille / 10));
+    } else {
+      snprintf(t, sizeof(t), "%lu / %lu uploaded",
+               (unsigned long)done, (unsigned long)startPending);
+    }
     lv_label_set_text(syncBarText, t);
     delay(15);
   }

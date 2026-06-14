@@ -1268,6 +1268,18 @@ uint32_t connPendingTotal()
   return (uint32_t)scanPending();
 }
 
+// Byte-level progress of the session currently uploading. Returns true while a
+// session is in flight and fills *sent/*total with its byte counts, so the UI
+// can animate smoothly even for a single small session (the pending count is
+// only session-granular: 0/1 until the whole session lands).
+bool connUploadProgress(uint32_t *sent, uint32_t *total)
+{
+  if (!upActive || upTotal == 0) return false;
+  if (sent)  *sent  = (uint32_t)upServerOffset;
+  if (total) *total = (uint32_t)upTotal;
+  return true;
+}
+
 const char *connStatusText() { return statusText; }
 const char *connIp() { return ipText; }
 bool connSetupActive() { return bleClientConnected || provState != PROV_IDLE; }
