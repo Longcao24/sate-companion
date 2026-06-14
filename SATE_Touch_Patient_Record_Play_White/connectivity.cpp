@@ -198,6 +198,14 @@ static void sessionPath(char *out, size_t n, const char *pid, uint32_t num, cons
   snprintf(out, n, "/sate/patients/%s/session_%04lu.%s", pid, (unsigned long)num, ext);
 }
 
+// Path of segment `part` for a session, e.g. session_0001.part02.wav.
+static void sessionPartFile(char *out, size_t n, const char *pid, uint32_t num, int part)
+{
+  char ext[16];
+  snprintf(ext, sizeof(ext), "part%02d.wav", part);
+  sessionPath(out, n, pid, num, ext);
+}
+
 // True when the pending set may have changed (new recording, a sync, a roster
 // change) and scanPending() must re-walk the SD card. While false, scanPending
 // returns the cached count instead of walking every patient dir - that walk was
@@ -218,15 +226,29 @@ static int scanPending()
     const char *full = entry.name(); // basename or full path depending on core
     const char *pid = strrchr(full, '/');
     pid = pid ? pid + 1 : full;
-    char wav[160], mark[160];
+    char wav[160], part0[200], mark[160], pp[200];
     for (uint32_t i = 1; i <= 9999; i++) {
+      // A session exists if it has segment files (new) or a merged .wav (legacy).
       sessionPath(wav, sizeof(wav), pid, i, "wav");
-      if (!SD_MMC.exists(wav)) break;
+      sessionPartFile(part0, sizeof(part0), pid, i, 0);
+      bool hasWav   = SD_MMC.exists(wav);
+      bool hasParts = SD_MMC.exists(part0);
+      if (!hasWav && !hasParts) break; // sessions are contiguous; done here
       sessionPath(mark, sizeof(mark), pid, i, "synced");
       if (SD_MMC.exists(mark)) continue;
-      File f = SD_MMC.open(wav, FILE_READ);
-      uint32_t bytes = f ? (uint32_t)f.size() : 0;
-      if (f) f.close();
+
+      uint32_t bytes = 0;
+      if (hasWav) {
+        File f = SD_MMC.open(wav, FILE_READ);
+        if (f) { bytes = (uint32_t)f.size(); f.close(); }
+      } else {
+        for (int k = 0;; k++) {
+          sessionPartFile(pp, sizeof(pp), pid, i, k);
+          if (!SD_MMC.exists(pp)) break;
+          File f = SD_MMC.open(pp, FILE_READ);
+          if (f) { bytes += (uint32_t)f.size(); f.close(); }
+        }
+      }
       PendingEntry &pe = pendTable[pendCount++];
       snprintf(pe.patientId, sizeof(pe.patientId), "%s", pid);
       pe.num = i;
@@ -476,21 +498,22 @@ static bool httpJson(const char *method, const char *path, const char *body,
 // 2xx. The server appends in order (and is idempotent if a slice is re-sent), so
 // a dropped connection only costs this slice - retried at the same offset.
 static bool sendSessionChunk(const char *host, int port, const char *metaQuery,
-                             size_t offset, size_t len, bool isFinal, File &wf)
+                             size_t serverOffset, size_t fileSeek, size_t len,
+                             bool isFinal, File &wf)
 {
   WiFiClient client;
   client.setTimeout(15000);
   if (!client.connect(host, port)) return false;
 
   client.printf("POST %s&offset=%u&final=%d HTTP/1.1\r\n",
-                metaQuery, (unsigned)offset, isFinal ? 1 : 0);
+                metaQuery, (unsigned)serverOffset, isFinal ? 1 : 0);
   client.printf("Host: %s:%d\r\n", host, port);
   if (cfgDeviceKey[0]) client.printf("Authorization: Bearer %s\r\n", cfgDeviceKey);
   client.print("Content-Type: audio/wav\r\n");
   client.printf("Content-Length: %u\r\n", (unsigned)len);
   client.print("Connection: close\r\n\r\n");
 
-  if (!wf.seek(offset)) { client.stop(); return false; }
+  if (!wf.seek(fileSeek)) { client.stop(); return false; }
 
   static uint8_t upBuf[4096];
   size_t   sent = 0;
@@ -543,30 +566,29 @@ static bool sendSessionChunk(const char *host, int port, const char *metaQuery,
 // Memory stays flat - slices stream straight from SD.
 static const size_t UPLOAD_CHUNK_BYTES = 1024 * 1024;
 
-// Cooperative upload: ONE ~1 MB slice is sent per connLoop pass, then control
-// returns to loop() so the GUI gets a full frame and command polling keeps
-// running. A big recording therefore uploads in the background without the
-// device feeling laggy. State persists across passes.
+// Cooperative upload: a session is a sequence of source files (its 1-minute
+// segments, or one legacy merged .wav). Each pass sends ONE ~1 MB slice, then
+// returns to loop() so the GUI + command polling keep running. Segments are
+// streamed straight to the server (no on-device merge); the server appends them
+// by offset and patches the WAV header on the final slice.
 static bool     upActive = false;
-static File     upFile;
-static size_t   upWavLen = 0, upOffset = 0;
+static bool     upHasFile = false;
+static File     upFile;            // current source file, open across passes
 static int      upRetries = 0, upPort = 80;
 static char     upHost[80], upMetaQuery[224], upPid[24];
 static uint32_t upNum = 0, upStartMs = 0;
+static bool     upLegacy = false;  // single .wav vs segment files
+static int      upSrcIdx = 0, upLastSrc = 0;
+static size_t   upSrcBase = 0, upSrcLen = 0, upSrcPos = 0;
+static size_t   upServerOffset = 0, upTotal = 0;
 
 static bool beginUpload(const PendingEntry &pe)
 {
   if (WiFi.status() != WL_CONNECTED) return false;
-  char wavPath[160], jsonPath[160];
-  sessionPath(wavPath, sizeof(wavPath), pe.patientId, pe.num, "wav");
-  sessionPath(jsonPath, sizeof(jsonPath), pe.patientId, pe.num, "json");
-
-  upFile = SD_MMC.open(wavPath, FILE_READ);
-  if (!upFile) return false;
-  upWavLen = upFile.size();
-  if (upWavLen == 0) { upFile.close(); return false; }
 
   uint32_t sessionNumber = pe.num, sampleRate = 16000;
+  char jsonPath[160];
+  sessionPath(jsonPath, sizeof(jsonPath), pe.patientId, pe.num, "json");
   File jf = SD_MMC.open(jsonPath, FILE_READ);
   if (jf) {
     JsonDocument meta;
@@ -576,6 +598,34 @@ static bool beginUpload(const PendingEntry &pe)
     }
     jf.close();
   }
+
+  // Figure out the source list: a legacy merged .wav, or N segment files.
+  char wavPath[160], pp[200];
+  sessionPath(wavPath, sizeof(wavPath), pe.patientId, pe.num, "wav");
+  upTotal = 0;
+  if (SD_MMC.exists(wavPath)) {
+    upLegacy = true;
+    upLastSrc = 0;
+    File f = SD_MMC.open(wavPath, FILE_READ);
+    if (!f) return false;
+    upTotal = f.size();
+    f.close();
+  } else {
+    upLegacy = false;
+    int cnt = 0;
+    for (int k = 0;; k++) {
+      sessionPartFile(pp, sizeof(pp), pe.patientId, pe.num, k);
+      if (!SD_MMC.exists(pp)) break;
+      File f = SD_MMC.open(pp, FILE_READ);
+      size_t sz = f ? f.size() : 0;
+      if (f) f.close();
+      upTotal += (k == 0) ? sz : ((sz > 44) ? sz - 44 : 0); // part0 keeps header
+      cnt++;
+    }
+    if (cnt == 0) return false;
+    upLastSrc = cnt - 1;
+  }
+  if (upTotal == 0) return false;
 
   // host:port from cfgServer (e.g. "http://192.168.0.138:4000")
   const char *h = strstr(cfgServer, "://");
@@ -592,7 +642,9 @@ static bool beginUpload(const PendingEntry &pe)
            (unsigned long)sessionNumber, (unsigned long)sampleRate);
   snprintf(upPid, sizeof(upPid), "%s", pe.patientId);
   upNum = pe.num;
-  upOffset = 0;
+  upSrcIdx = 0;
+  upHasFile = false;
+  upServerOffset = 0;
   upRetries = 0;
   upActive = true;
   upStartMs = millis();
@@ -604,30 +656,75 @@ static bool beginUpload(const PendingEntry &pe)
 static void uploadStep()
 {
   if (!upActive) return;
-  size_t len = upWavLen - upOffset;
-  if (len > UPLOAD_CHUNK_BYTES) len = UPLOAD_CHUNK_BYTES;
-  bool isFinal = (upOffset + len >= upWavLen);
 
-  if (sendSessionChunk(upHost, upPort, upMetaQuery, upOffset, len, isFinal, upFile)) {
-    upOffset += len;
-    upRetries = 0;
-    sateHookUploadProgress((int)((uint64_t)upOffset * 100 / upWavLen));
-    if (upOffset >= upWavLen) {
-      upFile.close();
+  // Open the current source segment if needed.
+  if (!upHasFile) {
+    char path[200];
+    if (upLegacy) sessionPath(path, sizeof(path), upPid, upNum, "wav");
+    else          sessionPartFile(path, sizeof(path), upPid, upNum, upSrcIdx);
+    upFile = SD_MMC.open(path, FILE_READ);
+    if (!upFile) {
+      upActive = false;
+      sateHookUploadEnd();
+      Serial.printf("[CONN] upload: cannot open %s\n", path);
+      return;
+    }
+    size_t fsz = upFile.size();
+    upSrcBase = (upLegacy || upSrcIdx == 0) ? 0 : 44; // part>0: skip its WAV header
+    upSrcLen  = (fsz > upSrcBase) ? fsz - upSrcBase : 0;
+    upSrcPos  = 0;
+    upHasFile = true;
+  }
+
+  size_t len = upSrcLen - upSrcPos;
+  if (len > UPLOAD_CHUNK_BYTES) len = UPLOAD_CHUNK_BYTES;
+  bool lastOfSrc = (upSrcPos + len >= upSrcLen);
+  bool isFinal   = (upSrcIdx == upLastSrc && lastOfSrc);
+  size_t fileSeek = upSrcBase + upSrcPos;
+
+  if (len > 0 &&
+      !sendSessionChunk(upHost, upPort, upMetaQuery, upServerOffset, fileSeek, len, isFinal, upFile)) {
+    if (++upRetries >= 8) {
+      if (upHasFile) { upFile.close(); upHasFile = false; }
+      upActive = false; // sweep retries the whole session later (from offset 0)
+      sateHookUploadEnd();
+      Serial.printf("[CONN] upload stalled at %u/%u, will retry\n",
+                    (unsigned)upServerOffset, (unsigned)upTotal);
+    }
+    return;
+  }
+
+  // Slice sent (or empty source) - advance.
+  upServerOffset += len;
+  upSrcPos += len;
+  upRetries = 0;
+  if (upTotal) sateHookUploadProgress((int)((uint64_t)upServerOffset * 100 / upTotal));
+
+  if (lastOfSrc) {
+    upFile.close();
+    upHasFile = false;
+    if (upSrcIdx >= upLastSrc) {
       upActive = false;
       writeSyncMarker(upPid, upNum);
+      // Free the local audio now that it's on the server - the .synced marker
+      // keeps the session counted so the SD card doesn't fill with synced audio.
+      char ap[200];
+      if (upLegacy) { sessionPath(ap, sizeof(ap), upPid, upNum, "wav"); SD_MMC.remove(ap); }
+      else {
+        for (int k = 0;; k++) {
+          sessionPartFile(ap, sizeof(ap), upPid, upNum, k);
+          if (!SD_MMC.exists(ap)) break;
+          SD_MMC.remove(ap);
+        }
+      }
       sateHookUploadEnd();
       Serial.printf("[CONN] uploaded %s session %lu (%u bytes) in %lu ms\n",
-                    upPid, (unsigned long)upNum, (unsigned)upWavLen,
+                    upPid, (unsigned long)upNum, (unsigned)upServerOffset,
                     (unsigned long)(millis() - upStartMs));
       setStatus("Online (Wi-Fi) - %s", ipText);
+    } else {
+      upSrcIdx++; // next segment opens on the next pass
     }
-  } else if (++upRetries >= 8) {
-    upFile.close();
-    upActive = false; // give up for now; the sweep retries this session later
-    sateHookUploadEnd();
-    Serial.printf("[CONN] upload stalled at %u/%u, will retry\n",
-                  (unsigned)upOffset, (unsigned)upWavLen);
   }
 }
 

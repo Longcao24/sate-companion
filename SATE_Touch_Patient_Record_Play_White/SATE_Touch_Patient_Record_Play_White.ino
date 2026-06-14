@@ -86,11 +86,11 @@ static const int      REMOTE_RECORD_SECONDS = 8; // app/server-triggered capture
 // now feed the watchdog + service the GUI as they go, so length no longer
 // reboots or freezes the board; this is just a generous safety ceiling (30 min)
 // so a forgotten session can't fill the SD card.
-static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
+static const int      RECORD_MAX_SECONDS = 95; // TEST: validate no-merge segment upload
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "0.8.7";
+static const char    *FIRMWARE_VERSION  = "0.8.9";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -861,13 +861,61 @@ static void sessionPartPath(char *out, size_t outSize, const char *finalWav, int
   snprintf(out, outSize, "%.*s.part%02d.wav", (int)len, finalWav, part);
 }
 
-// Sessions are numbered contiguously from 1; first missing wav = next free.
+// A session exists if it has segment files / a legacy merged .wav, OR a .synced
+// marker (its audio was freed after upload but it still counts for numbering).
+static bool sessionExists(const char *dir, uint32_t n)
+{
+  char wav[160], pp[200], mark[160];
+  sessionWavPath(wav, sizeof(wav), dir, n);
+  sessionPartPath(pp, sizeof(pp), wav, 0);
+  sessionSyncMarkPath(mark, sizeof(mark), dir, n);
+  return SD_MMC.exists(pp) || SD_MMC.exists(wav) || SD_MMC.exists(mark);
+}
+
+// Delete a session's local audio (segments + any legacy wav), keeping the tiny
+// .json/.synced markers. Called once a session is safely on the server so the
+// SD card doesn't fill up with audio that's already uploaded.
+static void freeSessionAudio(const char *dir, uint32_t n)
+{
+  char wav[160], pp[200];
+  sessionWavPath(wav, sizeof(wav), dir, n);
+  SD_MMC.remove(wav);
+  for (int k = 0;; k++) {
+    sessionPartPath(pp, sizeof(pp), wav, k);
+    if (!SD_MMC.exists(pp)) break;
+    SD_MMC.remove(pp);
+  }
+}
+
+// On boot, reclaim space: any session already marked .synced has its audio on
+// the server, so drop the local copy.
+static void purgeSyncedAudio()
+{
+  File root = SD_MMC.open("/sate/patients");
+  if (!root) return;
+  File entry;
+  char dir[120], mark[160];
+  while ((entry = root.openNextFile())) {
+    if (!entry.isDirectory()) { entry.close(); continue; }
+    const char *full = entry.name();
+    const char *pid = strrchr(full, '/');
+    pid = pid ? pid + 1 : full;
+    snprintf(dir, sizeof(dir), "/sate/patients/%s", pid);
+    entry.close();
+    for (uint32_t i = 1; i <= 9999; i++) {
+      if (!sessionExists(dir, i)) break;
+      sessionSyncMarkPath(mark, sizeof(mark), dir, i);
+      if (SD_MMC.exists(mark)) freeSessionAudio(dir, i);
+    }
+  }
+  root.close();
+}
+
+// Sessions are numbered contiguously from 1; first missing = next free.
 static uint32_t findNextSessionIndex(const char *dir)
 {
-  char probe[160];
   for (uint32_t i = 1; i <= 9999; i++) {
-    sessionWavPath(probe, sizeof(probe), dir, i);
-    if (!SD_MMC.exists(probe)) return i;
+    if (!sessionExists(dir, i)) return i;
   }
   return 0;
 }
@@ -1198,23 +1246,13 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
     return false;
   }
 
-  // Stitch the 1-minute segments into the final session WAV. Done WITHOUT
-  // servicing LVGL: rendering from this deep in the record->merge call chain
-  // overflows the loop-task stack and reboots. The merge is bounded SD I/O
-  // (and blocks on the card, which yields), so a static "Saving..." is fine.
+  // No on-device merge: the 1-minute segments stay on the SD card and the
+  // server stitches them as they upload (chunked). Recording ends instantly -
+  // no "Saving..." wait.
   hideProgressOverlay();
-  setStatePill("SAVE", COL_WARN_BG, COL_WARN);
-  showStatus("Saving session", "Merging segments...");
-  lv_timer_handler(); // paint the "Saving..." frame once, before the merge
-  uint32_t merged = mergeSessionParts(wavPath, false);
-  if (merged == 0) {
-    showStatus("Save failed", "Could not merge segments");
-    return false;
-  }
-
-  *outPcmBytes = merged;
-  Serial.printf("Recording complete. %d segment(s), %lu PCM bytes\n",
-                part + 1, (unsigned long)merged);
+  *outPcmBytes = written;
+  Serial.printf("Recording complete. %d segment(s), %lu PCM bytes (no merge)\n",
+                part + 1, (unsigned long)written);
   return true;
 }
 
@@ -1273,6 +1311,62 @@ static bool playWavStreamFromSd(const char *path, const char *caption)
   file.close();
   hideProgressOverlay();
   logHeap("play end");
+  currentState = prev;
+  return true;
+}
+
+// Play a session for on-device review. New recordings are stored as 1-minute
+// segments (no merge), so play them back to back; fall back to a legacy merged
+// .wav if one exists.
+static bool playSessionAudio(const char *dir, uint32_t n, const char *caption)
+{
+  char wav[160];
+  sessionWavPath(wav, sizeof(wav), dir, n);
+  if (SD_MMC.exists(wav)) return playWavStreamFromSd(wav, caption);
+
+  char pp[200];
+  uint32_t totalPcm = 0;
+  for (int k = 0;; k++) {
+    sessionPartPath(pp, sizeof(pp), wav, k);
+    if (!SD_MMC.exists(pp)) break;
+    File f = SD_MMC.open(pp, FILE_READ);
+    if (f) { uint32_t sz = f.size(); totalPcm += (sz > 44) ? (sz - 44) : 0; f.close(); }
+  }
+  if (totalPcm == 0) { showStatus("Playback failed", "No audio"); return false; }
+
+  DeviceState prev = currentState;
+  currentState = PLAYING;
+  setStatePill("PLAY", COL_PRIMARY_BG, COL_PRIMARY_DK);
+  recordStopReq = false;
+  showProgressOverlay(caption, COL_PRIMARY, true /*Stop*/);
+
+  uint32_t played = 0, lastUiMs = 0;
+  for (int k = 0; !recordStopReq; k++) {
+    sessionPartPath(pp, sizeof(pp), wav, k);
+    if (!SD_MMC.exists(pp)) break;
+    File in = SD_MMC.open(pp, FILE_READ);
+    if (!in) continue;
+    if (in.size() > 44) {
+      in.seek(44); // skip each segment's header, play PCM
+      while (!recordStopReq) {
+        size_t got = in.read(audioChunk, AUDIO_CHUNK_BYTES);
+        if (got == 0) break;
+        es8311_i2s.write(audioChunk, got);
+        played += got;
+        uint32_t now = millis();
+        if (now - lastUiMs >= 200) {
+          lastUiMs = now;
+          uint32_t secLeft = (totalPcm - played + PCM_BYTES_PER_SEC - 1) / PCM_BYTES_PER_SEC;
+          char big[8];
+          snprintf(big, sizeof(big), "%lu", (unsigned long)secLeft);
+          updateProgress((uint16_t)((played * 1000ULL) / totalPcm), big);
+          lv_timer_handler();
+        }
+      }
+    }
+    in.close();
+  }
+  hideProgressOverlay();
   currentState = prev;
   return true;
 }
@@ -1893,18 +1987,17 @@ static void runRecordSavePlaySession(bool review = true,
 
 static void playSessionFromList(int sessionNum)
 {
-  char dir[96], wavPath[160];
+  char dir[96];
   patientDirPath(dir, sizeof(dir));
-  sessionWavPath(wavPath, sizeof(wavPath), dir, (uint32_t)sessionNum);
 
-  if (!SD_MMC.exists(wavPath)) {
+  if (!sessionExists(dir, (uint32_t)sessionNum)) {
     showSessionsScreen();
     return;
   }
 
   char caption[40];
   snprintf(caption, sizeof(caption), "playing session_%04d", sessionNum);
-  playWavStreamFromSd(wavPath, caption);
+  playSessionAudio(dir, (uint32_t)sessionNum, caption);
   showSessionsScreen();
 }
 
@@ -1985,7 +2078,9 @@ void setup()
     return;
   }
   loadPatientsFromSd();                   // server/app-pushed list, if any
-  recoverOrphanSegments();                // stitch any session left mid-record
+  purgeSyncedAudio();                      // reclaim SD: drop audio already synced
+  // No merge to recover: segments left by a crash are just an unsynced session
+  // and upload normally on the next sync.
 
   bootStepBegin(2);                       // audio codec (real init)
   bool audioOk = initAudio();

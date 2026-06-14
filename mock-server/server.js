@@ -31,6 +31,8 @@ let devices = [];
 let claims = {};            // claim_token -> true
 let commands = {};          // device_id -> [ops]
 let sessions = [];
+let sessionSeq = 0; // monotonic; ids stay unique even after sessions are deleted
+function nextSessionId() { return "s-" + (++sessionSeq); }
 let patients = [
   { patient_id: "PT-1001", name: "Maya Nguyen", age: "7y 4m", session_type: "Articulation", clinician: "Dr. Taylor" },
   { patient_id: "PT-1002", name: "Ethan Brooks", age: "5y 9m", session_type: "Language Sample", clinician: "SLP Morgan" },
@@ -42,6 +44,20 @@ try {
   const saved = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
   devices = saved.devices || [];
   sessions = saved.sessions || [];
+  // Heal data written by the old length-based id scheme: drop duplicate files
+  // and give any colliding ids a fresh unique one.
+  const byFile = new Map();
+  for (const s of sessions) byFile.set(s.file, s); // last wins
+  sessions = [...byFile.values()];
+  sessionSeq = sessions.reduce((m, s) => {
+    const n = parseInt(String(s.id).replace(/\D/g, ""), 10);
+    return Number.isFinite(n) && n > m ? n : m;
+  }, 0);
+  const seenIds = new Set();
+  for (const s of sessions) {
+    if (seenIds.has(s.id)) s.id = nextSessionId();
+    seenIds.add(s.id);
+  }
   if (Array.isArray(saved.patients) && saved.patients.length) patients = saved.patients;
   devices.forEach((d) => (commands[d.id] ||= []));
   console.log(`loaded ${devices.length} device(s), ${sessions.length} session(s), ${patients.length} patient(s)`);
@@ -164,17 +180,23 @@ app.put("/api/patients", (req, res) => {
 });
 
 // Helper: persist one uploaded WAV + its metadata sidecar, return the id.
+// Dedupes by file so re-uploading the same session updates it in place (keeps
+// session ids unique - duplicate ids broke the app's list keys).
 function storeSession(meta, wav) {
-  const id = "s-" + (sessions.length + 1);
   const stem = `${meta.device_serial || "unknown"}_${meta.patient_id || "PT"}_session_${String(
     meta.session_number ?? 0
   ).padStart(4, "0")}`;
-  fs.writeFileSync(path.join(UPLOAD_DIR, `${stem}.wav`), wav);
+  const file = `${stem}.wav`;
+  fs.writeFileSync(path.join(UPLOAD_DIR, file), wav);
+  const existing = sessions.find((s) => s.file === file);
+  const id = existing ? existing.id : nextSessionId();
   fs.writeFileSync(
     path.join(UPLOAD_DIR, `${stem}.json`),
     JSON.stringify({ id, ...meta, bytes: wav.length, at: new Date().toISOString() }, null, 2)
   );
-  sessions.push({ id, ...meta, bytes: wav.length, file: `${stem}.wav`, at: new Date().toISOString() });
+  const row = { id, ...meta, bytes: wav.length, file, at: new Date().toISOString() };
+  if (existing) Object.assign(existing, row);
+  else sessions.push(row);
   persist();
   return { id, stem };
 }
@@ -202,12 +224,16 @@ app.post("/api/sessions/raw", express.raw({ type: () => true, limit: "200mb" }),
 // appends in order; offset 0 (re)starts the file, and ?final=1 registers it.
 function registerExistingSession(meta, wavPath) {
   const bytes = fs.existsSync(wavPath) ? fs.statSync(wavPath).size : 0;
-  const id = "s-" + (sessions.length + 1);
+  const file = path.basename(wavPath);
+  const existing = sessions.find((s) => s.file === file);
+  const id = existing ? existing.id : nextSessionId();
   fs.writeFileSync(
     wavPath.replace(/\.wav$/, ".json"),
     JSON.stringify({ id, ...meta, bytes, at: new Date().toISOString() }, null, 2)
   );
-  sessions.push({ id, ...meta, bytes, file: path.basename(wavPath), at: new Date().toISOString() });
+  const row = { id, ...meta, bytes, file, at: new Date().toISOString() };
+  if (existing) Object.assign(existing, row); // re-sent final slice: update, no dup
+  else sessions.push(row);
   persist();
   return id;
 }
@@ -235,9 +261,20 @@ app.post("/api/sessions/chunk", express.raw({ type: () => true, limit: "8mb" }),
   else return res.status(409).json({ error: "offset gap", expected: have });
 
   if (isFinal) {
+    // The recorder streams its 1-minute segments straight up (no on-device
+    // merge). The assembled file starts with the FIRST segment's WAV header,
+    // which only claims one segment's length - rewrite the RIFF/data sizes to
+    // the real total so the stitched file is a valid WAV.
+    const fd = fs.openSync(wavPath, "r+");
+    const sz = fs.fstatSync(fd).size;
+    if (sz >= 44) {
+      const b = Buffer.alloc(4);
+      b.writeUInt32LE(sz - 8, 0); fs.writeSync(fd, b, 0, 4, 4);   // RIFF chunk size
+      b.writeUInt32LE(sz - 44, 0); fs.writeSync(fd, b, 0, 4, 40); // data chunk size
+    }
+    fs.closeSync(fd);
     const id = registerExistingSession(meta, wavPath);
-    const sz = fs.statSync(wavPath).size;
-    console.log(`session uploaded (chunked) -> uploads/${stem}.wav (${sz} bytes)`);
+    console.log(`session uploaded (segments) -> uploads/${stem}.wav (${sz} bytes)`);
     return res.json({ id, done: true });
   }
   res.json({ ok: true, received: fs.statSync(wavPath).size });
