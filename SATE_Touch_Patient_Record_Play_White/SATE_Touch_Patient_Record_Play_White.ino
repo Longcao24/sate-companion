@@ -86,11 +86,11 @@ static const int      REMOTE_RECORD_SECONDS = 8; // app/server-triggered capture
 // now feed the watchdog + service the GUI as they go, so length no longer
 // reboots or freezes the board; this is just a generous safety ceiling (30 min)
 // so a forgotten session can't fill the SD card.
-static const int      RECORD_MAX_SECONDS = 95; // TEST: validate no-merge segment upload
+static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "0.8.9";
+static const char    *FIRMWARE_VERSION  = "0.9.0";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
