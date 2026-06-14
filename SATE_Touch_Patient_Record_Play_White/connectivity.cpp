@@ -9,6 +9,7 @@
 
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <NimBLEDevice.h>
 #include <Preferences.h>
 #include <SD_MMC.h>
@@ -61,6 +62,22 @@ static char       cfgPass[65]    = "";
 static char       cfgServer[96]  = "";
 static char       cfgDeviceId[48] = "";
 static char       cfgDeviceKey[64] = "";
+
+// Supabase project anon (publishable) key. The Supabase Edge Functions gateway
+// requires an `apikey` header on every request; this key is public by design
+// (the web app ships it in its JS bundle), so embedding it here is the same
+// trust level. Sent on all device-api calls when cfgServer points at Supabase.
+static const char *SUPABASE_ANON_KEY =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+  "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpsZ2RwaXZjYm1hb2Rnb2trZHZ6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDk3NTY5NTgsImV4cCI6MjA2NTMzMjk1OH0."
+  "x58hiBi5EeRwbedrsrBzRkw7y2tFBw5ztIdmujZoPMQ";
+
+// True when the provisioned server is a Supabase Functions endpoint (so we add
+// the apikey header). Plain mock-server / self-hosted endpoints skip it.
+static inline bool serverIsSupabase()
+{
+  return strstr(cfgServer, "supabase.co") != nullptr;
+}
 
 static Preferences prefs;
 
@@ -454,6 +471,7 @@ static void statusErr(const char *op, const char *msg)
 // also drives LVGL) stalls for a request round-trip instead of a full connect.
 // Short timeouts cap the worst-case UI freeze if the link drops mid-poll.
 static WiFiClient s_httpClient;
+static WiFiClientSecure s_httpsClient;   // for Supabase (HTTPS)
 static HTTPClient s_http;
 
 static bool httpJson(const char *method, const char *path, const char *body,
@@ -466,13 +484,21 @@ static bool httpJson(const char *method, const char *path, const char *body,
   s_http.setReuse(true);          // keep the socket open between calls
   s_http.setConnectTimeout(2000); // don't hang the UI waiting to connect
   s_http.setTimeout(2500);        // ...or waiting on a reply
-  if (!s_http.begin(s_httpClient, url)) return false;
+  bool began;
+  if (serverIsSupabase()) {
+    s_httpsClient.setInsecure();  // skip cert chain (anon key is the auth)
+    began = s_http.begin(s_httpsClient, url);
+  } else {
+    began = s_http.begin(s_httpClient, url);
+  }
+  if (!began) return false;
   s_http.addHeader("Content-Type", "application/json");
   if (cfgDeviceKey[0]) {
     char auth[80];
     snprintf(auth, sizeof(auth), "Bearer %s", cfgDeviceKey);
     s_http.addHeader("Authorization", auth);
   }
+  if (serverIsSupabase()) s_http.addHeader("apikey", SUPABASE_ANON_KEY);
   int code = body ? s_http.sendRequest(method, (uint8_t *)body, strlen(body))
                   : s_http.sendRequest(method);
   if (codeOut) *codeOut = code;
@@ -507,7 +533,12 @@ static bool sendSessionChunk(const char *host, int port, const char *metaQuery,
                              size_t serverOffset, size_t fileSeek, size_t len,
                              bool isFinal, File &wf)
 {
-  WiFiClient client;
+  // WiFiClientSecure IS-A WiFiClient, so one reference drives both: TLS to
+  // Supabase (port 443), plain HTTP to a local/self-hosted server.
+  WiFiClient plain;
+  WiFiClientSecure tls;
+  if (serverIsSupabase()) tls.setInsecure();
+  WiFiClient &client = serverIsSupabase() ? static_cast<WiFiClient &>(tls) : plain;
   client.setTimeout(15000);
   if (!client.connect(host, port)) return false;
 
@@ -515,6 +546,7 @@ static bool sendSessionChunk(const char *host, int port, const char *metaQuery,
                 metaQuery, (unsigned)serverOffset, isFinal ? 1 : 0);
   client.printf("Host: %s:%d\r\n", host, port);
   if (cfgDeviceKey[0]) client.printf("Authorization: Bearer %s\r\n", cfgDeviceKey);
+  if (serverIsSupabase()) client.printf("apikey: %s\r\n", SUPABASE_ANON_KEY);
   client.print("Content-Type: audio/wav\r\n");
   client.printf("Content-Length: %u\r\n", (unsigned)len);
   client.print("Connection: close\r\n\r\n");
@@ -639,7 +671,8 @@ static bool beginUpload(const PendingEntry &pe)
   size_t i = 0;
   while (h[i] && h[i] != ':' && h[i] != '/' && i < sizeof(upHost) - 1) { upHost[i] = h[i]; i++; }
   upHost[i] = '\0';
-  upPort = (h[i] == ':') ? atoi(h + i + 1) : 80;
+  upPort = (h[i] == ':') ? atoi(h + i + 1)
+                         : (strncmp(cfgServer, "https", 5) == 0 ? 443 : 80);
 
   snprintf(upMetaQuery, sizeof(upMetaQuery),
            "/api/sessions/chunk?device_serial=%s&patient_id=%s"
@@ -903,12 +936,17 @@ static void handleProvisionTick()
     // register before we have a device key; server allows this route unauthenticated
     char url[192];
     snprintf(url, sizeof(url), "%s/api/devices/register", provServer);
-    WiFiClient client;
+    WiFiClient plain;
+    WiFiClientSecure tls;
+    bool useTls = strstr(provServer, "supabase.co") != nullptr;
+    if (useTls) tls.setInsecure();
+    WiFiClient &client = useTls ? static_cast<WiFiClient &>(tls) : plain;
     HTTPClient http;
     http.setTimeout(8000);
     bool ok = false;
     if (http.begin(client, url)) {
       http.addHeader("Content-Type", "application/json");
+      if (useTls) http.addHeader("apikey", SUPABASE_ANON_KEY);
       int code = http.POST((uint8_t *)body, strlen(body));
       if (code >= 200 && code < 300) {
         JsonDocument doc;
