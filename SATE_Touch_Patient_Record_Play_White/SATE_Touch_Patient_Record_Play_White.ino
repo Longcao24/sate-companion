@@ -90,7 +90,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "0.9.3";
+static const char    *FIRMWARE_VERSION  = "0.9.4";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -344,6 +344,10 @@ static void setScreenWhite()
 {
   lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(COL_BG), 0);
   lv_obj_set_style_bg_opa(lv_scr_act(), LV_OPA_COVER, 0);
+  // Pin the screen: a child that overruns 240x320 by a pixel must not make the
+  // whole page pan. Kill scrolling + the scrollbar on every screen.
+  lv_obj_clear_flag(lv_scr_act(), LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scrollbar_mode(lv_scr_act(), LV_SCROLLBAR_MODE_OFF);
 }
 
 static void setStatePill(const char *text, uint32_t bg, uint32_t fg)
@@ -1639,6 +1643,8 @@ static void showHomeScreen()
   homeUpText = lv_label_create(lv_scr_act());
   setFont(homeUpText, &lv_font_montserrat_14);
   lv_obj_set_style_text_color(homeUpText, lv_color_hex(COL_OK), 0);
+  lv_obj_set_width(homeUpText, 194);                 // 32px left + 14px right margin
+  lv_label_set_long_mode(homeUpText, LV_LABEL_LONG_DOT); // clip, never overflow
   lv_obj_align(homeUpText, LV_ALIGN_TOP_LEFT, 32, 138);
 
   homeUpBar = lv_bar_create(lv_scr_act());
