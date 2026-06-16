@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Pressable,
@@ -44,11 +44,35 @@ export function RecorderSettingsScreen({
   const [name, setName] = useState(device.name);
   const [note, setNote] = useState<string | null>(null);
   const [restarting, setRestarting] = useState(false);
+  // The "About" panel reads LIVE from the server, not the snapshot we navigated
+  // in with — fw/IP/last-seen/online/pending all come from `sate_devices` via
+  // api.listDevices() so they stay current while this screen is open.
+  const [live, setLive] = useState<ManagedDevice>(device);
   const mounted = useRef(true);
 
   const setIf = (fn: () => void) => {
     if (mounted.current) fn();
   };
+
+  // Pull this recorder's record from the server on open + every few seconds.
+  useEffect(() => {
+    mounted.current = true;
+    const pull = async () => {
+      try {
+        const list = await api.listDevices();
+        const fresh = list.find((d) => d.id === device.id);
+        if (fresh && mounted.current) setLive(fresh);
+      } catch {
+        // keep last-known; the server may be briefly unreachable
+      }
+    };
+    pull();
+    const t = setInterval(pull, 4000);
+    return () => {
+      mounted.current = false;
+      clearInterval(t);
+    };
+  }, [api, device.id]);
 
   const rename = async () => {
     try {
@@ -80,7 +104,7 @@ export function RecorderSettingsScreen({
     setRestarting(true);
     setNote(null);
     try {
-      if (device.online) {
+      if (live.online) {
         await api.sendCommand(device.id, "reboot");
         setIf(() => setNote("Recorder is restarting"));
       } else {
@@ -155,16 +179,37 @@ export function RecorderSettingsScreen({
           </Pressable>
         </View>
 
-        {/* identity */}
+        {/* identity — live from the server (sate_devices), refreshed on a timer */}
         <Text style={s.sectionHdr}>About this recorder</Text>
         <View style={s.panel}>
-          <Detail k="Serial" v={device.serial} />
-          <Detail k="Firmware" v={device.fw} />
-          {device.ip ? <Detail k="IP address" v={device.ip} /> : null}
-          <Detail k="Last seen" v={timeAgo(device.last_seen)} />
+          <View style={s.detailRow}>
+            <Text style={s.detailK}>Status</Text>
+            <View style={s.statusVal}>
+              <View
+                style={[
+                  s.statusDot,
+                  { backgroundColor: live.online ? D.green : D.amber },
+                ]}
+              />
+              <Text style={[s.detailV, { color: live.online ? D.green : D.amber }]}>
+                {live.online
+                  ? live.state === "recording"
+                    ? "Recording"
+                    : live.state === "uploading"
+                    ? "Uploading"
+                    : "Online"
+                  : "Off Wi-Fi"}
+              </Text>
+            </View>
+          </View>
+          <Detail k="Serial" v={live.serial} />
+          <Detail k="Firmware" v={live.fw || "—"} />
+          {live.ip ? <Detail k="IP address" v={live.ip} /> : null}
+          {live.slp ? <Detail k="Assigned to" v={live.slp} /> : null}
+          <Detail k="Last seen" v={timeAgo(live.last_seen)} />
           <Detail
             k="Waiting to sync"
-            v={`${device.pending_sessions} session(s)`}
+            v={`${live.pending_sessions} session(s)`}
           />
         </View>
 
@@ -260,6 +305,8 @@ const s = StyleSheet.create({
   },
   detailK: { color: D.sub, fontSize: 14 },
   detailV: { color: D.ink, fontSize: 14, fontWeight: "700" },
+  statusVal: { flexDirection: "row", alignItems: "center", gap: 6 },
+  statusDot: { width: 8, height: 8, borderRadius: 4 },
 
   rowBtn: {
     flexDirection: "row",

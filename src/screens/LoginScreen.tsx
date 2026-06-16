@@ -5,9 +5,10 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  View,
 } from "react-native";
 import { makeApi } from "../api/sateApi";
-import { Button, Card, Field, GlassBackground, Muted } from "../components/ui";
+import { Button, Card, Field, GlassBackground, Logo, Muted } from "../components/ui";
 import { useStore } from "../store";
 import { D } from "../theme";
 
@@ -24,8 +25,17 @@ export function LoginScreen() {
     setError(null);
     try {
       const api = makeApi(serverUrl.trim(), null);
-      const { token, user } = await api.login(email.trim(), password);
-      update({ serverUrl: serverUrl.trim(), token, user });
+      const { token, refreshToken, expiresAt, user } = await api.login(
+        email.trim(),
+        password
+      );
+      update({
+        serverUrl: serverUrl.trim(),
+        token,
+        refreshToken,
+        tokenExpiresAt: expiresAt,
+        user,
+      });
     } catch (e: any) {
       setError(e?.message ?? "Sign-in failed");
     } finally {
@@ -44,9 +54,12 @@ export function LoginScreen() {
         contentContainerStyle={s.content}
         keyboardShouldPersistTaps="handled"
       >
-        <Text style={s.logo}>
-          SATE <Text style={{ color: D.sky }}>Companion</Text>
-        </Text>
+        <View style={s.brandRow}>
+          <Logo size={48} />
+          <Text style={s.logo}>
+            SATE <Text style={{ color: D.sky }}>Companion</Text>
+          </Text>
+        </View>
         <Muted style={{ marginBottom: 24 }}>
           Sign in with your SATE account - the same one you use on the web.
           Recorders you set up are saved to this account.
@@ -83,6 +96,7 @@ const s = StyleSheet.create({
   flex: { flex: 1, backgroundColor: D.bg },
   scroll: { flex: 1, backgroundColor: "transparent" },
   content: { padding: 20, paddingTop: 80 },
-  logo: { fontSize: 30, fontWeight: "800", color: D.ink, marginBottom: 6 },
+  brandRow: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 6 },
+  logo: { fontSize: 28, fontWeight: "800", color: D.ink },
   error: { color: D.red, fontSize: 13, marginBottom: 4 },
 });

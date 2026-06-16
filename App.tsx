@@ -1,14 +1,15 @@
-import React, { useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { StatusBar } from "expo-status-bar";
 import { View } from "react-native";
-import { makeApi } from "./src/api/sateApi";
+import { makeApi, refreshSession, RefreshError, RefreshHandler } from "./src/api/sateApi";
 import { makeLink } from "./src/ble/SateBle";
-import { ManagedDevice } from "./src/protocol";
+import { ManagedDevice, UploadedSession } from "./src/protocol";
 import { DevicePreviewScreen } from "./src/screens/DevicePreviewScreen";
 import { HomeScreen } from "./src/screens/HomeScreen";
 import { LoginScreen } from "./src/screens/LoginScreen";
 import { ProvisionScreen } from "./src/screens/ProvisionScreen";
 import { RecorderSettingsScreen } from "./src/screens/RecorderSettingsScreen";
+import { ReportScreen } from "./src/screens/ReportScreen";
 import { SettingsScreen } from "./src/screens/SettingsScreen";
 import { StoreProvider, useStore } from "./src/store";
 import { useAutoSync } from "./src/sync/AutoSync";
@@ -19,17 +20,70 @@ type Screen =
   | { name: "provision" }
   | { name: "recorderSettings"; device: ManagedDevice }
   | { name: "preview" }
+  | { name: "report"; session: UploadedSession }
   | { name: "settings" };
 
 function Root() {
-  const { settings, ready } = useStore();
+  const { settings, ready, update, signOut } = useStore();
   const [screen, setScreen] = useState<Screen>({ name: "home" });
 
+  // Latest store handles + refresh token, read through a ref so `doRefresh` can
+  // stay identity-stable (no churn of `api` / dependent effects every render).
+  const storeRef = useRef({ update, signOut, refreshToken: settings.refreshToken });
+  storeRef.current = { update, signOut, refreshToken: settings.refreshToken };
+  // Single in-flight refresh, shared by the proactive timer and any 401 retry,
+  // so parallel callers don't race (Supabase rotates refresh tokens).
+  const refreshing = useRef<Promise<string | null> | null>(null);
+
+  const doRefresh = useCallback<RefreshHandler>(() => {
+    if (refreshing.current) return refreshing.current;
+    const rt = storeRef.current.refreshToken;
+    if (!rt) return Promise.resolve(null);
+    refreshing.current = (async () => {
+      try {
+        const r = await refreshSession(rt);
+        storeRef.current.update({
+          token: r.token,
+          refreshToken: r.refreshToken,
+          tokenExpiresAt: r.expiresAt,
+        });
+        return r.token;
+      } catch (e) {
+        // Only sign out when the refresh token is genuinely dead. A network blip
+        // must NOT log the user out — the session is kept and retried later.
+        if (e instanceof RefreshError && e.authInvalid) storeRef.current.signOut();
+        return null;
+      } finally {
+        refreshing.current = null;
+      }
+    })();
+    return refreshing.current;
+  }, []);
+
+  // The api self-heals: on a 401 it calls doRefresh, swaps in the fresh token,
+  // and replays the request — so an expired access token never reaches the UI.
   const api = useMemo(
-    () => makeApi(settings.serverUrl, settings.token),
-    [settings.serverUrl, settings.token]
+    () => makeApi(settings.serverUrl, settings.token, doRefresh),
+    [settings.serverUrl, settings.token, doRefresh]
   );
   const link = useMemo(() => makeLink(), []);
+
+  // Belt-and-suspenders: also refresh proactively just before expiry, so most
+  // calls never even see a 401. Together with the 401 retry above, a signed-in
+  // user stays signed in for as long as the refresh token lives (weeks) — the
+  // session persists like the web app's, no surprise re-logins.
+  useEffect(() => {
+    if (!settings.token || !settings.refreshToken) return;
+    const tick = () => {
+      const exp = settings.tokenExpiresAt ?? 0;
+      // refresh when within 5 min of expiry (or already past)
+      if (Date.now() < exp - 5 * 60 * 1000) return;
+      doRefresh();
+    };
+    tick();
+    const t = setInterval(tick, 60 * 1000);
+    return () => clearInterval(t);
+  }, [settings.token, settings.refreshToken, settings.tokenExpiresAt, doRefresh]);
 
   // Background BLE bridge runs while signed in + enabled, except where a screen
   // needs exclusive use of the radio (first-time setup or a recorder restart).
@@ -63,6 +117,14 @@ function Root() {
           onOpenRecorderSettings={(device) =>
             setScreen({ name: "recorderSettings", device })
           }
+          onOpenReport={(session) => setScreen({ name: "report", session })}
+        />
+      )}
+      {screen.name === "report" && (
+        <ReportScreen
+          api={api}
+          session={screen.session}
+          onClose={() => setScreen({ name: "home" })}
         />
       )}
       {screen.name === "recorderSettings" && (

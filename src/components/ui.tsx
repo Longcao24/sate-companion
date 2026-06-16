@@ -1,6 +1,7 @@
 import React, { ReactNode } from "react";
 import {
   ActivityIndicator,
+  Image,
   KeyboardTypeOptions,
   Pressable,
   StyleSheet,
@@ -39,6 +40,17 @@ export function Glass({
 // Solid dark backdrop behind a screen's content.
 export function GlassBackground() {
   return <View style={s.base} pointerEvents="none" />;
+}
+
+// The SATE gradient mark (transparent PNG, reads on the dark theme). Square.
+export function Logo({ size = 22, style }: { size?: number; style?: any }) {
+  return (
+    <Image
+      source={require("../../assets/sate-mark.png")}
+      style={[{ width: size, height: size }, style]}
+      resizeMode="contain"
+    />
+  );
 }
 
 export function Card({ children, style }: { children: ReactNode; style?: any }) {

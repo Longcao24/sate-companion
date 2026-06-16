@@ -21,7 +21,7 @@ import {
 import { StatusBar } from "expo-status-bar";
 import { SateApi } from "../api/sateApi";
 import { FoundDevice, SateLink } from "../ble/SateBle";
-import { GlassBackground } from "../components/ui";
+import { GlassBackground, Logo } from "../components/ui";
 import {
   ManagedDevice,
   Patient,
@@ -52,6 +52,15 @@ function durationLabel(bytes: number, sampleRate = 16000): string {
   return `${secs}s`;
 }
 
+// Processing state of an uploaded session, derived the SAME way the web app's
+// Device tab does (Received → Processing → Ready / Failed).
+type SessionStatus = "processing" | "ready" | "failed";
+function statusOf(u: UploadedSession): SessionStatus {
+  if (u.process_error) return "failed";
+  if (u.processed && u.recording_id) return "ready";
+  return "processing";
+}
+
 export function HomeScreen({
   api,
   link,
@@ -59,6 +68,7 @@ export function HomeScreen({
   onOpenPreview,
   onSetupNew,
   onOpenRecorderSettings,
+  onOpenReport,
 }: {
   api: SateApi;
   link: SateLink;
@@ -66,6 +76,7 @@ export function HomeScreen({
   onOpenPreview: () => void;
   onSetupNew: () => void;
   onOpenRecorderSettings: (d: ManagedDevice) => void;
+  onOpenReport: (session: UploadedSession) => void;
 }) {
   const [devices, setDevices] = useState<ManagedDevice[]>([]);
   const [selId, setSelId] = useState<string | null>(null);
@@ -75,6 +86,10 @@ export function HomeScreen({
   const [note, setNote] = useState<string | null>(null);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  // True when the LAST device fetch failed (auth/network). Lets us tell a
+  // genuinely empty account apart from "couldn't reach the server", so we never
+  // show "set up a recorder" to someone who already owns one over the internet.
+  const [fetchFailed, setFetchFailed] = useState(false);
   const mounted = useRef(true);
 
   // "New recording" sheet: the SLP types who the session is for before it starts.
@@ -181,6 +196,7 @@ export function HomeScreen({
       if (!mounted.current) return;
       setDevices(list);
       setLoaded(true);
+      setFetchFailed(false);
       const current = list.find((d) => d.id === selId) ?? list[0];
       if (current) {
         const [ups, roster] = await Promise.all([
@@ -195,7 +211,10 @@ export function HomeScreen({
         setUploads([]);
       }
     } catch {
-      if (mounted.current) setLoaded(true); // show empty/last-known, keep polling
+      if (mounted.current) {
+        setLoaded(true); // show empty/last-known, keep polling
+        setFetchFailed(true);
+      }
     }
   };
 
@@ -325,6 +344,50 @@ export function HomeScreen({
     );
   }
 
+  // ---- couldn't reach the server: don't pretend the account has no recorder.
+  // The device lives on the server and is controllable over the internet; we
+  // just failed to load it (expired session / offline phone). Offer a retry. ----
+  if (devices.length === 0 && fetchFailed) {
+    return (
+      <View style={s.flex}>
+        <GlassBackground />
+        <StatusBar style="light" />
+        <View style={s.emptyTop}>
+          <View style={s.brandRow}>
+            <Logo size={18} />
+            <Text style={s.brand}>SATE</Text>
+          </View>
+          <Pressable
+            onPress={onOpenSettings}
+            hitSlop={10}
+            accessibilityRole="button"
+            style={({ pressed }) => ({ opacity: pressed ? 0.5 : 1 })}
+          >
+            <Text style={s.headerLink}>Settings</Text>
+          </Pressable>
+        </View>
+        <View style={s.empty}>
+          <View style={s.emptyRing}>
+            <View style={s.ringTrack} />
+            <View style={[s.recDotIdle, { backgroundColor: D.amber }]} />
+          </View>
+          <Text style={s.emptyTitle}>Can't reach SATE</Text>
+          <Text style={s.emptySub}>
+            We couldn't load your recorder from the server. Check your connection
+            — your recorder stays online and keeps recording on its own.
+          </Text>
+          <Pressable
+            onPress={refresh}
+            accessibilityRole="button"
+            style={({ pressed }) => [s.cta, { opacity: pressed ? 0.85 : 1 }]}
+          >
+            <Text style={s.ctaTxt}>Retry</Text>
+          </Pressable>
+        </View>
+      </View>
+    );
+  }
+
   // ---- empty state: no recorder paired yet ----
   if (devices.length === 0) {
     return (
@@ -332,7 +395,10 @@ export function HomeScreen({
         <GlassBackground />
         <StatusBar style="light" />
         <View style={s.emptyTop}>
-          <Text style={s.brand}>SATE</Text>
+          <View style={s.brandRow}>
+            <Logo size={18} />
+            <Text style={s.brand}>SATE</Text>
+          </View>
           <Pressable
             onPress={onOpenSettings}
             hitSlop={10}
@@ -394,7 +460,10 @@ export function HomeScreen({
         {/* ---- header: who you're working with ---- */}
         <View style={s.header}>
           <View style={{ flex: 1 }}>
+            <View style={s.brandRow}>
+            <Logo size={18} />
             <Text style={s.brand}>SATE</Text>
+          </View>
             <Pressable
               onPress={cycleRecorder}
               disabled={devices.length < 2}
@@ -514,8 +583,14 @@ export function HomeScreen({
 
         {note && <Text style={s.note}>{note}</Text>}
 
-        {/* ---- sessions you've captured ---- */}
+        {/* ---- sessions you've captured ----
+             Each shows its processing state, exactly like the web app's Device
+             tab: Received·Processing → Ready (tap to open the report) / Failed.
+             No manual import — the server auto-runs the AI pipeline. */}
         <Text style={s.sectionHdr}>Recent sessions</Text>
+        <Text style={s.sectionSub}>
+          Uploaded to SATE and processed automatically — tap a ready one to open the report.
+        </Text>
         <View style={s.panel}>
           {uploads.length === 0 ? (
             <Text style={s.emptyLine}>
@@ -523,29 +598,56 @@ export function HomeScreen({
             </Text>
           ) : (
             uploads.map((u, i) => {
+              const st = statusOf(u);
+              const ready = st === "ready";
               const isPlaying = playingId === u.id;
               return (
-                <View key={u.id} style={[s.recRow, i > 0 && s.recRowDivider]}>
+                <Pressable
+                  key={u.id}
+                  onPress={ready ? () => onOpenReport(u) : undefined}
+                  disabled={!ready}
+                  accessibilityRole={ready ? "button" : undefined}
+                  style={({ pressed }) => [
+                    s.recRow,
+                    i > 0 && s.recRowDivider,
+                    { opacity: ready && pressed ? 0.7 : 1 },
+                  ]}
+                >
                   <View style={{ flex: 1 }}>
                     <Text style={s.recName2}>
-                      Session {u.session_number} · {u.patient_id}
+                      Session {u.session_number} · {u.patient_id || "Standalone"}
                     </Text>
                     <Text style={s.recSub}>
                       {durationLabel(u.bytes, u.sample_rate)} · {timeAgo(u.at)}
                     </Text>
                   </View>
-                  <Pressable
-                    onPress={() => togglePlay(u)}
-                    accessibilityRole="button"
-                    style={[s.playBtn, isPlaying && s.playBtnActive]}
-                  >
-                    <Text
-                      style={[s.playTxt, isPlaying && { color: D.bg }]}
-                    >
-                      {isPlaying ? "■ Stop" : "▶ Play"}
-                    </Text>
-                  </Pressable>
-                </View>
+
+                  {st === "processing" && (
+                    <View style={[s.statusChip, { backgroundColor: D.amberBg }]}>
+                      <ActivityIndicator color={D.amber} size="small" />
+                      <Text style={[s.statusChipTxt, { color: D.amber }]}>Processing</Text>
+                    </View>
+                  )}
+                  {st === "failed" && (
+                    <View style={[s.statusChip, { backgroundColor: D.redBg }]}>
+                      <Text style={[s.statusChipTxt, { color: D.red }]}>Failed</Text>
+                    </View>
+                  )}
+                  {ready && (
+                    <View style={s.readyGroup}>
+                      <Pressable
+                        onPress={() => togglePlay(u)}
+                        accessibilityRole="button"
+                        style={[s.playBtn, isPlaying && s.playBtnActive]}
+                      >
+                        <Text style={[s.playTxt, isPlaying && { color: D.bg }]}>
+                          {isPlaying ? "■" : "▶"}
+                        </Text>
+                      </Pressable>
+                      <Text style={s.viewChevron}>›</Text>
+                    </View>
+                  )}
+                </Pressable>
               );
             })
           )}
@@ -673,6 +775,7 @@ const s = StyleSheet.create({
   content: { padding: 16, paddingTop: 56, paddingBottom: 48 },
 
   header: { flexDirection: "row", alignItems: "flex-start", marginBottom: 18 },
+  brandRow: { flexDirection: "row", alignItems: "center", gap: 7, marginBottom: 2 },
   brand: { color: D.sub, fontSize: 13, fontWeight: "800", letterSpacing: 2 },
   recName: {
     color: D.ink,
@@ -762,8 +865,21 @@ const s = StyleSheet.create({
     fontSize: 18,
     fontWeight: "800",
     marginTop: 22,
-    marginBottom: 12,
+    marginBottom: 4,
   },
+  sectionSub: { color: D.sub, fontSize: 12, lineHeight: 16, marginBottom: 12 },
+  statusChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: 10,
+    marginLeft: 10,
+  },
+  statusChipTxt: { fontSize: 12, fontWeight: "700" },
+  readyGroup: { flexDirection: "row", alignItems: "center", marginLeft: 10 },
+  viewChevron: { color: D.faint, fontSize: 22, fontWeight: "600", marginLeft: 8 },
   panel: {
     backgroundColor: D.panel,
     borderRadius: 16,

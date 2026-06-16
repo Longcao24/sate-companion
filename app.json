@@ -5,7 +5,13 @@
     "version": "0.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
-    "backgroundColor": "#FFFFFF",
+    "backgroundColor": "#0B0E13",
+    "icon": "./assets/icon.png",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0B0E13"
+    },
     "ios": {
       "bundleIdentifier": "com.auspexmedix.satecompanion",
       "infoPlist": {
@@ -19,6 +25,10 @@
     },
     "android": {
       "package": "com.auspexmedix.satecompanion",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0B0E13"
+      },
       "permissions": [
         "android.permission.BLUETOOTH_SCAN",
         "android.permission.BLUETOOTH_CONNECT",

@@ -18,7 +18,7 @@ device-api edge fn  ── stitches ~1 MB slices → patches WAV header → devi
 process-device-session edge fn
   │  1. download WAV (device-sessions bucket)
   │  2. resolve patient: device patient_id (text) → patients.id (uuid)  [SLP's existing patient]
-  │  3. POST https://sate.ngrok.io/process   (multipart audio_file)  ← SAME AI as manual
+  │  3. POST https://sate-v1-5.ngrok.io/process   (multipart audio_file)  ← SAME AI as manual
   │  4. countErrors + calculateSpeechAnalysis (ported from the web app, identical)
   │  5. copy WAV → recordings bucket
   │  6. INSERT recordings { transcript, error_counts, analysis, patient_id, … }
@@ -69,7 +69,7 @@ where id = '<clinical patient uuid>' and slp_id = '<slp user uuid>';
    - `claim_token` = minted by a logged-in SLP (`POST /device-api/devices/claim-token`)
    - The register response returns `device_key = key-dev-<serial>` → stored as `cfgDeviceKey`.
 2. **Flash fw 1.0.0** to the recorder.
-3. Ensure the **AI tunnel** `https://sate.ngrok.io/process` is up (same dependency as
+3. Ensure the **AI tunnel** `https://sate-v1-5.ngrok.io/process` is up (same dependency as
    manual upload; swap via the `AI_PROCESS_URL` function secret if the ngrok URL rotates).
 4. Record on the device → it auto-uploads to Supabase → appears in `recordings`.
 

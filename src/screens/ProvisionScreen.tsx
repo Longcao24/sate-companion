@@ -10,7 +10,7 @@ import {
   Text,
   View,
 } from "react-native";
-import { SateApi } from "../api/sateApi";
+import { SateApi, makeApi, refreshSession } from "../api/sateApi";
 import { FoundDevice, ProvisionProgress, SateLink } from "../ble/SateBle";
 import {
   Button,
@@ -51,7 +51,7 @@ export function ProvisionScreen({
   link: SateLink;
   onClose: () => void;
 }) {
-  const { settings } = useStore();
+  const { settings, update } = useStore();
   const [step, setStep] = useState<Step>("scan");
   const [found, setFound] = useState<FoundDevice[]>([]);
   const [chosen, setChosen] = useState<FoundDevice | null>(null);
@@ -89,17 +89,13 @@ export function ProvisionScreen({
     };
   }, [step, link]);
 
-  // Board-side Wi-Fi scan. Runs in the background on the creds screen; the
-  // screen is fully usable (type + Send) whether or not this ever returns.
+  // By design the recorder does NOT scan for Wi-Fi (no reason to, and a
+  // board-side WiFi.scanNetworks during a BLE session is RAM-heavy + flaky). The
+  // SLP types the SSID + password; we send them over BLE and the recorder
+  // reports back whether it could join. Kept as a no-op for the existing UI.
   const runWifiScan = async () => {
-    setScanning(true);
-    try {
-      setNetworks(dedupeNetworks(await link.scanWifi()));
-    } catch {
-      /* leave the list empty - typing still works */
-    } finally {
-      setScanning(false);
-    }
+    setNetworks([]);
+    setScanning(false);
   };
 
   const pickDevice = async (d: FoundDevice) => {
@@ -122,11 +118,40 @@ export function ProvisionScreen({
     // NOT needed for the board to join Wi-Fi. Fetch it best-effort: if the phone
     // can't reach the server, still push SSID + password over BLE so the board
     // connects. The board self-registers over its own Wi-Fi afterwards.
+    // Keep the Supabase session fresh - access tokens expire ~1h, and a stale
+    // one makes claim-token minting silently 401 (-> the recorder can't
+    // register). Refresh first if we have a refresh token and it's near expiry.
+    let activeApi = api;
+    if (
+      settings.refreshToken &&
+      (!settings.tokenExpiresAt || Date.now() > settings.tokenExpiresAt - 60000)
+    ) {
+      try {
+        const s = await refreshSession(settings.refreshToken);
+        update({
+          token: s.token,
+          refreshToken: s.refreshToken,
+          tokenExpiresAt: s.expiresAt,
+        });
+        activeApi = makeApi(settings.serverUrl, s.token);
+      } catch {
+        /* refresh failed - surfaced below when claimToken throws on Supabase */
+      }
+    }
+
+    const needsClaim = settings.serverUrl.includes("supabase.co");
     let claimToken = "";
     try {
-      claimToken = await api.claimToken();
+      claimToken = await activeApi.claimToken();
     } catch {
-      // server unreachable from the phone - proceed with Wi-Fi-only setup
+      if (needsClaim) {
+        // Supabase REQUIRES the claim token to bind the device to this account;
+        // pushing an empty one just yields "Server registration failed".
+        setError("Your session expired. Sign out and sign in again, then retry.");
+        setStep("failed");
+        return;
+      }
+      // mock / self-hosted: Wi-Fi-only setup is fine without a token
     }
     try {
       const final = await link.provision(

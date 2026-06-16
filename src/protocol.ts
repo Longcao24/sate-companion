@@ -110,6 +110,9 @@ export interface ManagedDevice {
 export type DeviceLiveState = "idle" | "recording" | "uploading";
 
 // A session the recorder uploaded to the server (GET /api/sessions).
+// The server auto-runs the SAME AI pipeline as a web upload and writes a
+// `recordings` row, so each session carries its processing state + the
+// resulting recording id (mirrors the web app's Device tab).
 export interface UploadedSession {
   id: string;
   device_serial: string;
@@ -118,6 +121,71 @@ export interface UploadedSession {
   sample_rate?: number;
   bytes: number;
   at: string; // ISO timestamp the server stored it
+  // Processing state of the auto AI/recordings bridge.
+  processed?: boolean;
+  processed_at?: string | null;
+  // recordings.id once processing finishes (null while pending).
+  recording_id?: string | null;
+  // Set if processing failed.
+  process_error?: string | null;
+}
+
+// ---- recordings (the processed report, same shape the web app reads) -------
+// Pulled straight from Supabase REST (`/rest/v1/recordings`) so the phone shows
+// the exact record the web app does. RLS lets the owner SELECT their own rows.
+
+export interface TranscriptWord {
+  word: string;
+  start: number;
+  end: number;
+}
+
+export interface TranscriptSegment {
+  start: number;
+  end: number;
+  text: string;
+  text_clean?: string;
+  speaker?: string;
+  words?: TranscriptWord[];
+}
+
+export interface RecordingAnalysis {
+  totalWords?: number;
+  ndw?: number; // number of different words
+  ntw?: number; // number of total words
+  mluw?: number; // mean length of utterance (words)
+  mlum?: number; // mean length of utterance (morphemes)
+  errorRate?: number;
+  speakingRate?: number;
+  numberOfPauses?: number;
+  segmentCount?: number;
+  speakerCount?: number;
+  totalDuration?: number;
+  availableErrorTypes?: string[];
+  errorCounts?: Record<string, number>;
+}
+
+// One processed recording (device session OR web upload — identical shape).
+export interface Recording {
+  id: string;
+  recording_name: string | null;
+  protocol: string | null;
+  notes: string | null;
+  needs_review?: boolean | null;
+  patient_id: string | null;
+  duration: number | null;
+  file_name: string | null;
+  created_at: string | null;
+  transcript: { filename?: string; segments?: TranscriptSegment[] } | null;
+  analysis: RecordingAnalysis | null;
+  error_counts: Record<string, number> | null;
+}
+
+// Metadata the first-open review sheet collects (matches the web app form).
+export interface RecordingMeta {
+  recording_name: string;
+  protocol: string;
+  notes?: string;
 }
 
 export type RemoteCommand =

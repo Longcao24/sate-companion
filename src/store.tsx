@@ -12,6 +12,8 @@ import { DEVICE_API_URL } from "./api/sateApi";
 export interface Settings {
   serverUrl: string;
   token: string | null;
+  refreshToken: string | null;
+  tokenExpiresAt: number | null;
   user: User | null;
   autoSync: boolean;
 }
@@ -23,6 +25,8 @@ const DEFAULTS: Settings = {
   // for local dev.)
   serverUrl: DEVICE_API_URL,
   token: null,
+  refreshToken: null,
+  tokenExpiresAt: null,
   user: null,
   autoSync: true,
 };
@@ -59,7 +63,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     });
   };
 
-  const signOut = () => update({ token: null, user: null });
+  const signOut = () =>
+    update({ token: null, refreshToken: null, tokenExpiresAt: null, user: null });
 
   return (
     <Ctx.Provider value={{ settings, ready, update, signOut }}>

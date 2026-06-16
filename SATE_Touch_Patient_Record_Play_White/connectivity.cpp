@@ -47,7 +47,11 @@ static const uint32_t WIFI_RETRY_PERIOD_MS  = 90000;
 // Command poll is FAST so app->device commands (record / sync) feel
 // near-instant. The heavy pending-scan (walks the SD) stays slow and reports a
 // cached count, so the fast poll adds only a tiny HTTP GET each time.
-static const uint32_t CMD_POLL_PERIOD_MS    = 3000;
+// Each poll is a blocking HTTPS request. Against Supabase the gateway closes the
+// keep-alive socket, so every poll pays a full TLS handshake (~1-2 s) that
+// freezes the single-core GUI. Poll less often so the screen stays responsive;
+// remote commands still land within ~12 s (we also keep the socket warm below).
+static const uint32_t CMD_POLL_PERIOD_MS    = 12000;
 static const uint32_t HEARTBEAT_PERIOD_MS   = 15000;  // pending-scan cadence
 static const uint32_t ADV_REFRESH_PERIOD_MS = 30000;
 
@@ -486,7 +490,10 @@ static bool httpJson(const char *method, const char *path, const char *body,
   s_http.setTimeout(2500);        // ...or waiting on a reply
   bool began;
   if (serverIsSupabase()) {
-    s_httpsClient.setInsecure();  // skip cert chain (anon key is the auth)
+    // Set insecure once: re-calling it can churn the TLS client and defeat any
+    // socket reuse the gateway does grant.
+    static bool s_insecureSet = false;
+    if (!s_insecureSet) { s_httpsClient.setInsecure(); s_insecureSet = true; }
     began = s_http.begin(s_httpsClient, url);
   } else {
     began = s_http.begin(s_httpClient, url);
@@ -960,6 +967,8 @@ static void handleProvisionTick()
       http.addHeader("Content-Type", "application/json");
       if (useTls) http.addHeader("apikey", SUPABASE_ANON_KEY);
       int code = http.POST((uint8_t *)body, strlen(body));
+      Serial.printf("[CONN] register code=%d freeHeap=%u maxAlloc=%u\n",
+                    code, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
       if (code >= 200 && code < 300) {
         JsonDocument doc;
         if (deserializeJson(doc, http.getString()) == DeserializationError::Ok) {
@@ -1264,7 +1273,9 @@ void connLoop()
       }
       if (now > nextCmdPoll) {
         nextCmdPoll = now + CMD_POLL_PERIOD_MS;
-        pollCommands();          // fast: pick up app commands within ~3 s
+        sateHookGuiPump();       // paint a fresh frame before the blocking poll
+        pollCommands();          // picks up app commands within ~12 s
+        sateHookGuiPump();       // repaint immediately so touch feels responsive
       }
       if (now > nextHeartbeat) {
         nextHeartbeat = now + HEARTBEAT_PERIOD_MS;

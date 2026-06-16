@@ -122,6 +122,7 @@ export class BleLink implements SateLink {
   private dataAsm = new FrameAssembler();
   private statusWaiters: ((msg: any) => boolean)[] = [];
   private dataHandler: ((buf: Buffer) => void) | null = null;
+  private scanStateSub: Subscription | null = null;
 
   async requestPermissions(): Promise<boolean> {
     if (Platform.OS !== "android") return true;
@@ -137,6 +138,20 @@ export class BleLink implements SateLink {
   }
 
   startScan(onFound: (d: FoundDevice) => void): void {
+    // ble-plx requires the adapter to be PoweredOn before scanning. On iOS the
+    // central manager reaches PoweredOn a moment AFTER this screen mounts, so
+    // calling startDeviceScan immediately fires a silent error and finds nothing.
+    // Wait for PoweredOn (emitCurrentState=true fires now if it's already on).
+    this.scanStateSub?.remove();
+    this.scanStateSub = this.manager.onStateChange((state) => {
+      if (state !== "PoweredOn") return;
+      this.scanStateSub?.remove();
+      this.scanStateSub = null;
+      this.beginScan(onFound);
+    }, true);
+  }
+
+  private beginScan(onFound: (d: FoundDevice) => void): void {
     this.manager.startDeviceScan([SATE_SERVICE], null, (error, dev) => {
       if (error || !dev) return;
       let unprovisioned = false;
@@ -166,6 +181,8 @@ export class BleLink implements SateLink {
   }
 
   stopScan(): void {
+    this.scanStateSub?.remove();
+    this.scanStateSub = null;
     this.manager_?.stopDeviceScan();
   }
 
