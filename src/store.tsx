@@ -50,7 +50,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     AsyncStorage.getItem(KEY)
       .then((raw) => {
-        if (raw) setSettings({ ...DEFAULTS, ...JSON.parse(raw) });
+        // serverUrl is fixed to the bundled backend and not user-editable, so
+        // always force it even if an older build persisted a custom value.
+        if (raw) setSettings({ ...DEFAULTS, ...JSON.parse(raw), serverUrl: DEVICE_API_URL });
       })
       .finally(() => setReady(true));
   }, []);

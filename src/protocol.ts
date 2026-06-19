@@ -16,7 +16,9 @@ export const CHAR_INFO = "53415445-0001-4a7e-8c5e-000000000010";
 
 // Write (JSON commands from app, chunk-framed if large):
 //   { op: "scan_wifi" }
-//   { op: "provision", ssid, pass, server, claim_token }
+//   { op: "provision", ssid, pass, server, claim_token }   // first-time setup
+//   { op: "change_wifi", ssid, pass }   // move an ALREADY-claimed unit to a new
+//                                       // network; keeps the account (no re-register)
 //   { op: "list_sessions" }
 //   { op: "send_session", n }
 //   { op: "mark_synced", n }
@@ -74,6 +76,7 @@ export type ProvisionState =
   | "wifi_ok"
   | "registering"
   | "registered"
+  | "wifi_saved" // change_wifi finished: new network joined, account kept
   | "error";
 
 export interface PendingSession {
@@ -192,11 +195,14 @@ export type RemoteCommand =
   | "sync_now"
   | "reload_patients"
   | "reboot"
+  | "wifi_change" // drop to BLE + advertise so the app can push new Wi-Fi creds
   | "record"; // start a recording now + upload it (device must be online)
 
 // Commands the app can also deliver directly over BLE when the recorder
 // has no Wi-Fi (subset of RemoteCommand that makes sense point-to-point).
-export type BleCommand = "reboot";
+// `factory_reset` wipes Wi-Fi + account and reboots to first-time setup — used
+// when unlinking an off-Wi-Fi recorder the server can't reach.
+export type BleCommand = "reboot" | "factory_reset" | "cancel_wifi";
 
 export interface User {
   id: string;

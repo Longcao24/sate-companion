@@ -2,21 +2,32 @@ import React, { useState } from "react";
 import {
   KeyboardAvoidingView,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from "react-native";
-import { makeApi } from "../api/sateApi";
+import { DEVICE_API_URL, consumeMobileLink, makeApi } from "../api/sateApi";
 import { Button, Card, Field, GlassBackground, Logo, Muted } from "../components/ui";
+import { QrScannerModal } from "../components/QrScannerModal";
 import { useStore } from "../store";
 import { D } from "../theme";
 
+// Two ways in: the traditional email + password, or a one-time code / QR
+// generated in the SATE web app ("sign in on phone").
+type Method = "password" | "quick";
+
 export function LoginScreen() {
-  const { settings, update } = useStore();
+  const { update } = useStore();
+  const [method, setMethod] = useState<Method>("password");
+
   const [email, setEmail] = useState("morgan@clinic.example.com");
   const [password, setPassword] = useState("");
-  const [serverUrl, setServerUrl] = useState(settings.serverUrl);
+
+  const [code, setCode] = useState("");
+  const [scanning, setScanning] = useState(false);
+
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -24,13 +35,14 @@ export function LoginScreen() {
     setBusy(true);
     setError(null);
     try {
-      const api = makeApi(serverUrl.trim(), null);
+      // Server is fixed to the bundled SATE backend - not user-editable.
+      const api = makeApi(DEVICE_API_URL, null);
       const { token, refreshToken, expiresAt, user } = await api.login(
         email.trim(),
         password
       );
       update({
-        serverUrl: serverUrl.trim(),
+        serverUrl: DEVICE_API_URL,
         token,
         refreshToken,
         tokenExpiresAt: expiresAt,
@@ -41,6 +53,37 @@ export function LoginScreen() {
     } finally {
       setBusy(false);
     }
+  };
+
+  // Exchange a one-time code (typed or scanned) for a real session.
+  const quickSignIn = async (raw?: string) => {
+    const c = (raw ?? code).trim();
+    if (!c) {
+      setError("Enter or scan the code from the SATE web app.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const { token, refreshToken, expiresAt, user } = await consumeMobileLink(c);
+      update({
+        serverUrl: DEVICE_API_URL,
+        token,
+        refreshToken,
+        tokenExpiresAt: expiresAt,
+        user,
+      });
+    } catch (e: any) {
+      setError(e?.message ?? "Sign-in failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onScanned = (scanned: string) => {
+    setScanning(false);
+    setCode(scanned);
+    quickSignIn(scanned);
   };
 
   return (
@@ -60,35 +103,107 @@ export function LoginScreen() {
             SATE <Text style={{ color: D.sky }}>Companion</Text>
           </Text>
         </View>
-        <Muted style={{ marginBottom: 24 }}>
+        <Muted style={{ marginBottom: 20 }}>
           Sign in with your SATE account - the same one you use on the web.
           Recorders you set up are saved to this account.
         </Muted>
 
-        <Card>
-          <Field
-            label="Email"
-            value={email}
-            onChangeText={setEmail}
-            keyboardType="email-address"
-          />
-          <Field
+        {/* Method switch */}
+        <View style={s.tabs}>
+          <Tab
             label="Password"
-            value={password}
-            onChangeText={setPassword}
-            secure
+            active={method === "password"}
+            onPress={() => {
+              setMethod("password");
+              setError(null);
+            }}
           />
-          <Field
-            label="Server URL"
-            value={serverUrl}
-            onChangeText={setServerUrl}
-            keyboardType="url"
+          <Tab
+            label="Quick sign-in"
+            active={method === "quick"}
+            onPress={() => {
+              setMethod("quick");
+              setError(null);
+            }}
           />
-          {error && <Text style={s.error}>{error}</Text>}
-          <Button title="Sign in" onPress={signIn} loading={busy} />
+        </View>
+
+        <Card>
+          {method === "password" ? (
+            <>
+              <Field
+                label="Email"
+                value={email}
+                onChangeText={setEmail}
+                keyboardType="email-address"
+              />
+              <Field
+                label="Password"
+                value={password}
+                onChangeText={setPassword}
+                secure
+              />
+              {error && <Text style={s.error}>{error}</Text>}
+              <Button title="Sign in" onPress={signIn} loading={busy} />
+            </>
+          ) : (
+            <>
+              <Muted style={{ marginBottom: 14 }}>
+                In the SATE web app, open your profile and choose “Sign in on
+                phone”. Scan the QR code, or type the code shown below.
+              </Muted>
+              <Button
+                title="Scan QR code"
+                onPress={() => {
+                  setError(null);
+                  setScanning(true);
+                }}
+                disabled={busy}
+              />
+              <View style={{ height: 12 }} />
+              <Field
+                label="Or enter code"
+                value={code}
+                onChangeText={(v) => setCode(v.toUpperCase())}
+                placeholder="XXXX-XXXX"
+                autoCapitalize="none"
+              />
+              {error && <Text style={s.error}>{error}</Text>}
+              <Button title="Sign in" onPress={() => quickSignIn()} loading={busy} />
+            </>
+          )}
         </Card>
       </ScrollView>
+
+      <QrScannerModal
+        visible={scanning}
+        onClose={() => setScanning(false)}
+        onScanned={onScanned}
+      />
     </KeyboardAvoidingView>
+  );
+}
+
+function Tab({
+  label,
+  active,
+  onPress,
+}: {
+  label: string;
+  active: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        s.tab,
+        active && s.tabActive,
+        { opacity: pressed ? 0.85 : 1 },
+      ]}
+    >
+      <Text style={[s.tabText, active && s.tabTextActive]}>{label}</Text>
+    </Pressable>
   );
 }
 
@@ -99,4 +214,20 @@ const s = StyleSheet.create({
   brandRow: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 6 },
   logo: { fontSize: 28, fontWeight: "800", color: D.ink },
   error: { color: D.red, fontSize: 13, marginBottom: 4 },
+  tabs: {
+    flexDirection: "row",
+    backgroundColor: D.tile,
+    borderRadius: 12,
+    padding: 4,
+    marginBottom: 16,
+  },
+  tab: {
+    flex: 1,
+    paddingVertical: 10,
+    alignItems: "center",
+    borderRadius: 9,
+  },
+  tabActive: { backgroundColor: D.sky },
+  tabText: { color: D.ink, fontSize: 14, fontWeight: "600" },
+  tabTextActive: { color: "#FFFFFF" },
 });

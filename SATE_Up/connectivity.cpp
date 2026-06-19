@@ -96,6 +96,8 @@ static bool     uploadSweepDue = false;
 static bool     patientsFetchDue = false;
 static bool     rebootRequested = false;
 static uint32_t rebootAtMs     = 0;
+static bool     factoryResetRequested = false;  // BLE factory_reset op pending
+static uint32_t factoryResetAtMs      = 0;
 
 // Wi-Fi scan runs async so connLoop / BLE notifications never block on the
 // radio (a synchronous scan stalls many seconds under BLE coexistence).
@@ -111,6 +113,16 @@ static uint32_t  provDeadline = 0;
 static uint32_t  provRetryAt  = 0;     // re-issue WiFi.begin() once if stalled
 static bool      provRetried  = false;
 static char provSsid[33], provPass[65], provServer[96], provClaim[48];
+// Change-Wi-Fi (NOT re-registration): connect to a new network and persist the
+// creds against the SAME account/device key. Set when the app sends `change_wifi`
+// or after a BOOT-hold; clears once the connect attempt finishes.
+static bool      provWifiOnly  = false;
+// True while a provisioned recorder is parked in BLE waiting for new Wi-Fi creds
+// (BOOT-hold or remote `wifi_change`). Suppresses the auto Wi-Fi reconnect so the
+// app has a window to push the new network. RAM-only: a power cycle clears it.
+static bool      wifiChangeMode = false;
+static uint32_t  wifiChangeStart = 0;   // when change-mode began (for auto-exit)
+static const uint32_t WIFI_CHANGE_TIMEOUT_MS = 180000; // 3 min then auto-cancel
 
 // Last STA disconnect reason + count, captured by the Wi-Fi event handler so
 // provisioning can tell "wrong password" apart from "out of range" / coex flake.
@@ -321,6 +333,10 @@ class SrvCB : public NimBLEServerCallbacks {
     ctrlAsmLen = 0;
     if (provState != PROV_IDLE) esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
     provState = PROV_IDLE;
+    // App left while we were waiting for new Wi-Fi creds (user backed out without
+    // updating). Cancel change-mode so the device resumes normal operation and
+    // the screen returns to the main page instead of sitting on "waiting".
+    wifiChangeMode = false;
     NimBLEDevice::startAdvertising();
     setStatus(provisioned ? "Bluetooth on - waiting for app"
                           : "Ready for setup - open the SATE app");
@@ -821,6 +837,7 @@ static void enterWifiTrying()
 static void enterWifiOnline()
 {
   mode = CONN_WIFI_ONLINE;
+  wifiChangeMode = false;  // back online: any pending Change-Wi-Fi window is over
   bleStop(); // Wi-Fi mode does not advertise; frees NimBLE RAM
   nextHeartbeat = 0;       // scan pending immediately
   nextCmdPoll = 0;         // and poll commands immediately
@@ -888,8 +905,22 @@ static void handleProvisionTick()
       snprintf(j, sizeof(j), "{\"ev\":\"state\",\"state\":\"wifi_ok\",\"ip\":\"%s\"}",
                WiFi.localIP().toString().c_str());
       statusNotify(j);
-      statusNotify("{\"ev\":\"state\",\"state\":\"registering\"}");
       snprintf(ipText, sizeof(ipText), "%s", WiFi.localIP().toString().c_str());
+      if (provWifiOnly) {
+        // Change-Wi-Fi: the device is ALREADY claimed. Persist the new creds
+        // against the existing account/key and go straight online - no register.
+        snprintf(cfgSsid, sizeof(cfgSsid), "%s", provSsid);
+        snprintf(cfgPass, sizeof(cfgPass), "%s", provPass);
+        saveConfig();
+        statusNotify("{\"ev\":\"state\",\"state\":\"wifi_saved\"}");
+        setStatus("Wi-Fi updated - %s", ipText);
+        esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+        provWifiOnly   = false;
+        wifiChangeMode = false;
+        provState      = PROV_IDLE;
+        return;
+      }
+      statusNotify("{\"ev\":\"state\",\"state\":\"registering\"}");
       setStatus("Wi-Fi connected - registering with SATE...");
       provState = PROV_REGISTER;
       return;
@@ -900,6 +931,7 @@ static void handleProvisionTick()
       WiFi.disconnect(true);
       esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
       setStatus("Network not found");
+      provWifiOnly = false;
       provState = PROV_IDLE;
       return;
     }
@@ -914,6 +946,7 @@ static void handleProvisionTick()
       WiFi.disconnect(true);
       esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
       setStatus("Wrong Wi-Fi password");
+      provWifiOnly = false;
       provState = PROV_IDLE;
       return;
     }
@@ -937,6 +970,7 @@ static void handleProvisionTick()
       WiFi.disconnect(true);
       esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
       setStatus("Wi-Fi failed - check password");
+      provWifiOnly = false;
       provState = PROV_IDLE;
     }
     return;
@@ -1061,7 +1095,45 @@ static void handleBleOp(const char *json)
     provDeadline = millis() + WIFI_PROV_TIMEOUT_MS;
     provRetryAt  = millis() + WIFI_PROV_RETRY_MS;
     provRetried  = false;
+    provWifiOnly = false;          // full provision: WiFi connect THEN register
     provState = PROV_WIFI;
+
+  } else if (!strcmp(op, "change_wifi")) {
+    // Move the recorder to a new Wi-Fi network WITHOUT re-registering: it keeps
+    // its account, server, and device key. The SLP uses this instead of a
+    // factory reset when the clinic Wi-Fi changes. Only valid once claimed.
+    if (!provisioned) { statusErr("change_wifi", "device not set up yet"); return; }
+    snprintf(provSsid, sizeof(provSsid), "%s", (const char *)(doc["ssid"] | ""));
+    snprintf(provPass, sizeof(provPass), "%s", (const char *)(doc["pass"] | ""));
+    statusNotify("{\"ev\":\"state\",\"state\":\"connecting\"}");
+    setStatus("Connecting to Wi-Fi \"%s\"...", provSsid);
+
+    if (scanInProgress || WiFi.scanComplete() == WIFI_SCAN_RUNNING) {
+      esp_wifi_scan_stop();
+      WiFi.scanDelete();
+      scanInProgress = false;
+    }
+    lastWifiReason = 0;
+    wifiDiscCount  = 0;
+    esp_coex_preference_set(ESP_COEX_PREFER_WIFI);
+    WiFi.persistent(false);
+    WiFi.setAutoReconnect(true);
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect(false);
+    WiFi.begin(provSsid, provPass);
+    provDeadline = millis() + WIFI_PROV_TIMEOUT_MS;
+    provRetryAt  = millis() + WIFI_PROV_RETRY_MS;
+    provRetried  = false;
+    provWifiOnly = true;           // connect THEN persist creds, skip register
+    provState = PROV_WIFI;
+
+  } else if (!strcmp(op, "cancel_wifi")) {
+    // App backed out of Change-Wi-Fi without updating. Leave change-mode right
+    // away (don't wait for the timeout) so the recorder resumes normal Wi-Fi and
+    // its screen returns to the main page.
+    wifiChangeMode = false;
+    if (provWifiOnly) { provWifiOnly = false; provState = PROV_IDLE; }
+    statusOk("cancel_wifi");
 
   } else if (!strcmp(op, "list_sessions")) {
     scanPending();
@@ -1111,6 +1183,13 @@ static void handleBleOp(const char *json)
     statusOk("reboot");
     rebootRequested = true;
     rebootAtMs = millis() + 800; // give the ack time to reach the app
+  } else if (!strcmp(op, "factory_reset")) {
+    // Unlinked from the account over BLE (e.g. an off-Wi-Fi recorder the server
+    // can't reach). Wipe Wi-Fi + account and reboot to first-time setup, same as
+    // the server-driven `unclaimed` path. Deferred so the ack reaches the app.
+    statusOk("factory_reset");
+    factoryResetRequested = true;
+    factoryResetAtMs = millis() + 800;
   }
 }
 
@@ -1127,6 +1206,10 @@ static void runRemoteCommand(const char *op)
     fetchPatients();
   } else if (!strcmp(op, "record")) {
     sateHookRecord();        // loop() runs the capture when the UI is idle
+  } else if (!strcmp(op, "wifi_change")) {
+    // The app asked an ONLINE recorder to enter Change-Wi-Fi mode: drop to BLE
+    // and advertise so the phone can push new creds. The account is untouched.
+    connEnterWifiChange();
   } else if (!strcmp(op, "reboot")) {
     rebootRequested = true;
     rebootAtMs = millis() + 300;
@@ -1265,6 +1348,15 @@ static void pollCommands()
   if (!httpJson("GET", path, nullptr, resp, sizeof(resp), nullptr)) return;
   JsonDocument doc;
   if (deserializeJson(doc, resp) != DeserializationError::Ok) return;
+  // The ONLY path back to first-time setup: the SLP removed this recorder from
+  // their account on the server, so the device row is gone and the heartbeat
+  // comes back { unclaimed: true }. Holding BOOT no longer wipes the account -
+  // it just changes Wi-Fi - so this server signal is what unprovisions a unit.
+  if (doc["unclaimed"] | false) {
+    Serial.println("[CONN] server reports device removed from account - resetting to setup");
+    connFactoryReset();   // wipes Wi-Fi + account, reboots unprovisioned
+    return;
+  }
   // The app can attach the patient the SLP typed for the next remote recording;
   // stage it before running commands so a queued "record" tags the session to
   // them.
@@ -1313,6 +1405,10 @@ void connLoop()
     Serial.println("[CONN] rebooting");
     delay(100);
     ESP.restart();
+  }
+
+  if (factoryResetRequested && now > factoryResetAtMs) {
+    connFactoryReset();   // wipes Wi-Fi + account, reboots to first-time setup
   }
 
   // BLE op ready?
@@ -1426,12 +1522,25 @@ void connLoop()
     case CONN_BLE_CONNECTED:
       mode = bleClientConnected ? CONN_BLE_CONNECTED : CONN_BLE_ADV;
       if (!bleClientConnected) {
-        // after a successful provisioning the app disconnects; go online
-        if (provisioned && WiFi.status() == WL_CONNECTED) {
+        // Change-Wi-Fi was entered (BOOT-hold / wifi_change) but no app ever
+        // finished it - auto-cancel after the timeout so the recorder doesn't sit
+        // in pairing mode forever; it then resumes normal Wi-Fi + the screen
+        // returns to the main page.
+        if (wifiChangeMode && now - wifiChangeStart > WIFI_CHANGE_TIMEOUT_MS) {
+          Serial.println("[CONN] Change-Wi-Fi timed out - resuming normal Wi-Fi");
+          wifiChangeMode = false;
+          setStatus("Wi-Fi change cancelled");
+        }
+        // after a successful provisioning the app disconnects; go online.
+        // While waiting for new creds (Change-Wi-Fi) we must NOT pop back online
+        // on a stray auto-reconnect to the old network - stay on BLE.
+        if (!wifiChangeMode && provisioned && WiFi.status() == WL_CONNECTED) {
           enterWifiOnline();
           break;
         }
-        if (provisioned && now > nextWifiRetry) {
+        // In Change-Wi-Fi mode we deliberately stay on BLE (no auto-reconnect to
+        // the OLD network) so the app has a window to push the new credentials.
+        if (!wifiChangeMode && provisioned && now > nextWifiRetry) {
           nextWifiRetry = now + WIFI_RETRY_PERIOD_MS;
           enterWifiTrying(); // BLE keeps advertising during the attempt
           break;
@@ -1500,6 +1609,21 @@ int connUploadPercent()
 const char *connStatusText() { return statusText; }
 const char *connIp() { return ipText; }
 bool connSetupActive() { return bleClientConnected || provState != PROV_IDLE; }
+
+void connEnterWifiChange()
+{
+  // Non-destructive: keep the account/server/device key, just re-open BLE so the
+  // companion app can push a new Wi-Fi network. Replaces the old BOOT-hold wipe.
+  if (!provisioned) return;        // nothing claimed yet -> normal setup applies
+  wifiChangeMode = true;
+  wifiChangeStart = millis();
+  WiFi.disconnect(false);          // leave the old network; we want BLE adv now
+  if (mode != CONN_BLE_ADV && mode != CONN_BLE_CONNECTED) enterBleMode();
+  else { bleUpdateAdvertising(); NimBLEDevice::startAdvertising(); }
+  setStatus("Change Wi-Fi: open the SATE app nearby");
+}
+
+bool connWifiChangeMode() { return wifiChangeMode; }
 
 void connFactoryReset()
 {

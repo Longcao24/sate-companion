@@ -2,6 +2,7 @@
   "expo": {
     "name": "SATE Companion",
     "slug": "sate-companion",
+    "scheme": "satecompanion",
     "version": "0.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
@@ -13,10 +14,12 @@
       "backgroundColor": "#0B0E13"
     },
     "ios": {
-      "bundleIdentifier": "com.auspexmedix.satecompanion",
+      "bundleIdentifier": "agency.sate.companion",
+      "buildNumber": "3",
       "infoPlist": {
         "NSBluetoothAlwaysUsageDescription": "SATE Companion uses Bluetooth to set up your SATE Recorder and connect it to Wi-Fi.",
         "NSLocalNetworkUsageDescription": "SATE Companion connects to your SATE Recorder and dev server on the local network.",
+        "NSCameraUsageDescription": "SATE Companion uses the camera to scan the QR code shown in the SATE web app for quick sign-in.",
         "NSAppTransportSecurity": {
           "NSAllowsArbitraryLoads": true,
           "NSAllowsLocalNetworking": true
@@ -32,7 +35,8 @@
       "permissions": [
         "android.permission.BLUETOOTH_SCAN",
         "android.permission.BLUETOOTH_CONNECT",
-        "android.permission.ACCESS_FINE_LOCATION"
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.CAMERA"
       ]
     },
     "plugins": [
@@ -44,7 +48,13 @@
         }
       ],
       "expo-asset",
-      "expo-audio"
+      "expo-audio",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "SATE Companion uses the camera to scan the QR code shown in the SATE web app for quick sign-in."
+        }
+      ]
     ]
   }
 }

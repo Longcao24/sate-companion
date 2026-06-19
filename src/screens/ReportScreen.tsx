@@ -13,6 +13,7 @@ import {
 } from "react-native";
 import { setAudioModeAsync, useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { StatusBar } from "expo-status-bar";
+import { Feather } from "@expo/vector-icons";
 import { SateApi } from "../api/sateApi";
 import { GlassBackground } from "../components/ui";
 import { Recording, UploadedSession } from "../protocol";
@@ -209,7 +210,12 @@ export function ReportScreen({
             accessibilityRole="button"
             style={({ pressed }) => [s.playBar, { opacity: pressed ? 0.88 : 1 }]}
           >
-            <Text style={s.playGlyph}>{playing ? "■" : "▶"}</Text>
+            <Feather
+              name={playing ? "square" : "play"}
+              size={16}
+              color={D.sky}
+              style={{ marginRight: 6 }}
+            />
             <Text style={s.playTxt}>{playing ? "Stop" : "Play recording"}</Text>
             {status?.duration ? (
               <Text style={s.playTime}>

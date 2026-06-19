@@ -8,6 +8,7 @@ import { DevicePreviewScreen } from "./src/screens/DevicePreviewScreen";
 import { HomeScreen } from "./src/screens/HomeScreen";
 import { LoginScreen } from "./src/screens/LoginScreen";
 import { ProvisionScreen } from "./src/screens/ProvisionScreen";
+import { ChangeWifiScreen } from "./src/screens/ChangeWifiScreen";
 import { RecorderSettingsScreen } from "./src/screens/RecorderSettingsScreen";
 import { ReportScreen } from "./src/screens/ReportScreen";
 import { SettingsScreen } from "./src/screens/SettingsScreen";
@@ -18,6 +19,7 @@ import { D } from "./src/theme";
 type Screen =
   | { name: "home" }
   | { name: "provision" }
+  | { name: "changeWifi"; device: ManagedDevice }
   | { name: "recorderSettings"; device: ManagedDevice }
   | { name: "preview" }
   | { name: "report"; session: UploadedSession }
@@ -90,6 +92,7 @@ function Root() {
   const syncEnabled =
     settings.autoSync &&
     screen.name !== "provision" &&
+    screen.name !== "changeWifi" &&
     screen.name !== "recorderSettings";
   // Kept mounted so the background BLE bridge keeps running across screens.
   useAutoSync(syncEnabled, link, api, !!settings.token);
@@ -134,6 +137,7 @@ function Root() {
           device={screen.device}
           onClose={() => setScreen({ name: "home" })}
           onUnlinked={() => setScreen({ name: "home" })}
+          onChangeWifi={(device) => setScreen({ name: "changeWifi", device })}
         />
       )}
       {screen.name === "provision" && (
@@ -141,6 +145,14 @@ function Root() {
           api={api}
           link={link}
           onClose={() => setScreen({ name: "home" })}
+        />
+      )}
+      {screen.name === "changeWifi" && (
+        <ChangeWifiScreen
+          api={api}
+          link={link}
+          device={screen.device}
+          onClose={() => setScreen({ name: "recorderSettings", device: screen.device })}
         />
       )}
       {screen.name === "preview" && (

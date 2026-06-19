@@ -22,3 +22,6 @@ mock-server/uploads/
 # firmware build artifacts
 *.bin
 build/
+
+# Arduino/OTA build output (binaries, elf, map)
+ota_build/

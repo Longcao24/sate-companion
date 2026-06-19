@@ -50,8 +50,17 @@ bool        connSetupActive();       // app connected over BLE / provisioning
 void        connSetLiveState(const char *state);
 
 // Wipe stored Wi-Fi + account config and reboot, so the recorder comes back up
-// unprovisioned (back to first-time setup). Triggered by holding BOOT 5 s.
+// unprovisioned (back to first-time setup). Now triggered ONLY by the server
+// (the SLP removed the device from their account -> heartbeat { unclaimed:true });
+// holding BOOT no longer calls this on a claimed device.
 void        connFactoryReset();
+
+// Enter "Change Wi-Fi" mode WITHOUT unclaiming: keep the account/server/device
+// key and re-open BLE so the companion app can push new Wi-Fi credentials. This
+// is what holding BOOT does on a provisioned recorder, and what the remote
+// `wifi_change` command does to a device that is currently online.
+void        connEnterWifiChange();
+bool        connWifiChangeMode();    // true while parked in BLE awaiting new creds
 
 // UI hooks implemented by the .ino — invoked from loop() context only.
 extern void sateHookPatientsUpdated(); // /sate/patients.json was rewritten

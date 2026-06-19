@@ -26,7 +26,6 @@ export function SettingsScreen({ onClose }: { onClose: () => void }) {
         <Text style={s.section}>Account</Text>
         <Muted>{settings.user?.name}</Muted>
         <Muted>{settings.user?.email}</Muted>
-        <Muted style={{ marginTop: 4 }}>Server: {settings.serverUrl}</Muted>
       </Card>
 
       <Card>

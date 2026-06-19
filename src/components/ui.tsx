@@ -9,6 +9,7 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { Feather } from "@expo/vector-icons";
 import { D, radius } from "../theme";
 
 // Apple-style grouped surface: a solid elevated card on the dark background with
@@ -125,21 +126,39 @@ export function Field(props: {
   secure?: boolean;
   autoCapitalize?: "none" | "sentences";
   keyboardType?: KeyboardTypeOptions;
+  autoFocus?: boolean;
 }) {
+  // Reveal toggle for secure fields, so the SLP can check the Wi-Fi password.
+  const [revealed, setRevealed] = React.useState(false);
+  const hidden = !!props.secure && !revealed;
   return (
     <View style={{ marginBottom: 14 }}>
       <Text style={s.fieldLabel}>{props.label}</Text>
-      <TextInput
-        style={s.input}
-        value={props.value}
-        onChangeText={props.onChangeText}
-        placeholder={props.placeholder}
-        placeholderTextColor={D.faint}
-        secureTextEntry={props.secure}
-        autoCapitalize={props.autoCapitalize ?? "none"}
-        autoCorrect={false}
-        keyboardType={props.keyboardType}
-      />
+      <View style={props.secure ? s.inputRow : undefined}>
+        <TextInput
+          style={[s.input, props.secure && s.inputFlex]}
+          value={props.value}
+          onChangeText={props.onChangeText}
+          placeholder={props.placeholder}
+          placeholderTextColor={D.faint}
+          secureTextEntry={hidden}
+          autoCapitalize={props.autoCapitalize ?? "none"}
+          autoCorrect={false}
+          keyboardType={props.keyboardType}
+          autoFocus={props.autoFocus}
+        />
+        {props.secure && (
+          <Pressable
+            onPress={() => setRevealed((v) => !v)}
+            hitSlop={10}
+            accessibilityRole="button"
+            accessibilityLabel={hidden ? "Show password" : "Hide password"}
+            style={({ pressed }) => [s.eyeBtn, { opacity: pressed ? 0.5 : 1 }]}
+          >
+            <Feather name={hidden ? "eye" : "eye-off"} size={18} color={D.sub} />
+          </Pressable>
+        )}
+      </View>
     </View>
   );
 }
@@ -204,6 +223,17 @@ const s = StyleSheet.create({
     color: D.ink,
     backgroundColor: D.tile,
   },
+  inputRow: { flexDirection: "row", alignItems: "center" },
+  inputFlex: { flex: 1, paddingRight: 44 },
+  eyeBtn: {
+    position: "absolute",
+    right: 6,
+    height: 40,
+    width: 38,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  eyeGlyph: { fontSize: 18 },
   title: { fontSize: 22, fontWeight: "700", color: D.ink, marginBottom: 4 },
   muted: { fontSize: 13, color: D.sub },
   barTrack: {

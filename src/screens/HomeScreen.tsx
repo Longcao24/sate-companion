@@ -19,9 +19,11 @@ import {
   useAudioPlayerStatus,
 } from "expo-audio";
 import { StatusBar } from "expo-status-bar";
+import { Feather } from "@expo/vector-icons";
 import { SateApi } from "../api/sateApi";
 import { FoundDevice, SateLink } from "../ble/SateBle";
 import { GlassBackground, Logo } from "../components/ui";
+import { DeviceFrame } from "../components/DeviceFrame";
 import {
   ManagedDevice,
   Patient,
@@ -90,6 +92,10 @@ export function HomeScreen({
   // genuinely empty account apart from "couldn't reach the server", so we never
   // show "set up a recorder" to someone who already owns one over the internet.
   const [fetchFailed, setFetchFailed] = useState(false);
+  // Serials we can currently SEE advertising over Bluetooth (i.e. the recorder is
+  // physically nearby). Lets the UI show "Bluetooth · Nearby" vs "Wi-Fi · Online".
+  const [nearby, setNearby] = useState<Set<string>>(new Set());
+  const bleSeen = useRef<Map<string, number>>(new Map());
   const mounted = useRef(true);
 
   // "New recording" sheet: the SLP types who the session is for before it starts.
@@ -234,6 +240,37 @@ export function HomeScreen({
     if (mounted.current) fn();
   };
 
+  // Background BLE presence scan: while no other Bluetooth op is running, keep a
+  // passive scan going and mark any SATE serial we hear as "nearby" (seen in the
+  // last 10 s). Paused during sync/connect so it never fights those scans.
+  useEffect(() => {
+    if (!link || busyCmd) return;
+    let active = true;
+    link.requestPermissions().then((ok) => {
+      if (!ok || !active) return;
+      try {
+        link.startScan((d) => {
+          bleSeen.current.set(d.name, Date.now());
+        });
+      } catch {
+        /* Bluetooth off / unavailable - just won't show "nearby" */
+      }
+    });
+    const tick = setInterval(() => {
+      const now = Date.now();
+      const fresh = new Set<string>();
+      for (const [serial, t] of bleSeen.current) {
+        if (now - t < 10000) fresh.add(serial);
+      }
+      setNearby(fresh);
+    }, 2000);
+    return () => {
+      active = false;
+      clearInterval(tick);
+      link.stopScan();
+    };
+  }, [link, busyCmd]);
+
   // Wi-Fi path: command relayed through the server.
   const command = async (
     op: RemoteCommand,
@@ -354,7 +391,7 @@ export function HomeScreen({
         <StatusBar style="light" />
         <View style={s.emptyTop}>
           <View style={s.brandRow}>
-            <Logo size={18} />
+            <Logo size={32} />
             <Text style={s.brand}>SATE</Text>
           </View>
           <Pressable
@@ -396,7 +433,7 @@ export function HomeScreen({
         <StatusBar style="light" />
         <View style={s.emptyTop}>
           <View style={s.brandRow}>
-            <Logo size={18} />
+            <Logo size={32} />
             <Text style={s.brand}>SATE</Text>
           </View>
           <Pressable
@@ -436,14 +473,21 @@ export function HomeScreen({
     );
   }
 
+  // Reachability: online = the recorder is heartbeating to the server over
+  // Wi-Fi (works from anywhere). nearbyBle = we can see it advertising over
+  // Bluetooth right now (it's physically close, even with no Wi-Fi).
+  const nearbyBle = dev ? nearby.has(dev.serial) : false;
+
   const dotColor = recording ? D.red : uploading ? D.sky : D.faint;
   const status = recording
     ? { text: "Recording", dot: D.red, fg: D.red }
     : uploading
     ? { text: "Uploading", dot: D.sky, fg: D.sky }
     : online
-    ? { text: "Ready", dot: D.green, fg: D.green }
-    : { text: "Off Wi-Fi", dot: D.amber, fg: D.amber };
+    ? { text: "Wi-Fi · Online", dot: D.green, fg: D.green }
+    : nearbyBle
+    ? { text: "Bluetooth · Nearby", dot: D.sky, fg: D.sky }
+    : { text: "Off Wi-Fi · not nearby", dot: D.amber, fg: D.amber };
 
   const recordLabel = recording
     ? "Recording…"
@@ -461,7 +505,7 @@ export function HomeScreen({
         <View style={s.header}>
           <View style={{ flex: 1 }}>
             <View style={s.brandRow}>
-            <Logo size={18} />
+            <Logo size={32} />
             <Text style={s.brand}>SATE</Text>
           </View>
             <Pressable
@@ -471,7 +515,12 @@ export function HomeScreen({
             >
               <Text style={s.recName} numberOfLines={1}>
                 {dev?.name ?? "Recorder"}
-                {devices.length > 1 ? "  ⌄" : ""}
+                {devices.length > 1 ? (
+                  <>
+                    {"  "}
+                    <Feather name="chevron-down" size={14} color={D.sub} />
+                  </>
+                ) : null}
               </Text>
             </Pressable>
             <View style={s.statusRow}>
@@ -493,18 +542,18 @@ export function HomeScreen({
 
         {/* ---- hero: the recorder + the one thing you do most ---- */}
         <View style={s.hero}>
-          <View style={s.ringWrap}>
-            <View style={s.ringTrack} />
-            <Animated.View
-              style={[s.ringAccent, { transform: [{ rotate }] }]}
-            />
+          <DeviceFrame width={156}>
+            <Text style={s.screenBrand}>SATE</Text>
             <Animated.View
               style={[
-                s.recDot,
+                s.screenDot,
                 { backgroundColor: dotColor, transform: [{ scale: pulse }] },
               ]}
             />
-          </View>
+            <Text style={[s.screenStatus, { color: status.fg }]} numberOfLines={2}>
+              {status.text}
+            </Text>
+          </DeviceFrame>
           <Text style={s.heroCaption}>
             {recording
               ? "Capturing audio on the recorder…"
@@ -512,7 +561,9 @@ export function HomeScreen({
               ? "Sending the session to SATE…"
               : online
               ? "Tap record and the recorder captures a session"
-              : "Off Wi-Fi · tap Sync when you're near it"}
+              : nearbyBle
+              ? "Nearby over Bluetooth · tap Sync to bridge its sessions"
+              : "Off Wi-Fi · bring it near your phone to sync over Bluetooth"}
           </Text>
 
           <Pressable
@@ -527,7 +578,11 @@ export function HomeScreen({
             {busyCmd === "record" || recording || uploading ? (
               <ActivityIndicator color="#FFFFFF" />
             ) : (
-              <Text style={s.recordTxt}>⏺  {recordLabel}</Text>
+              <Text style={s.recordTxt}>
+                <Feather name="mic" size={16} color="#FFFFFF" />
+                {"  "}
+                {recordLabel}
+              </Text>
             )}
           </Pressable>
         </View>
@@ -546,7 +601,7 @@ export function HomeScreen({
             {busyCmd === "sync_now" ? (
               <ActivityIndicator color={D.sky} size="small" />
             ) : (
-              <Text style={s.actionGlyph}>⇡</Text>
+              <Feather name="upload" size={20} color={D.sky} />
             )}
             <Text style={s.actionLabel}>Sync</Text>
             <Text style={s.actionSub}>
@@ -574,7 +629,7 @@ export function HomeScreen({
             {busyCmd === "reload_patients" ? (
               <ActivityIndicator color={D.sky} size="small" />
             ) : (
-              <Text style={s.actionGlyph}>↻</Text>
+              <Feather name="refresh-cw" size={20} color={D.sky} />
             )}
             <Text style={s.actionLabel}>Patients</Text>
             <Text style={s.actionSub}>Refresh list</Text>
@@ -640,9 +695,11 @@ export function HomeScreen({
                         accessibilityRole="button"
                         style={[s.playBtn, isPlaying && s.playBtnActive]}
                       >
-                        <Text style={[s.playTxt, isPlaying && { color: D.bg }]}>
-                          {isPlaying ? "■" : "▶"}
-                        </Text>
+                        <Feather
+                          name={isPlaying ? "square" : "play"}
+                          size={14}
+                          color={isPlaying ? D.bg : D.sky}
+                        />
                       </Pressable>
                       <Text style={s.viewChevron}>›</Text>
                     </View>
@@ -750,7 +807,11 @@ export function HomeScreen({
                 { marginTop: 8, opacity: !pId.trim() ? 0.5 : pressed ? 0.88 : 1 },
               ]}
             >
-              <Text style={s.recordTxt}>⏺  Start recording</Text>
+              <Text style={s.recordTxt}>
+                <Feather name="mic" size={16} color="#FFFFFF" />
+                {"  "}
+                Start recording
+              </Text>
             </Pressable>
             <Pressable
               onPress={() => setFormOpen(false)}
@@ -775,8 +836,8 @@ const s = StyleSheet.create({
   content: { padding: 16, paddingTop: 56, paddingBottom: 48 },
 
   header: { flexDirection: "row", alignItems: "flex-start", marginBottom: 18 },
-  brandRow: { flexDirection: "row", alignItems: "center", gap: 7, marginBottom: 2 },
-  brand: { color: D.sub, fontSize: 13, fontWeight: "800", letterSpacing: 2 },
+  brandRow: { flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 4 },
+  brand: { color: D.sub, fontSize: 20, fontWeight: "800", letterSpacing: 3 },
   recName: {
     color: D.ink,
     fontSize: 26,
@@ -825,6 +886,21 @@ const s = StyleSheet.create({
     borderBottomColor: "transparent",
   },
   recDot: { width: 34, height: 34, borderRadius: 17 },
+  // On-screen content rendered inside the real device frame.
+  screenBrand: {
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 2,
+    color: "#9CA3AF",
+    marginBottom: 8,
+  },
+  screenDot: { width: 26, height: 26, borderRadius: 13 },
+  screenStatus: {
+    marginTop: 8,
+    fontSize: 11,
+    fontWeight: "700",
+    textAlign: "center",
+  },
   heroCaption: {
     color: D.sub,
     fontSize: 13,

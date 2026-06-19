@@ -52,6 +52,12 @@ export interface SateLink {
     args: { ssid: string; pass: string; server: string; claim_token: string },
     onProgress: (p: ProvisionProgress) => void
   ): Promise<ProvisionProgress>;
+  /** Move an ALREADY-claimed recorder to a new Wi-Fi network. Keeps the account
+   *  and device key — no re-registration. Resolves on "wifi_saved" or "error". */
+  changeWifi(
+    args: { ssid: string; pass: string },
+    onProgress: (p: ProvisionProgress) => void
+  ): Promise<ProvisionProgress>;
   listSessions(): Promise<PendingSession[]>;
   pullSession(
     n: number,
@@ -313,6 +319,47 @@ export class BleLink implements SateLink {
       this.statusWaiters.push(waiter);
       try {
         await this.writeControl({ op: "provision", ...args });
+      } catch (e) {
+        clearTimeout(guard);
+        this.statusWaiters = this.statusWaiters.filter((w) => w !== waiter);
+        reject(e);
+      }
+    });
+  }
+
+  async changeWifi(
+    args: { ssid: string; pass: string },
+    onProgress: (p: ProvisionProgress) => void
+  ): Promise<ProvisionProgress> {
+    return new Promise(async (resolve, reject) => {
+      // Worst case ~28 s Wi-Fi connect (with one retry). No server register step,
+      // so a tighter guard than provision() is fine.
+      const guard = setTimeout(() => {
+        this.statusWaiters = this.statusWaiters.filter((w) => w !== waiter);
+        resolve({
+          state: "error",
+          msg: "Timed out — the recorder did not join the new network",
+        });
+      }, 45000);
+      const waiter = (m: any) => {
+        if (m.ev !== "state") return false;
+        const p: ProvisionProgress = {
+          state: m.state,
+          ip: m.ip,
+          deviceId: m.device_id,
+          msg: m.msg,
+        };
+        onProgress(p);
+        if (m.state === "wifi_saved" || m.state === "error") {
+          clearTimeout(guard);
+          resolve(p);
+          return true;
+        }
+        return false;
+      };
+      this.statusWaiters.push(waiter);
+      try {
+        await this.writeControl({ op: "change_wifi", ...args });
       } catch (e) {
         clearTimeout(guard);
         this.statusWaiters = this.statusWaiters.filter((w) => w !== waiter);

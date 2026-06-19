@@ -8,6 +8,7 @@ import {
   Text,
   View,
 } from "react-native";
+import { Feather } from "@expo/vector-icons";
 import { GlassBackground } from "../components/ui";
 import { C, D, radius } from "../theme";
 
@@ -273,7 +274,7 @@ export function DevicePreviewScreen({ onClose }: { onClose: () => void }) {
 
           <View style={s.scrBtnRow}>
             <ScreenBtn
-              label="● Record"
+              label="Record"
               kind="primary"
               disabled={busy}
               onPress={record}
@@ -321,7 +322,7 @@ export function DevicePreviewScreen({ onClose }: { onClose: () => void }) {
           : phase === "uploading"
           ? "Uploading over Wi-Fi…"
           : phase === "synced"
-          ? "Uploaded ✓"
+          ? <>{"Uploaded "}<Feather name="check" size={13} color={D.green} /></>
           : "Idle · ready to record"}
         </Text>
       </ScrollView>

@@ -9,6 +9,7 @@ import {
   View,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
+import { Feather } from "@expo/vector-icons";
 import { SateApi } from "../api/sateApi";
 import { FoundDevice, SateLink } from "../ble/SateBle";
 import { GlassBackground } from "../components/ui";
@@ -34,12 +35,14 @@ export function RecorderSettingsScreen({
   device,
   onClose,
   onUnlinked,
+  onChangeWifi,
 }: {
   api: SateApi;
   link: SateLink;
   device: ManagedDevice;
   onClose: () => void;
   onUnlinked: () => void;
+  onChangeWifi: (device: ManagedDevice) => void;
 }) {
   const [name, setName] = useState(device.name);
   const [note, setNote] = useState<string | null>(null);
@@ -83,14 +86,15 @@ export function RecorderSettingsScreen({
     }
   };
 
-  // Wi-Fi restart goes through the server; if it's off Wi-Fi we reach it
-  // directly over Bluetooth instead.
-  const findNearby = () =>
+  // Find this recorder over BLE by serial. Keeps scanning the whole window — an
+  // online device only starts advertising AFTER it polls the `wifi_change`
+  // command (~12 s cadence), so callers that just armed it pass a longer timeout.
+  const findNearby = (timeoutMs = 12000) =>
     new Promise<FoundDevice>((resolve, reject) => {
       const timer = setTimeout(() => {
         link.stopScan();
-        reject(new Error("Recorder not found nearby. Make sure it's powered on."));
-      }, 12000);
+        reject(new Error("Recorder not found nearby. Make sure it's powered on and close to the phone."));
+      }, timeoutMs);
       link.startScan((d) => {
         if (d.name === device.serial) {
           clearTimeout(timer);
@@ -124,18 +128,42 @@ export function RecorderSettingsScreen({
     }
   };
 
+  // Unlink = release the device from this account AND factory-reset it back to
+  // first-time setup. Online recorders reset on their next heartbeat (the server
+  // returns {unclaimed:true}); for an off-Wi-Fi recorder we also push a reset
+  // straight over Bluetooth so it wipes immediately if it's nearby.
   const unlink = () => {
     Alert.alert(
-      "Unlink recorder",
-      `Unlink "${device.name}" from your account? Sessions already in SATE are kept; you can pair it again any time.`,
+      "Unlink & reset recorder",
+      `Remove "${device.name}" from your account and reset it to first-time setup? ` +
+        `Sessions already in SATE are kept. The recorder will need to be set up again ` +
+        `(by you or anyone) before it records.`,
       [
         { text: "Cancel", style: "cancel" },
         {
-          text: "Unlink",
+          text: "Unlink & reset",
           style: "destructive",
           onPress: async () => {
-            mounted.current = false;
+            // 1) Free it on the server. Online units pick up {unclaimed:true} on
+            //    their next heartbeat and wipe themselves.
             await api.removeDevice(device.id).catch(() => {});
+            // 2) Off-Wi-Fi unit: try to reset it now over Bluetooth so it doesn't
+            //    keep a stale account until it next reaches the server.
+            if (!live.online) {
+              try {
+                const ok = await link.requestPermissions();
+                if (ok) {
+                  const found = await findNearby(12000);
+                  await link.connect(found.id);
+                  await link.sendCommand("factory_reset");
+                }
+              } catch {
+                /* not nearby — the server-side reset still applies when it reconnects */
+              } finally {
+                await link.disconnect().catch(() => {});
+              }
+            }
+            mounted.current = false;
             onUnlinked();
           },
         },
@@ -228,12 +256,32 @@ export function RecorderSettingsScreen({
             <Text style={s.rowBtnTxt}>
               {restarting ? "Restarting…" : "Restart recorder"}
             </Text>
-            <Text style={s.rowBtnGlyph}>⏻</Text>
+            <Feather name="power" size={18} color={D.sub} style={{ marginLeft: 8 }} />
+          </Pressable>
+
+          <View style={s.rowDivider} />
+
+          <Pressable
+            onPress={() => onChangeWifi(live)}
+            disabled={restarting}
+            accessibilityRole="button"
+            style={({ pressed }) => [
+              s.rowBtn,
+              { opacity: restarting ? 0.6 : pressed ? 0.85 : 1 },
+            ]}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={s.rowBtnTxt}>Change Wi-Fi</Text>
+              <Text style={s.rowBtnSub}>
+                Scan, pick a network, type the password — keeps the account
+              </Text>
+            </View>
+            <Text style={s.rowBtnGlyph}>›</Text>
           </Pressable>
         </View>
 
         <Pressable style={s.unlinkBtn} onPress={unlink} accessibilityRole="button">
-          <Text style={s.unlinkTxt}>Unlink from my account</Text>
+          <Text style={s.unlinkTxt}>Unlink & reset recorder</Text>
         </Pressable>
       </ScrollView>
     </View>
@@ -315,7 +363,44 @@ const s = StyleSheet.create({
     paddingVertical: 4,
   },
   rowBtnTxt: { color: D.ink, fontSize: 15, fontWeight: "600" },
-  rowBtnGlyph: { color: D.sub, fontSize: 18 },
+  rowBtnSub: { color: D.sub, fontSize: 12, marginTop: 2 },
+  rowBtnGlyph: { color: D.sub, fontSize: 18, marginLeft: 8 },
+  rowDivider: { height: 1, backgroundColor: D.line, marginVertical: 10 },
+
+  wifiForm: { marginTop: 10 },
+  wifiHint: { color: D.sub, fontSize: 13, lineHeight: 18, marginBottom: 12 },
+  scanBtn: {
+    backgroundColor: D.tile,
+    borderWidth: 1,
+    borderColor: D.line,
+    borderRadius: 12,
+    paddingVertical: 11,
+    alignItems: "center",
+    marginBottom: 10,
+  },
+  scanTxt: { color: D.ink, fontSize: 14, fontWeight: "700" },
+  netList: { marginBottom: 10 },
+  netRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingVertical: 10,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: D.line,
+    marginBottom: 6,
+  },
+  netRowActive: { borderColor: D.sky, backgroundColor: D.skyBg },
+  netName: { fontSize: 14, fontWeight: "600", color: D.ink, flex: 1, marginRight: 8 },
+  netRssi: { fontSize: 12, color: D.sub },
+  wifiBtn: {
+    backgroundColor: D.sky,
+    borderRadius: 12,
+    paddingVertical: 13,
+    alignItems: "center",
+  },
+  wifiBtnTxt: { color: "#fff", fontSize: 15, fontWeight: "700" },
 
   unlinkBtn: {
     backgroundColor: D.redBg,

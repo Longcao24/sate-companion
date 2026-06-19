@@ -92,7 +92,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.0.14";
+static const char    *FIRMWARE_VERSION  = "1.1.6";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -155,6 +155,9 @@ static const int  MAX_PATIENTS = 6;
 static SatePatient g_patients[MAX_PATIENTS];   // zero-initialised: empty roster
 static int g_patientCount = 0;
 static int currentPatientIndex = 0;
+// True while the only roster entry is the synthetic "Standalone" patient seeded
+// by ensureStandalonePatient(). Cleared as soon as a real patient is pushed.
+static bool g_standalonePatient = false;
 
 // -----------------------------------------------------------------------------
 // Real sync summary (filled after sessions are uploaded to the SATE server).
@@ -241,6 +244,9 @@ void sateHookSetActivePatient(const char *id, const char *name, const char *age,
 // current slot). Runs only from loop() (UI task).
 static void applyActivePatient()
 {
+  // A real patient supersedes the standalone placeholder: drop it first so the
+  // pushed patient takes slot 0 instead of sitting next to "Standalone".
+  if (g_standalonePatient) { g_patientCount = 0; g_standalonePatient = false; }
   for (int i = 0; i < g_patientCount; i++) {
     if (!strcmp(g_patients[i].patientId, g_activePatientReq.patientId)) {
       g_patients[i] = g_activePatientReq;
@@ -253,10 +259,29 @@ static void applyActivePatient()
   currentPatientIndex = idx;
 }
 
-// The recorder is usable only once it has been claimed to a SATE account AND
-// has a real patient roster. Until then the user sees the onboarding screen
-// only - no Home, no recording.
-static bool deviceReady() { return connProvisioned() && g_patientCount > 0; }
+// Seed a single synthetic "Standalone" patient when the roster is empty so a
+// freshly provisioned device is usable right away - no waiting for the server
+// (or app) to assign a patient. Sessions upload with patient_id "Standalone";
+// any real patient pushed later replaces this (see applyActivePatient /
+// loadPatientsFromSd). Idempotent.
+static void ensureStandalonePatient()
+{
+  if (g_patientCount > 0) return;
+  SatePatient &p = g_patients[0];
+  snprintf(p.patientId,   sizeof(p.patientId),   "%s", "Standalone");
+  snprintf(p.displayName, sizeof(p.displayName), "%s", "Standalone");
+  snprintf(p.age,         sizeof(p.age),         "%s", "-");
+  snprintf(p.sessionType, sizeof(p.sessionType), "%s", "Standalone");
+  snprintf(p.clinician,   sizeof(p.clinician),   "%s", "-");
+  g_patientCount       = 1;
+  currentPatientIndex  = 0;
+  g_standalonePatient  = true;
+}
+
+// The recorder is usable once it has been claimed to a SATE account. Patient
+// assignment is optional: without a roster the device records standalone (see
+// ensureStandalonePatient). Until claimed the user sees the onboarding screen.
+static bool deviceReady() { return connProvisioned(); }
 
 Display  screen;
 I2SClass es8311_i2s;
@@ -857,6 +882,7 @@ static void loadPatientsFromSd()
   }
   if (n > 0) {
     g_patientCount = n;
+    g_standalonePatient = false;   // real roster supersedes the placeholder
     if (currentPatientIndex >= n) currentPatientIndex = 0;
     Serial.printf("Loaded %d patient(s) from SD\n", n);
   }
@@ -1083,6 +1109,17 @@ static const char *batterySymbol(uint8_t pct)
   if (pct >= 40) return LV_SYMBOL_BATTERY_2;
   if (pct >= 15) return LV_SYMBOL_BATTERY_1;
   return LV_SYMBOL_BATTERY_EMPTY;
+}
+
+// USB-C power / charging detection.
+// This board exposes no dedicated charge-status GPIO, so we infer "on USB":
+//   - the native USB-CDC link reports a host (plugged into a computer), OR
+//   - the cell is being held at the charger's constant-voltage ceiling
+//     (>= 4250 mV) — a level a resting 1S LiPo never reaches on its own.
+static bool isUsbCharging()
+{
+  if (Serial) return true;            // HWCDC host present (data USB)
+  return readBatteryMv() >= 4250;     // CV-phase charge from any USB source
 }
 
 static bool isSessionSynced(const char *dir, uint32_t n)
@@ -1555,16 +1592,42 @@ static void refreshHomeUpload()
   // every ~5 s since the cell drifts slowly.
   if (homeBatText) {
     static uint32_t lastBat = 0;
+    static uint8_t  batPct  = 255;
+    static uint8_t  chgFrame = 0;
+    static int8_t   wasCharging = -1;
     uint32_t now = millis();
-    if (lastBat == 0 || now - lastBat >= 5000) {
-      lastBat = now;
-      uint8_t batPct = batteryPercent();
-      char batTxt[24];
-      snprintf(batTxt, sizeof(batTxt), "%s %u%%", batterySymbol(batPct), batPct);
+    bool charging = isUsbCharging();
+    bool sampled  = (lastBat == 0 || now - lastBat >= 5000);
+    if (sampled) { lastBat = now; batPct = batteryPercent(); }
+
+    char batTxt[28];
+    if (charging) {
+      // Animated charge: a bolt + the battery glyph sweeping EMPTY->FULL on a
+      // ~1.3 s loop (advances each ~250 ms refresh), drawn green, so plugging
+      // in USB-C is unmistakable. Keeps showing the real % alongside.
+      static const char *fill[5] = {
+        LV_SYMBOL_BATTERY_EMPTY, LV_SYMBOL_BATTERY_1, LV_SYMBOL_BATTERY_2,
+        LV_SYMBOL_BATTERY_3,     LV_SYMBOL_BATTERY_FULL,
+      };
+      chgFrame = (uint8_t)((chgFrame + 1) % 5);
+      if (batPct == 255)
+        snprintf(batTxt, sizeof(batTxt), LV_SYMBOL_CHARGE " %s", fill[chgFrame]);
+      else
+        snprintf(batTxt, sizeof(batTxt), LV_SYMBOL_CHARGE " %s %u%%",
+                 fill[chgFrame], batPct);
+      lv_label_set_text(homeBatText, batTxt);
+      lv_obj_set_style_text_color(homeBatText, lv_color_hex(COL_OK), 0);
+    } else if (sampled || wasCharging == 1) {
+      // Static chip: redraw on a fresh sample, or right after charging stops.
+      if (batPct == 255)
+        snprintf(batTxt, sizeof(batTxt), "%s", batterySymbol(100));
+      else
+        snprintf(batTxt, sizeof(batTxt), "%s %u%%", batterySymbol(batPct), batPct);
       lv_label_set_text(homeBatText, batTxt);
       uint32_t batCol = (batPct < 15) ? COL_REC : (batPct < 35) ? COL_WARN : COL_OK;
       lv_obj_set_style_text_color(homeBatText, lv_color_hex(batCol), 0);
     }
+    wasCharging = charging ? 1 : 0;
   }
 
   if (!homeUpText || !homeUpBar || !homeUpDot) return;
@@ -1716,16 +1779,19 @@ static void showOnboardingScreen()
   int s1 = (m == CONN_OFF) ? 1 : 2;
   int s2 = (appConn || prov || online) ? 2 : (m == CONN_BLE_ADV ? 1 : 0);
   int s3 = (online || prov) ? 2 : ((m == CONN_WIFI_TRYING || appConn) ? 1 : 0);
-  int s4 = (prov && hasPat) ? 2 : (prov ? 1 : 0);
+  // Step 4 completes on account claim alone; patients are optional (the device
+  // records standalone), so claiming is the last gate before Home.
+  int s4 = prov ? 2 : (online ? 1 : 0);
 
   onboardStepRow(card, 0, "Bluetooth ready", s1);
   onboardStepRow(card, 1, "App connected", s2);
   onboardStepRow(card, 2, "Wi-Fi connected", s3);
-  onboardStepRow(card, 3, "Account + patients", s4);
+  onboardStepRow(card, 3, "Account linked", s4);
+
+  (void)hasPat;   // roster no longer gates onboarding
 
   lv_obj_t *foot = lv_label_create(lv_scr_act());
-  lv_label_set_text(foot, (prov && !hasPat) ? "Waiting for patient list..."
-                                            : "Open the SATE app to finish setup");
+  lv_label_set_text(foot, "Open the SATE app to finish setup");
   lv_obj_set_width(foot, 216);
   lv_label_set_long_mode(foot, LV_LABEL_LONG_WRAP);
   lv_obj_set_style_text_align(foot, LV_TEXT_ALIGN_CENTER, 0);
@@ -1737,6 +1803,9 @@ static void showOnboardingScreen()
 
 static void showHomeScreen()
 {
+  // Provisioned but no patient yet -> record standalone instead of blocking.
+  ensureStandalonePatient();
+
   uiResetPointers();
   lv_obj_clean(lv_scr_act());
   setScreenWhite();
@@ -2346,7 +2415,9 @@ static void playSessionFromList(int sessionNum)
 }
 
 // -----------------------------------------------------------------------------
-// Hold BOOT 5 s -> factory reset (wipe Wi-Fi + account, reboot to setup).
+// Hold BOOT 5 s -> FACTORY RESET (wipe Wi-Fi + account, reboot to first-time
+// setup), claimed or not. Changing Wi-Fi without a reset is done from the app
+// (BLE / wifi_change), so the on-board button is the deliberate full wipe.
 // A red countdown banner shows while held; releasing before 5 s cancels.
 // -----------------------------------------------------------------------------
 
@@ -2360,7 +2431,7 @@ static void serviceFactoryResetButton()
 
     if (held >= 700 && !resetBanner) {             // show banner after a beat
       resetBanner = lv_obj_create(lv_scr_act());
-      lv_obj_set_size(resetBanner, 200, 76);
+      lv_obj_set_size(resetBanner, 210, 76);
       lv_obj_center(resetBanner);
       stylePanel(resetBanner);
       lv_obj_set_style_bg_color(resetBanner, lv_color_hex(COL_REC_BG), 0);
@@ -2375,11 +2446,15 @@ static void serviceFactoryResetButton()
     if (resetBanner) {
       int secLeft = 5 - (int)(held / 1000);
       if (secLeft < 0) secLeft = 0;
-      char t[40];
-      snprintf(t, sizeof(t), LV_SYMBOL_TRASH "  Reset in %d", secLeft);
+      char t[48];
+      snprintf(t, sizeof(t), LV_SYMBOL_TRASH "  Factory reset in %d", secLeft);
       lv_label_set_text(lv_obj_get_child(resetBanner, 0), t);
     }
-    if (held >= 5000) connFactoryReset();           // wipes config + reboots
+    if (held >= 5000) {
+      if (resetBanner) { lv_obj_del(resetBanner); resetBanner = nullptr; }
+      bootHoldStart = 0;
+      connFactoryReset();                    // wipe config + account, restart
+    }
   } else {
     bootHoldStart = 0;
     if (resetBanner) { lv_obj_del(resetBanner); resetBanner = nullptr; }
@@ -2471,7 +2546,12 @@ void loop()
       } else if (connSetupActive() && uiIdle && currentState != CONNECTION) {
         showConnectionScreen();      // app just connected: show live progress
       } else if (currentState == CONNECTION) {
-        showConnectionScreen();      // refresh the live view
+        // App still connected -> keep the live view. App left (e.g. backed out of
+        // Change-Wi-Fi without updating) -> auto-return to the main page instead
+        // of sitting on "waiting for app".
+        if (connSetupActive())     showConnectionScreen();
+        else if (deviceReady())    showHomeScreen();
+        else                       showOnboardingScreen();
       } else if (currentState == HOME) {
         showHomeScreen();            // refresh counts + badge
       } else {

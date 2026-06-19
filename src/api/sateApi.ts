@@ -296,3 +296,28 @@ export async function refreshSession(
     expiresAt: Date.now() + (Number(j.expires_in) || 3600) * 1000,
   };
 }
+
+// "Sign in on phone": exchange a one-time code (typed or scanned from the web
+// app's QR) for a real Supabase session via the `mobile-link` Edge Function.
+// Returns the SAME shape as login(), so the caller stores + auto-refreshes it
+// identically — the only difference is no password was entered on the phone.
+export async function consumeMobileLink(
+  code: string
+): Promise<{ token: string; refreshToken: string | null; expiresAt: number; user: User }> {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/mobile-link`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_ANON_KEY },
+    body: JSON.stringify({ action: "consume", code: code.trim() }),
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(j?.error || `Sign-in failed (${res.status})`);
+  }
+  const u = j.user || {};
+  return {
+    token: j.access_token as string,
+    refreshToken: (j.refresh_token as string) ?? null,
+    expiresAt: Date.now() + (Number(j.expires_in) || 3600) * 1000,
+    user: { id: u.id, email: u.email, name: u.name || u.email },
+  };
+}
