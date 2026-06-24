@@ -8,8 +8,7 @@
 // Freenove FNK0104AB 2.8 inch 240x320 ILI9341.
 #define FNK0104AB_2P8_240x320_ILI9341
 
-// Vertical flip (upside down): rotation 2 = portrait rotated 180 deg from 0.
-#define TFT_DIRECTION 2
+#define TFT_DIRECTION 0
 
 class Display
 {

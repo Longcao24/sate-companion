@@ -60,14 +60,13 @@ static bool touch_read_raw(uint16_t *x, uint16_t *y)
     uint16_t rawX = ((xh & 0x0F) << 8) | xl;
     uint16_t rawY = ((yh & 0x0F) << 8) | yl;
 
-    // Clamp to panel bounds.
+    // Default mapping for TFT_DIRECTION 0.
+    // If touch is mirrored/rotated on your unit, swap or invert here.
     if (rawX >= screenWidth) rawX = screenWidth - 1;
     if (rawY >= screenHeight) rawY = screenHeight - 1;
 
-    // TFT_DIRECTION 2 = display rotated 180 deg. Invert both axes so touch
-    // stays aligned with the flipped UI.
-    *x = (screenWidth - 1) - rawX;
-    *y = (screenHeight - 1) - rawY;
+    *x = rawX;
+    *y = rawY;
     return true;
 }
 
