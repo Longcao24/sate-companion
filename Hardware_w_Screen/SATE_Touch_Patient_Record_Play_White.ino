@@ -82,13 +82,13 @@
                                 // FNK0104AB 2.8" ESP32-S3 board (per Freenove ch.5)
 
 // Two external push buttons for the demo (active LOW, INPUT_PULLUP, wired to GND).
-// Free pins on the FNK0104AB: GPIO3/14 don't collide with SD (38-41,47,48),
+// Free pins on the FNK0104AB: GPIO2/14 don't collide with SD (38-41,47,48),
 // audio (4-8), I2C (15,16), TFT (10-13,45,46), touch (17,18), AP_ENABLE (1),
-// BAT (9) or BOOT (0). GPIO3 is an S3 strapping pin but INPUT_PULLUP idles it
-// HIGH and a momentary press only pulls LOW after boot, so it's safe here.
+// BAT (9) or BOOT (0). GPIO2 is NOT an S3 strapping pin (those are 0/3/45/46),
+// so it's the cleanest free choice for RECORD.
 //   RECORD: short press toggles record/stop; off Home it returns to Home.
 //   FLAG:   while recording, marks an important moment at the current timestamp.
-#define REC_BTN_PIN  3          // external RECORD button
+#define REC_BTN_PIN  2          // external RECORD button (GPIO2: free, not a strap pin)
 #define FLAG_BTN_PIN 14         // external FLAG button
 
 // Debounced edge-detector state for an external button. Declared up here (above
@@ -107,7 +107,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.2.13";
+static const char    *FIRMWARE_VERSION  = "1.2.14";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of

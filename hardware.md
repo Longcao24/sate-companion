@@ -6,7 +6,7 @@ the part most worth reading — **how the firmware is optimized for memory, RAM,
 and the two CPU cores** so long recordings run smooth and never reboot.
 
 Firmware lives in `SATE_Touch_Patient_Record_Play_White/`. Current good version:
-**fw 1.2.13** (`main`). Rollback tag: `fw-0.9.1-working`.
+**fw 1.2.14** (`main`). Rollback tag: `fw-0.9.1-working`.
 
 > ### ⭐ Versioning rule (always)
 > **Bump `FIRMWARE_VERSION` on EVERY change you flash — including a fix to the
@@ -79,18 +79,18 @@ register interface. Begun once, before display init.
 | Signal | GPIO | Note |
 |--------|------|------|
 | BOOT button | 0 | active LOW, `INPUT_PULLUP`; hold 5 s = factory reset |
-| RECORD button | 3 | external, active LOW, `INPUT_PULLUP` to GND (fw 1.2.0+) |
+| RECORD button | 2 | external, active LOW, `INPUT_PULLUP` to GND (GPIO2 since fw 1.2.14; was 3) |
 | FLAG button | 14 | external, active LOW, `INPUT_PULLUP` to GND (fw 1.2.0+) |
 
 **Demo buttons (fw 1.2.0+):** two external push buttons in `Hardware_w_Screen/`.
-- **RECORD (GPIO3):** on Home a press starts a take, press again stops it; from
+- **RECORD (GPIO2):** on Home a press starts a take, press again stops it; from
   any other screen a press jumps back to Home. (BOOT/GPIO0 is factory-reset only.)
 - **FLAG (GPIO14):** while recording, each press marks the current moment as an
   important event (a live `Flags: N` counter shows on the record overlay). The
   offsets ride the upload to the web report, shown as amber ticks on the seek bar.
 
-GPIO3 is an S3 strapping pin, but `INPUT_PULLUP` idles it HIGH and a momentary
-press only pulls LOW after boot, so it doesn't affect the boot strap.
+GPIO2 is **not** an S3 strapping pin (those are 0/3/45/46), so it's the cleanest
+free choice for RECORD - no boot-strap concern at all.
 
 > **Instant response (fw 1.2.5+):** both buttons are **interrupt-latched** and all
 > network work runs on a **second core**, so a press registers immediately even
