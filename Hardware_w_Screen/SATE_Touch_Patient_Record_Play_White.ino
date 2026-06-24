@@ -107,7 +107,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.2.2";
+static const char    *FIRMWARE_VERSION  = "1.2.3";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -1469,9 +1469,16 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
   uint32_t lastUiMs = 0;
   bool ok = true;
 
+  // Read the mic in SMALL slices (~32 ms each) rather than one 4 KB block
+  // (~128 ms). A short read means we return to service the GUI ~30x/sec, so the
+  // on-screen Stop button and the FLAG/REC buttons feel instant instead of
+  // sampling only ~8x/sec (which made Stop laggy / easy to miss). SD writes are
+  // still buffered, so smaller writes cost little at 32 KB/s.
+  const size_t REC_READ_BYTES = 1024;
+
   while (written < pcmTotal && !recordStopReq) {
     size_t want = pcmTotal - written;
-    if (want > AUDIO_CHUNK_BYTES) want = AUDIO_CHUNK_BYTES;
+    if (want > REC_READ_BYTES) want = REC_READ_BYTES;
 
     size_t got = es8311_i2s.readBytes((char *)audioChunk, want);
     if (got == 0) { ok = false; break; }
@@ -1506,19 +1513,20 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
       }
     }
 
+    // Refresh the ring + elapsed text a few times a second (cheap to skip), but
+    // service the GUI/touch EVERY slice so the Stop button stays responsive.
     uint32_t now = millis();
-    if (now - lastUiMs >= 120) {
+    if (now - lastUiMs >= 150) {
       lastUiMs = now;
-      // Count UP elapsed seconds; the arc fills slowly toward the safety cap.
       uint32_t elapsed = written / PCM_BYTES_PER_SEC;
       char big[8];
       snprintf(big, sizeof(big), "%lu", (unsigned long)elapsed);
       updateProgress((uint16_t)((written * 1000ULL) / pcmTotal), big);
-      lv_timer_handler();
-      // Yield to the scheduler so a multi-minute capture can't starve the idle
-      // task (and trip its watchdog) - this is what keeps long records stable.
-      delay(1);
     }
+    lv_timer_handler();   // reads touch + paints; ~30 Hz keeps Stop instant
+    // Yield to the scheduler so a multi-minute capture can't starve the idle
+    // task (and trip its watchdog) - this is what keeps long records stable.
+    delay(1);
   }
 
   if (file) {
@@ -1583,11 +1591,17 @@ static bool playWavStreamFromSd(const char *path, const char *caption)
   showProgressOverlay(caption, COL_PRIMARY, true /*Stop = back out of playback*/);
 
   while (sent < pcmTotal && !recordStopReq) {
-    size_t got = file.read(audioChunk, AUDIO_CHUNK_BYTES);
+    size_t want = pcmTotal - sent;
+    if (want > 1024) want = 1024;          // small slices -> responsive Stop
+    size_t got = file.read(audioChunk, want);
     if (got == 0) break;
 
     es8311_i2s.write(audioChunk, got);   // blocks on DMA, keeps audio timing
     sent += got;
+
+    // Physical RECORD button stops playback too (mirrors the on-screen Stop).
+    if (btnPressed(recBtn)) recordStopReq = true;
+    (void)btnPressed(flagBtn);             // flag is a no-op during playback
 
     uint32_t now = millis();
     if (now - lastUiMs >= 200) {
@@ -1596,8 +1610,8 @@ static bool playWavStreamFromSd(const char *path, const char *caption)
       char big[8];
       snprintf(big, sizeof(big), "%lu", (unsigned long)secLeft);
       updateProgress((uint16_t)((sent * 1000ULL) / pcmTotal), big);
-      lv_timer_handler();
     }
+    lv_timer_handler();   // ~15-30 Hz: keeps the Stop button responsive
   }
 
   file.close();
