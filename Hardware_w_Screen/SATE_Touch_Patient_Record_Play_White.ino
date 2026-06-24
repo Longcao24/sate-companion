@@ -107,7 +107,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.2.0";
+static const char    *FIRMWARE_VERSION  = "1.2.1";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -514,32 +514,52 @@ static lv_obj_t *makeActionButton(lv_obj_t *parent, const char *text,
   return btn;
 }
 
-// The Home record control, drawn like a physical recorder's dial: a big red
-// circle with a white bezel ring and a soft red glow, "REC" in the middle.
-// Large hit target for the small touchscreen.
-static lv_obj_t *makeRecordButton()
+// Recording is driven by the external RECORD button now, so Home no longer needs
+// a big on-screen record dial. Instead it shows a small legend mapping the two
+// physical buttons to what they do, styled to match the real buttons (red =
+// record, amber = flag) so the demo is self-explanatory.
+static void addButtonHintRow(lv_obj_t *panel, int y, uint32_t dotColor,
+                             const char *glyph, const char *text)
 {
-  lv_obj_t *btn = lv_btn_create(lv_scr_act());
-  lv_obj_set_size(btn, 96, 96);
-  lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -56);
-  lv_obj_set_style_radius(btn, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_color(btn, lv_color_hex(COL_REC), 0);
-  lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_color(btn, lv_color_hex(0xFFFFFF), 0);
-  lv_obj_set_style_border_width(btn, 5, 0);
-  lv_obj_set_style_shadow_color(btn, lv_color_hex(COL_REC), 0);
-  lv_obj_set_style_shadow_width(btn, 24, 0);
-  lv_obj_set_style_shadow_opa(btn, LV_OPA_40, 0);
-  lv_obj_set_style_bg_color(btn, lv_color_hex(0xB91C1C), LV_STATE_PRESSED);
-  lv_obj_add_event_cb(btn, actionEvent, LV_EVENT_CLICKED,
-                      (void *)(intptr_t)ACT_RECORD);
+  lv_obj_t *dot = lv_obj_create(panel);
+  lv_obj_set_size(dot, 28, 28);
+  lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(dot, lv_color_hex(dotColor), 0);
+  lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_color(dot, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_border_width(dot, 3, 0);
+  lv_obj_set_style_shadow_color(dot, lv_color_hex(dotColor), 0);
+  lv_obj_set_style_shadow_width(dot, 8, 0);
+  lv_obj_set_style_shadow_opa(dot, LV_OPA_40, 0);
+  lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_align(dot, LV_ALIGN_TOP_LEFT, 0, y);
+  if (glyph && glyph[0]) {
+    lv_obj_t *g = lv_label_create(dot);
+    lv_label_set_text(g, glyph);
+    setFont(g, &lv_font_montserrat_14);
+    lv_obj_set_style_text_color(g, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_center(g);
+  }
 
-  lv_obj_t *lbl = lv_label_create(btn);
-  lv_label_set_text(lbl, "REC");
-  setFont(lbl, &lv_font_montserrat_20);
-  lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFFFFF), 0);
-  lv_obj_center(lbl);
-  return btn;
+  lv_obj_t *lbl = lv_label_create(panel);
+  setFont(lbl, &lv_font_montserrat_14);
+  lv_label_set_text(lbl, text);
+  lv_obj_set_style_text_color(lbl, lv_color_hex(COL_TEXT_DARK), 0);
+  lv_obj_set_style_text_line_space(lbl, 2, 0);
+  lv_obj_align(lbl, LV_ALIGN_TOP_LEFT, 40, y - 2);
+}
+
+static lv_obj_t *makeButtonHintPanel()
+{
+  lv_obj_t *panel = lv_obj_create(lv_scr_act());
+  lv_obj_set_size(panel, 220, 96);
+  lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, 168);
+  stylePanel(panel);
+  lv_obj_set_style_pad_all(panel, 10, 0);
+
+  addButtonHintRow(panel, 0,  COL_REC,  "",             "RECORD button\nstart / stop a take");
+  addButtonHintRow(panel, 44, COL_WARN, LV_SYMBOL_BELL, "FLAG button\nmark a key moment");
+  return panel;
 }
 
 static void updateConnBadge()
@@ -1988,10 +2008,9 @@ static void showHomeScreen()
   lv_obj_set_style_bg_color(homeUpBar, lv_color_hex(COL_PRIMARY), LV_PART_INDICATOR);
   lv_obj_add_flag(homeUpBar, LV_OBJ_FLAG_HIDDEN);
 
-  // The record control: a real recorder-style big red circle with a white ring
-  // and a soft red glow. Tapping it starts a capture (runs until Stop).
-  lv_obj_t *btnRecord = makeRecordButton();
-  (void)btnRecord;
+  // No on-screen record dial: the external RECORD button drives capture. Show a
+  // compact legend for the two physical buttons instead.
+  makeButtonHintPanel();
 
   // Two big, easy-to-hit nav buttons. Uploading is automatic now, so there is
   // no Sync button to find: Next patient + Sessions are all that's left.
