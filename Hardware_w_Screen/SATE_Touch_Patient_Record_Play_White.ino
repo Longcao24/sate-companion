@@ -107,7 +107,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.2.3";
+static const char    *FIRMWARE_VERSION  = "1.2.4";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -514,54 +514,6 @@ static lv_obj_t *makeActionButton(lv_obj_t *parent, const char *text,
   return btn;
 }
 
-// Recording is driven by the external RECORD button now, so Home no longer needs
-// a big on-screen record dial. Instead it shows a small legend mapping the two
-// physical buttons to what they do, styled to match the real buttons (red =
-// record, amber = flag) so the demo is self-explanatory.
-static void addButtonHintRow(lv_obj_t *panel, int y, uint32_t dotColor,
-                             const char *glyph, const char *text)
-{
-  lv_obj_t *dot = lv_obj_create(panel);
-  lv_obj_set_size(dot, 28, 28);
-  lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
-  lv_obj_set_style_bg_color(dot, lv_color_hex(dotColor), 0);
-  lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-  lv_obj_set_style_border_color(dot, lv_color_hex(0xFFFFFF), 0);
-  lv_obj_set_style_border_width(dot, 3, 0);
-  lv_obj_set_style_shadow_color(dot, lv_color_hex(dotColor), 0);
-  lv_obj_set_style_shadow_width(dot, 8, 0);
-  lv_obj_set_style_shadow_opa(dot, LV_OPA_40, 0);
-  lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_align(dot, LV_ALIGN_TOP_LEFT, 0, y);
-  if (glyph && glyph[0]) {
-    lv_obj_t *g = lv_label_create(dot);
-    lv_label_set_text(g, glyph);
-    setFont(g, &lv_font_montserrat_14);
-    lv_obj_set_style_text_color(g, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_center(g);
-  }
-
-  lv_obj_t *lbl = lv_label_create(panel);
-  setFont(lbl, &lv_font_montserrat_14);
-  lv_label_set_text(lbl, text);
-  lv_obj_set_style_text_color(lbl, lv_color_hex(COL_TEXT_DARK), 0);
-  lv_obj_set_style_text_line_space(lbl, 2, 0);
-  lv_obj_align(lbl, LV_ALIGN_TOP_LEFT, 40, y - 2);
-}
-
-static lv_obj_t *makeButtonHintPanel()
-{
-  lv_obj_t *panel = lv_obj_create(lv_scr_act());
-  lv_obj_set_size(panel, 220, 96);
-  lv_obj_align(panel, LV_ALIGN_TOP_MID, 0, 168);
-  stylePanel(panel);
-  lv_obj_set_style_pad_all(panel, 10, 0);
-
-  addButtonHintRow(panel, 0,  COL_REC,  "",             "RECORD button\nstart / stop a take");
-  addButtonHintRow(panel, 44, COL_WARN, LV_SYMBOL_BELL, "FLAG button\nmark a key moment");
-  return panel;
-}
-
 static void updateConnBadge()
 {
   if (!connIcon) return;
@@ -654,7 +606,7 @@ static void createHeader(const char *title, PendingAction backAction = ACT_NONE,
 // -----------------------------------------------------------------------------
 
 static void showProgressOverlay(const char *caption, uint32_t arcColor,
-                                bool withStop = false)
+                                bool withStop = false, bool withFlags = false)
 {
   progressOverlay = lv_obj_create(lv_scr_act());
   lv_obj_set_size(progressOverlay, 240, 320);
@@ -692,7 +644,7 @@ static void showProgressOverlay(const char *caption, uint32_t arcColor,
 
   // Live flag counter (recording only) - the physical FLAG button bumps it.
   progressFlag = nullptr;
-  if (withStop) {
+  if (withFlags) {
     progressFlag = lv_label_create(progressOverlay);
     lv_label_set_text(progressFlag, LV_SYMBOL_BELL "  Flags: 0");
     setFont(progressFlag, &lv_font_montserrat_14);
@@ -700,7 +652,8 @@ static void showProgressOverlay(const char *caption, uint32_t arcColor,
     lv_obj_align(progressFlag, LV_ALIGN_CENTER, 0, 64);
   }
 
-  // Big Stop button for open-ended recording: the SLP ends the take by tapping.
+  // Optional on-screen Stop (playback only). Recording is stopped with the
+  // physical RECORD button, so its overlay passes withStop=false.
   if (withStop) {
     lv_obj_t *stopBtn = lv_btn_create(progressOverlay);
     styleButton(stopBtn, COL_REC, 0xFFFFFF);
@@ -1459,7 +1412,8 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
     return false;
   }
   writeWavHeader(file, PCM_SEGMENT_BYTES);
-  showProgressOverlay("recording  -  tap Stop when done", COL_REC, true /*Stop*/);
+  showProgressOverlay("recording  -  press RECORD to stop", COL_REC,
+                      false /*no on-screen Stop*/, true /*flag counter*/);
 
   // Drain stale I2S DMA samples so the recording starts clean.
   es8311_i2s.readBytes((char *)audioChunk, sizeof(audioChunk));
@@ -1922,12 +1876,13 @@ static void showHomeScreen()
   setScreenWhite();
   createHeader("SATE Recorder");
 
-  // Patient card
+  // Patient card - taller now that the record dial/legend are gone, so Home is
+  // balanced: a roomy patient panel up top, live status centred below.
   patientCard = lv_obj_create(lv_scr_act());
-  lv_obj_set_size(patientCard, 220, 92);
-  lv_obj_align(patientCard, LV_ALIGN_TOP_MID, 0, 40);
+  lv_obj_set_size(patientCard, 220, 128);
+  lv_obj_align(patientCard, LV_ALIGN_TOP_MID, 0, 48);
   stylePanel(patientCard);
-  lv_obj_set_style_pad_all(patientCard, 12, 0);
+  lv_obj_set_style_pad_all(patientCard, 14, 0);
 
   const SatePatient &p = g_patients[currentPatientIndex];
 
@@ -1983,8 +1938,8 @@ static void showHomeScreen()
   lv_obj_set_width(patientRows, 196);
   lv_label_set_long_mode(patientRows, LV_LABEL_LONG_WRAP);
   lv_obj_set_style_text_color(patientRows, lv_color_hex(COL_TEXT_MUTED), 0);
-  lv_obj_set_style_text_line_space(patientRows, 5, 0);
-  lv_obj_align(patientRows, LV_ALIGN_TOP_LEFT, 0, 32);
+  lv_obj_set_style_text_line_space(patientRows, 10, 0);
+  lv_obj_align(patientRows, LV_ALIGN_TOP_LEFT, 0, 36);
 
   char rows[200];
   snprintf(rows, sizeof(rows),
@@ -2003,18 +1958,18 @@ static void showHomeScreen()
   lv_obj_set_style_border_width(homeUpDot, 0, 0);
   lv_obj_set_style_bg_color(homeUpDot, lv_color_hex(COL_OK), 0);
   lv_obj_clear_flag(homeUpDot, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_align(homeUpDot, LV_ALIGN_TOP_LEFT, 14, 142);
+  lv_obj_align(homeUpDot, LV_ALIGN_TOP_LEFT, 14, 214);
 
   homeUpText = lv_label_create(lv_scr_act());
   setFont(homeUpText, &lv_font_montserrat_14);
   lv_obj_set_style_text_color(homeUpText, lv_color_hex(COL_OK), 0);
   lv_obj_set_width(homeUpText, 194);                 // 32px left + 14px right margin
   lv_label_set_long_mode(homeUpText, LV_LABEL_LONG_DOT); // clip, never overflow
-  lv_obj_align(homeUpText, LV_ALIGN_TOP_LEFT, 32, 138);
+  lv_obj_align(homeUpText, LV_ALIGN_TOP_LEFT, 32, 210);
 
   homeUpBar = lv_bar_create(lv_scr_act());
   lv_obj_set_size(homeUpBar, 212, 6);
-  lv_obj_align(homeUpBar, LV_ALIGN_TOP_MID, 0, 162);
+  lv_obj_align(homeUpBar, LV_ALIGN_TOP_MID, 0, 234);
   lv_obj_set_style_radius(homeUpBar, 3, LV_PART_MAIN);
   lv_obj_set_style_radius(homeUpBar, 3, LV_PART_INDICATOR);
   lv_bar_set_range(homeUpBar, 0, 1000);
@@ -2022,9 +1977,8 @@ static void showHomeScreen()
   lv_obj_set_style_bg_color(homeUpBar, lv_color_hex(COL_PRIMARY), LV_PART_INDICATOR);
   lv_obj_add_flag(homeUpBar, LV_OBJ_FLAG_HIDDEN);
 
-  // No on-screen record dial: the external RECORD button drives capture. Show a
-  // compact legend for the two physical buttons instead.
-  makeButtonHintPanel();
+  // No on-screen record dial and no button legend: the external RECORD/FLAG
+  // buttons drive capture, so Home stays clean (patient + live status only).
 
   // Two big, easy-to-hit nav buttons. Uploading is automatic now, so there is
   // no Sync button to find: Next patient + Sessions are all that's left.
@@ -2677,9 +2631,12 @@ void loop()
         if (connSetupActive())     showConnectionScreen();
         else if (deviceReady())    showHomeScreen();
         else                       showOnboardingScreen();
-      } else if (currentState == HOME) {
-        showHomeScreen();            // refresh counts + badge
       } else {
+        // Any non-transition state (incl. HOME): just refresh the small
+        // connectivity icon. Do NOT full-rebuild Home here - that fired on every
+        // connectivity ping and caused periodic jank. The live status line +
+        // counts refresh on their own 250 ms cadence (refreshHomeUpload), and a
+        // real roster change rebuilds Home via connPatientsReq below.
         updateConnBadge();
       }
     }

@@ -83,6 +83,13 @@ register interface. Begun once, before display init.
 GPIO3 is an S3 strapping pin, but `INPUT_PULLUP` idles it HIGH and a momentary
 press only pulls LOW after boot, so it doesn't affect the boot strap.
 
+**Fully hardware-driven UI (fw 1.2.4+):** recording is started/stopped by the
+physical RECORD button, so Home has **no on-screen record dial and no button
+legend** — just the patient panel + live status. The recording overlay has **no
+on-screen Stop** either (press RECORD to stop). Playback keeps an on-screen Stop
+(there is no physical play button); the RECORD button also stops playback. Home
+was rebalanced around the removed widgets (taller patient card, status centred).
+
 ⚠️ **Do NOT attach serial (`cat`/monitor) while recording** — opening the CDC
 port toggles DTR/RTS and resets the board mid-take. Watch the on-screen UI
 instead (see §3 for the same caveat on the record-and-upload path).
@@ -274,6 +281,21 @@ stack/heap corruption). Same rule lets long blocking work call
 8 MB OPI PSRAM holds big/cold allocations; the hot, latency-sensitive buffers
 (DMA draw buffers, audio chunk) stay in internal SRAM. `[MEM]` telemetry tracks
 both: internal `free`/`largest`/`min` and `psram free`.
+
+### 8.13 Small audio slices = responsive UI (fw 1.2.3+)
+The record/playback loops move audio in **1 KB slices (~32 ms)**, not one 4 KB
+block (~128 ms), and call `lv_timer_handler()` **every slice (~30 Hz)**. A 4 KB
+block meant the GUI/touch were serviced only ~8x/sec, so the on-screen Stop
+button missed quick taps and the ring stuttered. The I2S DMA ring absorbs the
+few-ms per-slice GUI/SD overhead, so audio timing is unaffected. Ring/elapsed
+text still refreshes only a few times a second (cheap to skip).
+
+### 8.14 Never full-rebuild Home on a connectivity ping (fw 1.2.4+)
+A connectivity state change (`connStateReq`) used to call `showHomeScreen()`,
+which does `lv_obj_clean()` + ~20 widget re-creations + a full repaint. Firing
+that on every ping caused periodic jank. Now it calls only `updateConnBadge()`
+(the small conn icon); the live status line + counts refresh on their own 250 ms
+cadence, and a real roster change still rebuilds Home via `connPatientsReq`.
 
 ### Core model
 One Arduino **loop task** owns LVGL + connectivity (single-threaded — no locks
