@@ -70,6 +70,22 @@ register interface. Begun once, before display init.
 | Signal | GPIO | Note |
 |--------|------|------|
 | BOOT button | 0 | active LOW, `INPUT_PULLUP`; hold 5 s = factory reset |
+| RECORD button | 3 | external, active LOW, `INPUT_PULLUP` to GND (fw 1.2.0+) |
+| FLAG button | 14 | external, active LOW, `INPUT_PULLUP` to GND (fw 1.2.0+) |
+
+**Demo buttons (fw 1.2.0+):** two external push buttons in `Hardware_w_Screen/`.
+- **RECORD (GPIO3):** on Home a press starts a take, press again stops it; from
+  any other screen a press jumps back to Home. (BOOT/GPIO0 is factory-reset only.)
+- **FLAG (GPIO14):** while recording, each press marks the current moment as an
+  important event (a live `Flags: N` counter shows on the record overlay). The
+  offsets ride the upload to the web report, shown as amber ticks on the seek bar.
+
+GPIO3 is an S3 strapping pin, but `INPUT_PULLUP` idles it HIGH and a momentary
+press only pulls LOW after boot, so it doesn't affect the boot strap.
+
+⚠️ **Do NOT attach serial (`cat`/monitor) while recording** — opening the CDC
+port toggles DTR/RTS and resets the board mid-take. Watch the on-screen UI
+instead (see §3 for the same caveat on the record-and-upload path).
 
 ---
 
