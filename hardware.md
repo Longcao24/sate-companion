@@ -6,7 +6,16 @@ the part most worth reading — **how the firmware is optimized for memory, RAM,
 and the two CPU cores** so long recordings run smooth and never reboot.
 
 Firmware lives in `SATE_Touch_Patient_Record_Play_White/`. Current good version:
-**fw 0.9.4** (`main`). Rollback tag: `fw-0.9.1-working`.
+**fw 1.2.13** (`main`). Rollback tag: `fw-0.9.1-working`.
+
+> ### ⭐ Versioning rule (always)
+> **Bump `FIRMWARE_VERSION` on EVERY change you flash — including a fix to the
+> version you just shipped.** Never reuse a version number for different binaries.
+> A bug fix on top of `1.2.5` is `1.2.6`, not "still 1.2.5": the dashboard reports
+> the running version, OTA compares it, and "which build is on the board?" must
+> have one answer. Bump in `SATE_Touch_Patient_Record_Play_White.ino`
+> (`FIRMWARE_VERSION`) and update the "Current good version" line above in the
+> same change.
 
 ---
 
@@ -82,6 +91,11 @@ register interface. Begun once, before display init.
 
 GPIO3 is an S3 strapping pin, but `INPUT_PULLUP` idles it HIGH and a momentary
 press only pulls LOW after boot, so it doesn't affect the boot strap.
+
+> **Instant response (fw 1.2.5+):** both buttons are **interrupt-latched** and all
+> network work runs on a **second core**, so a press registers immediately even
+> mid-upload/poll. This replaced an old 4–5 s delay where presses landed during a
+> blocking HTTP call. See §8.15 (dual-core) and §8.16 (button ISR).
 
 **Fully hardware-driven UI (fw 1.2.4+):** recording is started/stopped by the
 physical RECORD button, so Home has **no on-screen record dial and no button
@@ -297,12 +311,114 @@ that on every ping caused periodic jank. Now it calls only `updateConnBadge()`
 (the small conn icon); the live status line + counts refresh on their own 250 ms
 cadence, and a real roster change still rebuilds Home via `connPatientsReq`.
 
-### Core model
-One Arduino **loop task** owns LVGL + connectivity (single-threaded — no locks
-needed; that's why `static` scratch buffers are safe). I2S DMA + the LCD flush
-run on hardware/DMA in the background. The discipline is: never block the loop
-task long without a `delay(1)`/GUI-pump yield (§8.5), and never do
-length-proportional work on it (§8.1).
+### 8.15 ⭐ Dual-core split: network off the UI core (fw 1.2.5+)
+**The big lag fix.** Cause of the old 4–5 s button delay: `loop()` read the
+RECORD button only at the top, then called `connLoop()`, which **blocks** on
+HTTP/TLS — `pollCommands()` every 12 s (~1–2 s TLS handshake against Supabase),
+`scanPending()` every 15 s, uploads. A press landing during that blocked stretch
+wasn't seen until the socket returned. The ESP32-S3 has **two cores**, so the fix
+is a clean split:
+
+- **Core 1 (Arduino `loop`)** — GUI (LVGL) + physical buttons + record/playback.
+  Never blocks on the network anymore.
+- **Core 0 (`sateNet` task, `connStartNetTask()`)** — *all* of `connLoop()`:
+  HTTP poll, heartbeat, uploads, BLE provisioning. Pinned to core 0 where the
+  Wi-Fi/BT stacks already live. 16 KB stack (mbedTLS handshake is stack-heavy).
+
+Rules that make it safe:
+- **LVGL only on core 1.** `sateHookGuiPump()` is now a **no-op**, and the upload
+  hooks (`sateHookUploadBegin/Progress/End`) only set `volatile` flags —
+  `renderUploadOverlay()` on core 1 draws the overlay. The net task must never
+  call an `lv_*` function.
+- **SD is shared but safe:** FATFS is built with `FF_FS_REENTRANT 1`, so it
+  serializes cross-task access internally — no SD mutex needed for correctness.
+  `scanPending()` is still wrapped in `pendMux` because both cores write the
+  shared `pendTable`/`pendCount`.
+- **One HTTP client, one owner.** `s_http` belongs to the net task. `connSetLiveState()`
+  (called from core 1) no longer calls `pollCommands()` directly — it sets
+  `forcePollDue`, consumed by the net task. The manual Sync screen no longer calls
+  `connLoop()`; it just animates while the net task drives uploads.
+
+### 8.16 Interrupt-latched buttons (fw 1.2.5+)
+Polling a button only works while the loop is free — but the capture loop blocks
+on I2S/SD and (pre-split) `connLoop` blocked on HTTP, so a press was seen late or
+missed (level-edge desync). Now a **FALLING-edge ISR** (`isrRecBtn`/`isrFlagBtn`,
+`IRAM_ATTR`) latches the press the instant it happens, regardless of what either
+core is doing. The ISR does *only* `g_recHit = true;` — **no `millis()`** (its
+64-bit divide can live in flash, unsafe from an IRAM ISR if the cache is
+disabled). Debounce (40 ms) happens in `btnPressed()` in task context. Result:
+RECORD start/stop and FLAG marks register immediately, even mid-upload.
+
+### 8.17 Stop ack + no accidental re-record (fw 1.2.6+)
+Stopping a take is detected fast, but the silent ~100–300 ms of save + Home
+rebuild after it made users tap RECORD again — and that 2nd press (still latched)
+started an unwanted new recording. Three guards:
+- **Instant ack:** when stop is detected in the capture loop, the overlay shows a
+  save icon + the pill flips to **SAVE** that same frame, so the press visibly
+  took.
+- **Latch drain:** `g_recHit` is cleared at end-of-take, dropping any press queued
+  during save.
+- **Settle window:** `g_recSettleUntil = millis() + 700` — RECORD presses in the
+  first 700 ms after a take are ignored in `loop()`, so a double-tap can't restart
+  recording. A deliberate press after that starts a new take normally.
+
+### 8.18 "Saving..." spinner overlay (fw 1.2.7+)
+On stop, `showSavingOverlay()` puts a full-screen `lv_spinner` + `LV_SYMBOL_SAVE
+"Saving..."` over the screen while the metadata is written, then `hideSavingOverlay()`
++ Home. `pumpGuiMs(80)` paints it before the (fast) SD write, then it hides
+immediately - no artificial hold (the 650/300 ms cosmetic pad was dropped in 1.2.13
+for the snappiest stop). The spinner is just a brief blink during the real save;
+double-tap is blocked by the §8.17 settle window, not by holding this overlay.
+
+### 8.19 ⭐ Speed: cache f_getfree + pause net SD during a take (fw 1.2.8+)
+**The dual-core split (§8.15) made the SD bus contended**, and two slow calls sat
+on the hot path. After this, begin/stop/sync are fast again:
+- **`SD_MMC.usedBytes()` is `f_getfree`** — a full FAT free-cluster scan, many ms.
+  It ran on **every record-begin** (`sdFreeBytes`) *and* **every `showHomeScreen`**
+  (`sdUsedPercent`, runs after each stop). Now usage is **cached** (`g_sdTotal` /
+  `g_sdUsedCache`): scanned at boot, refreshed at most every 30 s on the Home idle
+  tick, and adjusted by `+pcmBytes` after a take. The hot paths read the cache with
+  **zero SD access**.
+- **`connSetUiSdBusy(true/false)`** brackets record/save and playback. While set,
+  the net task (core 0) skips *all* its SD work (uploads, `scanPending`,
+  `fetchPatients`) so it doesn't fight the capture/playback on the shared SD bus +
+  FATFS lock. HTTP polling keeps running; uploads resume the instant the take ends.
+- **`connPendingTotal()` returns the cached count** (no SD walk). It's polled every
+  ~250 ms by the GUI core; walking there fought the net task's upload reads. The
+  net task refreshes `pendCount` on its heartbeat / sweep / per synced session.
+
+Rule of thumb: **never call `SD_MMC.usedBytes()`/`totalBytes()` or walk the card on
+a path that runs per-frame or on a button press** — cache it, refresh off the hot
+path, and keep the two cores off the SD bus at the same time.
+
+### 8.20 Pending sessions always drain — re-arm the sweep (fw 1.2.9+)
+Bug: **"stuck at uploading"** — sessions sat unsynced for minutes. `uploadSweepDue`
+(the upload trigger) was only set on go-online, `sync_now`, or a new recording, and
+the sweep aborts if one `beginUpload` returns false. So once it stopped, the backlog
+waited for the next take even though the 15 s heartbeat *knew* `pending>0`. Verified
+in the device-api logs: long runs of `pending=2/1` heartbeats with **no
+`/sessions/chunk` POSTs** in between. Fix: the heartbeat now **re-arms the sweep**
+whenever online + `pendCount>0` + not currently uploading, so anything pending
+drains on its own at heartbeat cadence (and a transiently-bad session retries every
+15 s instead of stalling the queue). New recordings still upload immediately via
+`connNotifyNewSession()`.
+
+### 8.21 Buttons: no release-bounce double-count (fw 1.2.10+)
+Cheap buttons bounce on RELEASE, firing a spurious FALLING edge the ISR latched as
+a 2nd press - the FLAG counter was going +2 per tap (one on press, one on release).
+`btnPressed()` now accepts a latched press only when the pin is **held LOW right
+now** AND the button was **stably released** (HIGH >=50 ms, tracked via
+`g_*LastLow`/`g_*Armed`) since the last accept. One count per real press; release
+bounce can't re-trigger. Hardens RECORD start/stop the same way.
+
+### Core model (fw 1.2.5+)
+**Two tasks, one per core.** Core 1 = Arduino `loop` (LVGL + buttons +
+record/playback). Core 0 = `sateNet` (connectivity/HTTP/BLE). I2S DMA + LCD flush
+run on hardware/DMA. Discipline: **never touch LVGL from the net task**; keep all
+HTTP on the net task (don't reintroduce a blocking network call on core 1); SD is
+fine from either core (FATFS-reentrant), but new shared scalars/tables need a
+mutex like `pendMux`. `static` scratch buffers are still safe **only because each
+buffer has a single owning task** (e.g. `s_http`'s buffers = net task only).
 
 ---
 

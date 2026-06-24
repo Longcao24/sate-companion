@@ -24,7 +24,15 @@ enum ConnMode {
 };
 
 void        connInit(const char *fwVersion);
-void        connLoop();              // call every loop() pass; never blocks long
+void        connLoop();              // the net-task body; runs all HTTP/BLE work
+// Spawn the connectivity task pinned to the core the Arduino loop does NOT use,
+// so blocking HTTP/TLS never stalls the GUI + buttons. Call once, after connInit.
+// connLoop() then runs only from that task - do NOT also call it from loop().
+void        connStartNetTask();
+// Tell the net task the UI core is mid-recording/saving/playback so it pauses its
+// own SD work (uploads/scans) - the SD bus + FATFS lock are shared, and
+// overlapping them makes a take begin/stop/record drag. HTTP polling continues.
+void        connSetUiSdBusy(bool busy);
 ConnMode    connGetMode();
 const char *connSerial();            // "SATE-XXXXXX" (from eFuse MAC)
 const char *connMac();               // "AA:BB:CC:DD:EE:FF" Wi-Fi STA MAC

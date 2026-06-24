@@ -107,7 +107,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.2.4";
+static const char    *FIRMWARE_VERSION  = "1.2.13";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -235,6 +235,13 @@ static volatile bool connRecordReq   = false;
 // touch g_patients from the connLoop task.
 static volatile bool connActivePatientReq = false;
 static SatePatient   g_activePatientReq;
+
+// Upload-progress overlay state, set by the net task (core 0) and rendered by
+// loop() (core 1). The upload hooks must not call LVGL directly anymore - they'd
+// be touching the GUI from the wrong core. loop() shows/updates/hides the overlay
+// from these flags.
+static volatile bool connUploadUiActive = false;   // true while an upload is in flight
+static volatile int  connUploadUiPct    = 0;        // 0-100
 
 void sateHookPatientsUpdated() { connPatientsReq = true; }
 void sateHookConnChanged()     { connStateReq = true; }
@@ -377,7 +384,10 @@ static void runGui()
 }
 
 // Service the GUI for one tick from inside long connectivity work (big upload).
-void sateHookGuiPump() { screen.routine(); }
+// No-op now: GUI is driven exclusively by loop() on core 1, and connLoop() runs
+// on core 0 (the net task), which must never touch LVGL. Kept so connectivity's
+// existing pump calls compile; loop() repaints on its own, uninterrupted.
+void sateHookGuiPump() { }
 
 static void pumpGuiMs(unsigned long durationMs)
 {
@@ -480,16 +490,61 @@ static void recordStopEvent(lv_event_t *e)
 static Btn recBtn  = { REC_BTN_PIN,  false, 0 };
 static Btn flagBtn = { FLAG_BTN_PIN, false, 0 };
 
+// Interrupt-latched presses. Polling the pins only works while the loop is free;
+// it isn't - the capture loop blocks on I2S/SD, and (before the dual-core split)
+// connLoop blocked on HTTP. A press landing during a blocked stretch was seen
+// seconds late or missed entirely (level-edge desync). A FALLING-edge ISR latches
+// the press the instant it happens, regardless of what either core is doing, so
+// RECORD start/stop and FLAG marks register immediately. Debounced in the ISR.
+static volatile bool g_recHit = false, g_flagHit = false;
+// Per-button release tracking. Cheap buttons bounce on RELEASE, which can fire a
+// spurious FALLING edge that looks like a 2nd press (the flag was counting twice:
+// once on press, once on the release bounce). We only accept a press when the pin
+// is actually held LOW now AND the button was seen STABLY released (HIGH for
+// >=50 ms) since the last accept - so release-bounce can never re-trigger.
+static uint32_t g_recLastLow = 0,  g_flagLastLow = 0;   // millis the pin was last LOW
+static bool     g_recArmed   = true, g_flagArmed  = true;
+// After a take ends, ignore RECORD presses for a short settle window. The stop
+// press is followed by ~100-300 ms of save + Home rebuild with no feedback, so
+// users often tap again - without this guard that 2nd tap starts an unwanted new
+// recording. We also drain the latch at end-of-take so a queued press is dropped.
+static uint32_t      g_recSettleUntil = 0;
+
+// ISRs do the bare minimum: set the latch. No millis() (its 64-bit divide can
+// live in flash, which is unsafe from an IRAM ISR if the cache is ever disabled).
+// Debounce happens in btnPressed() below, which runs in task context.
+static void IRAM_ATTR isrRecBtn()  { g_recHit  = true; }
+static void IRAM_ATTR isrFlagBtn() { g_flagHit = true; }
+
+// Consume one latched press (true exactly once per REAL press). The ISR latches a
+// FALLING edge instantly (catches a press even mid-block); here we validate it so
+// release-bounce can't double-count: the pin must be held LOW right now, and the
+// button must have been STABLY released (HIGH >=50 ms) since the last accept.
 static bool btnPressed(Btn &b)
 {
-  bool now = (digitalRead(b.pin) == LOW);   // active LOW: pressed == LOW
-  uint32_t t = millis();
-  if (now != b.pressed && (t - b.tEdge) > 30) {  // 30 ms debounce
-    b.pressed = now;
-    b.tEdge   = t;
-    return now;                              // true only on the press edge
+  volatile bool *hit;
+  uint32_t      *lastLow;
+  bool          *armed;
+  if      (b.pin == REC_BTN_PIN)  { hit = &g_recHit;  lastLow = &g_recLastLow;  armed = &g_recArmed; }
+  else if (b.pin == FLAG_BTN_PIN) { hit = &g_flagHit; lastLow = &g_flagLastLow; armed = &g_flagArmed; }
+  else {
+    // Fallback polled debounce for any other pin (BOOT etc.).
+    bool now = (digitalRead(b.pin) == LOW);
+    uint32_t t = millis();
+    if (now != b.pressed && (t - b.tEdge) > 30) { b.pressed = now; b.tEdge = t; return now; }
+    return false;
   }
-  return false;
+  uint32_t t = millis();
+  bool low = (digitalRead(b.pin) == LOW);   // active LOW: LOW == pressed
+  if (low) *lastLow = t;                     // remember when it was last held
+  if ((t - *lastLow) > 50) *armed = true;    // settled release -> ready for next press
+
+  if (!*hit) return false;
+  *hit = false;                              // consume the latch regardless
+  if (!low) return false;                    // not actually held now -> release-bounce echo
+  if (!*armed) return false;                 // no clean release since last accept -> echo
+  *armed = false;                            // require a fresh release before the next
+  return true;
 }
 
 // Flags captured DURING a recording: each is the elapsed offset (ms) from the
@@ -677,6 +732,49 @@ static void hideProgressOverlay()
   progressFlag = nullptr;
 }
 
+// Brief "Saving..." overlay with a spinner, shown after a take stops while the
+// WAV metadata is written. Gives the stop press immediate, unmistakable feedback
+// (vs. a blank pause) so nobody taps RECORD again. Full-screen so it covers the
+// recording overlay cleanly.
+static lv_obj_t *savingOverlay = nullptr;
+
+static void showSavingOverlay()
+{
+  if (savingOverlay) return;
+  savingOverlay = lv_obj_create(lv_scr_act());
+  lv_obj_set_size(savingOverlay, 240, 320);
+  lv_obj_align(savingOverlay, LV_ALIGN_TOP_LEFT, 0, 0);
+  lv_obj_set_style_bg_color(savingOverlay, lv_color_hex(COL_BG), 0);
+  lv_obj_set_style_bg_opa(savingOverlay, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(savingOverlay, 0, 0);
+  lv_obj_set_style_radius(savingOverlay, 0, 0);
+  lv_obj_clear_flag(savingOverlay, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_t *sp = lv_spinner_create(savingOverlay, 900, 70);
+  lv_obj_set_size(sp, 64, 64);
+  lv_obj_align(sp, LV_ALIGN_CENTER, 0, -24);
+  lv_obj_set_style_arc_width(sp, 7, LV_PART_MAIN);
+  lv_obj_set_style_arc_width(sp, 7, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_color(sp, lv_color_hex(COL_TRACK), LV_PART_MAIN);
+  lv_obj_set_style_arc_color(sp, lv_color_hex(COL_WARN), LV_PART_INDICATOR);
+  lv_obj_remove_style(sp, NULL, LV_PART_KNOB);
+
+  lv_obj_t *lbl = lv_label_create(savingOverlay);
+  lv_label_set_text(lbl, LV_SYMBOL_SAVE "  Saving...");
+  setFont(lbl, &lv_font_montserrat_20);
+  lv_obj_set_style_text_color(lbl, lv_color_hex(COL_TEXT_DARK), 0);
+  lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 48);
+
+  lv_obj_move_foreground(savingOverlay);
+}
+
+static void hideSavingOverlay()
+{
+  if (!savingOverlay) return;
+  lv_obj_del(savingOverlay);
+  savingOverlay = nullptr;
+}
+
 static void updateProgress(uint16_t permille, const char *bigText)
 {
   if (!progressOverlay) return;
@@ -684,28 +782,52 @@ static void updateProgress(uint16_t permille, const char *bigText)
   if (bigText) lv_label_set_text(progressBig, bigText);
 }
 
-// Upload progress overlay (driven from connectivity per ~1 MB slice).
+// Upload progress overlay (driven from connectivity per ~1 MB slice). These run
+// on the net task (core 0), so they only flip flags; loop() (core 1) renders the
+// overlay - see renderUploadOverlay().
 void sateHookUploadBegin()
 {
-  showProgressOverlay("Uploading to SATE", COL_PRIMARY);
-  updateProgress(0, "0%");
-  screen.routine();
+  connUploadUiPct    = 0;
+  connUploadUiActive = true;
 }
 
 void sateHookUploadProgress(int pct)
 {
   if (pct < 0) pct = 0;
   if (pct > 100) pct = 100;
-  char b[8];
-  snprintf(b, sizeof(b), "%d%%", pct);
-  updateProgress((uint16_t)(pct * 10), b);
-  screen.routine(); // paint the new percentage now
+  connUploadUiPct = pct;
 }
 
 void sateHookUploadEnd()
 {
-  hideProgressOverlay();
-  screen.routine();
+  connUploadUiActive = false;
+}
+
+// Render the upload overlay from the net task's flags. Called every loop() pass
+// on core 1, where touching LVGL is safe. Cheap: only acts on a state change.
+static void renderUploadOverlay()
+{
+  static bool shown   = false;
+  static int  lastPct = -1;
+  bool active = connUploadUiActive;
+  if (active && !shown) {
+    showProgressOverlay("Uploading to SATE", COL_PRIMARY);
+    updateProgress(0, "0%");
+    shown   = true;
+    lastPct = 0;
+  }
+  if (active) {
+    int p = connUploadUiPct;
+    if (p != lastPct) {
+      lastPct = p;
+      char b[8];
+      snprintf(b, sizeof(b), "%d%%", p);
+      updateProgress((uint16_t)(p * 10), b);
+    }
+  } else if (shown) {
+    hideProgressOverlay();
+    shown = false;
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -1065,23 +1187,40 @@ static uint32_t sessionCount(const char *dir)
 
 // --- SD card capacity (auto-detected from the mounted card) ----------------
 
-// Percent of the card in use, rounded. Capacity comes from the card itself
-// (SD_MMC.totalBytes), so no size is hardcoded - swap in any card and it adapts.
-static uint8_t sdUsedPercent()
+// Card usage is CACHED. `SD_MMC.usedBytes()` runs `f_getfree`, a full FAT
+// free-cluster scan that takes many ms (worse now that the net task shares the SD
+// bus). It used to run on every record-begin AND every showHomeScreen, dragging
+// both. We scan at most every 30 s (and prime it at boot + refresh on the Home
+// idle tick), so the hot paths read a cached number with zero SD access. The
+// post-take adjustment keeps the % visibly correct without a rescan.
+static uint64_t g_sdTotal     = 0;   // constant once mounted
+static uint64_t g_sdUsedCache = 0;
+static uint32_t g_sdUsedAt    = 0;
+
+// Run the expensive scan if forced or the cache is stale. Call from non-hot paths
+// (boot, Home idle tick) - never from record-begin / showHomeScreen directly.
+static void sdRefreshUsage(bool force)
 {
-  uint64_t total = SD_MMC.totalBytes();
-  if (total == 0) return 0;
-  uint64_t used = SD_MMC.usedBytes();
-  if (used > total) used = total;
-  return (uint8_t)((used * 100ULL + total / 2) / total);
+  uint32_t now = millis();
+  if (!force && g_sdUsedAt != 0 && (now - g_sdUsedAt) < 30000) return;
+  if (g_sdTotal == 0) g_sdTotal = SD_MMC.totalBytes();
+  uint64_t used = SD_MMC.usedBytes();         // the slow f_getfree, now rate-limited
+  if (used > g_sdTotal) used = g_sdTotal;
+  g_sdUsedCache = used;
+  g_sdUsedAt    = now;
 }
 
-// Bytes still free on the card.
+// Percent of the card in use, rounded. Reads the cache (no SD access).
+static uint8_t sdUsedPercent()
+{
+  if (g_sdTotal == 0) return 0;
+  return (uint8_t)((g_sdUsedCache * 100ULL + g_sdTotal / 2) / g_sdTotal);
+}
+
+// Bytes still free on the card (cached; no SD access).
 static uint64_t sdFreeBytes()
 {
-  uint64_t total = SD_MMC.totalBytes();
-  uint64_t used  = SD_MMC.usedBytes();
-  return (total > used) ? (total - used) : 0;
+  return (g_sdTotal > g_sdUsedCache) ? (g_sdTotal - g_sdUsedCache) : 0;
 }
 
 // Refuse to start a take with less than one full segment (+ slack) free, so a
@@ -1456,7 +1595,14 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
     }
 
     // Physical buttons during capture: RECORD = stop, FLAG = mark this instant.
-    if (btnPressed(recBtn)) recordStopReq = true;
+    if (btnPressed(recBtn)) {
+      recordStopReq = true;
+      // Acknowledge the stop on-screen THIS frame so the user sees it took and
+      // doesn't tap again (which used to start a stray second recording). The
+      // overlay is hidden a few ms later in the finalize below.
+      if (progressBig) lv_label_set_text(progressBig, LV_SYMBOL_SAVE);
+      setStatePill("SAVE", COL_WARN_BG, COL_WARN);
+    }
     if (btnPressed(flagBtn) && g_flagCount < FLAG_CAP_MAX) {
       g_flagMs[g_flagCount++] =
           (uint32_t)((uint64_t)written * 1000ULL / PCM_BYTES_PER_SEC);
@@ -2283,17 +2429,19 @@ static void runSync()
   lv_obj_set_style_text_color(syncBarText, lv_color_hex(COL_TEXT_MUTED), 0);
   lv_obj_align(syncBarText, LV_ALIGN_TOP_MID, 0, 154);
 
-  // Kick the connectivity upload sweep and drive it to completion. connLoop()
-  // uploads one real session per pass (and marks it synced on the SD only
-  // after the server accepts it), so the pending count is ground truth.
+  // Kick the connectivity upload sweep; the core-0 net task drives it to
+  // completion (one session per pass, marked synced on SD only after the server
+  // accepts it), so the pending count is ground truth. We only animate progress
+  // here - we must NOT call connLoop() (it now runs on the net task; calling it
+  // here too would double-drive uploads and race the shared HTTP client).
   connNotifyNewSession();
 
   uint32_t guard = millis() + 120000;   // hard stop so the UI never wedges
   uint32_t pending = startPending;
   while (pending > 0 && millis() < guard &&
          connGetMode() == CONN_WIFI_ONLINE) {
-    connLoop();
     runGui();
+    delay(5);                  // let the net task make progress
     pending = connPendingTotal();
     uint32_t done = (startPending > pending) ? (startPending - pending) : 0;
 
@@ -2413,6 +2561,10 @@ static void showResultsScreen()
 static void runRecordSavePlaySession(bool review = true,
                                      uint32_t pcmTotal = PCM_MAX_BYTES)
 {
+  // Own the SD bus for the whole take: the net task pauses its uploads/scans so
+  // they don't fight the capture writes (was a big source of begin/stop drag).
+  connSetUiSdBusy(true);
+
   char dir[96];
   patientDirPath(dir, sizeof(dir));
   if (!SD_MMC.exists(dir)) SD_MMC.mkdir(dir);
@@ -2420,6 +2572,7 @@ static void runRecordSavePlaySession(bool review = true,
   // Never silently drop a recording that might not be synced yet. If the card
   // is (nearly) full, refuse to start and tell the SLP to free space by hand.
   if (sdFreeBytes() < SD_MIN_FREE_BYTES) {
+    connSetUiSdBusy(false);
     showStatus("SD card full", "Open Sessions and delete old recordings");
     pumpGuiMs(1600);
     showHomeScreen();
@@ -2428,6 +2581,7 @@ static void runRecordSavePlaySession(bool review = true,
 
   uint32_t sessionNum = findNextSessionIndex(dir);
   if (sessionNum == 0) {
+    connSetUiSdBusy(false);
     showStatus("Folder full", "Too many sessions for patient");
     showHomeScreen();
     return;
@@ -2442,6 +2596,7 @@ static void runRecordSavePlaySession(bool review = true,
 
   if (!ok) {
     SD_MMC.remove(wavPath);
+    connSetUiSdBusy(false);
     pumpGuiMs(900);
     showHomeScreen();
     return;
@@ -2450,15 +2605,33 @@ static void runRecordSavePlaySession(bool review = true,
   currentState = SAVING_TO_SD;
   setStatePill("SAVE", COL_WARN_BG, COL_WARN);
 
+  // Spinner while the metadata is written, so the stop press has clear feedback.
+  showSavingOverlay();
+  pumpGuiMs(80);           // paint the spinner before the (fast) SD write
+
   uint32_t durationSec = pcmBytes / PCM_BYTES_PER_SEC;
   saveMetadataToSd(jsonPath, wavPath, pcmBytes, durationSec, sessionNum);
+  // Update the cached usage by what we just wrote, so the Home storage chip is
+  // right without a fresh f_getfree scan.
+  g_sdUsedCache += pcmBytes;
+  if (g_sdUsedCache > g_sdTotal) g_sdUsedCache = g_sdTotal;
   connNotifyNewSession(); // Wi-Fi mode uploads it; BLE mode updates the advert
 
   // No auto-playback after recording - it was intrusive. The SLP plays a
   // session on demand from the Sessions screen (where playback has a Stop).
   (void)review;
 
+  // Release the SD bus so uploads can resume immediately.
+  connSetUiSdBusy(false);
+  // No artificial hold: the spinner already showed during the real save (the
+  // pumpGuiMs(80) above + the write). Double-tap is blocked by the settle window
+  // below, not the spinner, so go straight to Home for a snappy stop.
+  hideSavingOverlay();
   showHomeScreen();
+  // Drop any RECORD press queued during the take/save and start a brief settle
+  // window, so a double-tap meant for "stop" doesn't immediately start a new take.
+  g_recHit = false;
+  g_recSettleUntil = millis() + 700;
   logHeap("session done");
 }
 
@@ -2474,7 +2647,9 @@ static void playSessionFromList(int sessionNum)
 
   char caption[40];
   snprintf(caption, sizeof(caption), "playing session_%04d", sessionNum);
+  connSetUiSdBusy(true);   // pause net SD work so playback reads aren't fighting it
   playSessionAudio(dir, (uint32_t)sessionNum, caption);
+  connSetUiSdBusy(false);
   showSessionsScreen();
 }
 
@@ -2543,6 +2718,10 @@ void setup()
   pinMode(BOOT_BTN_PIN, INPUT_PULLUP); // hold 5 s to factory-reset
   pinMode(REC_BTN_PIN,  INPUT_PULLUP); // external RECORD button (active LOW)
   pinMode(FLAG_BTN_PIN, INPUT_PULLUP); // external FLAG button (active LOW)
+  // FALLING edge = press (active LOW). ISR latches it instantly, so a press is
+  // never lost while a core is blocked in capture/HTTP - see btnPressed().
+  attachInterrupt(digitalPinToInterrupt(REC_BTN_PIN),  isrRecBtn,  FALLING);
+  attachInterrupt(digitalPinToInterrupt(FLAG_BTN_PIN), isrFlagBtn, FALLING);
   logHeap("boot");
 
   // One shared Wire bus for touch + ES8311. Begin once, before display init.
@@ -2564,6 +2743,8 @@ void setup()
   }
   loadPatientsFromSd();                   // server/app-pushed list, if any
   purgeSyncedAudio();                      // reclaim SD: drop audio already synced
+  sdRefreshUsage(true);                    // prime the usage cache so the first
+                                           // record-begin / Home never pays f_getfree
   // No merge to recover: segments left by a crash are just an unsynced session
   // and upload normally on the next sync.
 
@@ -2578,6 +2759,9 @@ void setup()
 
   bootStepBegin(3);                       // SATE services: Wi-Fi / BLE bring-up
   connInit(FIRMWARE_VERSION);
+  connStartNetTask();   // all HTTP/BLE work now runs on core 0; loop() (core 1)
+                        // stays free for the GUI + buttons. Do NOT call connLoop()
+                        // from loop() anymore.
   pumpGuiMs(400);
   bootStepDone(3, true);
 
@@ -2598,7 +2782,9 @@ void loop()
   // back to Home from any sub-screen. (While RECORDING, loop() is blocked inside
   // the capture, where the same button is polled to Stop - see recordWavStreamToSd.)
   if (btnPressed(recBtn)) {
-    if (currentState == HOME && deviceReady()) {
+    if (millis() < g_recSettleUntil) {
+      // Stray tap right after a take just ended - ignore (see g_recSettleUntil).
+    } else if (currentState == HOME && deviceReady()) {
       runRecordSavePlaySession();
     } else if (currentState == SESSIONS || currentState == SYNC ||
                currentState == CONNECTION || currentState == RESULTS) {
@@ -2608,7 +2794,10 @@ void loop()
   (void)btnPressed(flagBtn);    // FLAG only acts during a take; drain its edge here
 
   if (currentState != ERROR_STATE) {
-    connLoop();
+    // connLoop() runs on the core-0 net task now (started in setup) - we no longer
+    // call it here, so the GUI + buttons never wait on HTTP. We only consume the
+    // request flags it sets and render the upload overlay from its flags.
+    renderUploadOverlay();
 
     // UI is idle on these screens; safe to react to connectivity events.
     bool uiIdle = currentState == HOME || currentState == SESSIONS ||
@@ -2681,6 +2870,10 @@ void loop()
       if (currentState == HOME)          refreshHomeUpload();
       else if (currentState == SESSIONS) refreshSessionsUpload();
     }
+    // Keep the SD-usage cache fresh off the hot path: this self-limits to one
+    // f_getfree per 30 s, on Home, when idle - so record-begin / showHomeScreen
+    // never pay the scan, and the storage chip stays accurate.
+    if (currentState == HOME) sdRefreshUsage(false);
 
     // Immediate GUI tick after any network/SD work so a screen rebuilt by the
     // flag handlers above paints now instead of waiting a whole loop.

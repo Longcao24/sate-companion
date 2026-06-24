@@ -99,6 +99,16 @@ static uint32_t rebootAtMs     = 0;
 static bool     factoryResetRequested = false;  // BLE factory_reset op pending
 static uint32_t factoryResetAtMs      = 0;
 
+// ---- dual-core ---------------------------------------------------------------
+// connLoop() runs on its own task pinned to the OTHER core (see connStartNetTask)
+// so its blocking HTTP/TLS never stalls the GUI + physical buttons on the Arduino
+// loop core. The only shared state the GUI core touches is the request flags
+// (already volatile) and the pending table; scanPending() is mutex-guarded since
+// the GUI core reads the count via connPendingTotal() while the net task rewalks.
+static volatile bool forcePollDue = false;        // connSetLiveState() wants an immediate poll
+static volatile bool uiSdBusy    = false;          // UI core is recording/saving/playing -> pause net SD
+static SemaphoreHandle_t pendMux = nullptr;        // serializes scanPending() across cores
+
 // Wi-Fi scan runs async so connLoop / BLE notifications never block on the
 // radio (a synchronous scan stalls many seconds under BLE coexistence).
 static bool     scanInProgress = false;
@@ -248,8 +258,9 @@ static void sessionPartFile(char *out, size_t n, const char *pid, uint32_t num, 
 static bool pendDirty = true;
 
 // Scan all patient dirs for WAVs without a .synced marker. Cheap no-op when the
-// cached count is still valid.
-static int scanPending()
+// cached count is still valid. scanPending() wraps this in pendMux so the GUI
+// core and the net task never tear pendTable/pendCount when both walk at once.
+static int scanPendingLocked()
 {
   if (!pendDirty) return pendCount;
   pendCount = 0;
@@ -301,6 +312,15 @@ static int scanPending()
   root.close();
   pendDirty = false; // cache is now valid until the pending set changes again
   return pendCount;
+}
+
+static int scanPending()
+{
+  if (!pendMux) return scanPendingLocked();   // pre-init (boot, single-threaded)
+  xSemaphoreTake(pendMux, portMAX_DELAY);
+  int r = scanPendingLocked();
+  xSemaphoreGive(pendMux);
+  return r;
 }
 
 static void writeSyncMarker(const char *pid, uint32_t num)
@@ -550,68 +570,43 @@ static bool sendSessionChunk(const char *host, int port, const char *metaQuery,
                              size_t serverOffset, size_t fileSeek, size_t len,
                              bool isFinal, File &wf)
 {
-  // WiFiClientSecure IS-A WiFiClient, so one reference drives both: TLS to
-  // Supabase (port 443), plain HTTP to a local/self-hosted server.
-  WiFiClient plain;
-  WiFiClientSecure tls;
-  if (serverIsSupabase()) tls.setInsecure();
-  WiFiClient &client = serverIsSupabase() ? static_cast<WiFiClient &>(tls) : plain;
-  client.setTimeout(15000);
-  if (!client.connect(host, port)) return false;
+  if (WiFi.status() != WL_CONNECTED) return false;
 
-  client.printf("POST %s&offset=%u&final=%d HTTP/1.1\r\n",
-                metaQuery, (unsigned)serverOffset, isFinal ? 1 : 0);
-  client.printf("Host: %s:%d\r\n", host, port);
-  if (cfgDeviceKey[0]) client.printf("Authorization: Bearer %s\r\n", cfgDeviceKey);
-  if (serverIsSupabase()) client.printf("apikey: %s\r\n", SUPABASE_ANON_KEY);
-  client.print("Content-Type: audio/wav\r\n");
-  client.printf("Content-Length: %u\r\n", (unsigned)len);
-  client.print("Connection: close\r\n\r\n");
+  // Reuse the SAME warm HTTPS client the command poll uses (keep-alive), instead
+  // of opening a fresh TLS connection per chunk. A fresh handshake under WiFi+BLE
+  // coexistence intermittently stalls for SECONDS even on fast Wi-Fi - that was the
+  // "uploading takes minutes". The pooled socket skips the handshake, so a chunk
+  // POST is as quick as a poll. The GUI runs on core 1, so no pumping is needed here.
+  char url[640];
+  bool tls = serverIsSupabase();
+  bool defaultPort = (tls && port == 443) || (!tls && port == 80);
+  char hostport[110];
+  if (defaultPort) snprintf(hostport, sizeof(hostport), "%s", host);
+  else             snprintf(hostport, sizeof(hostport), "%s:%d", host, port);
+  // metaQuery is "<prefix>/api/sessions/chunk?...query..." (path + query, no host).
+  snprintf(url, sizeof(url), "%s://%s%s&offset=%u&final=%d",
+           tls ? "https" : "http", hostport, metaQuery,
+           (unsigned)serverOffset, isFinal ? 1 : 0);
 
-  if (!wf.seek(fileSeek)) { client.stop(); return false; }
+  if (!wf.seek(fileSeek)) return false;
 
-  static uint8_t upBuf[4096];
-  size_t   sent = 0;
-  uint32_t lastPump = millis();
-  bool     ok = true;
-  while (sent < len) {
-    size_t want = len - sent;
-    if (want > sizeof(upBuf)) want = sizeof(upBuf);
-    size_t got = wf.read(upBuf, want);
-    if (got == 0) { ok = false; break; }
-    size_t w = 0;
-    uint32_t t0 = millis();
-    while (w < got) {
-      int n = client.write(upBuf + w, got - w);
-      if (n > 0) { w += n; t0 = millis(); }
-      else if (!client.connected() || millis() - t0 > 8000) { ok = false; break; }
-      else { sateHookGuiPump(); delay(1); }
-    }
-    if (!ok) break;
-    sent += got;
-    if (millis() - lastPump >= 30) { lastPump = millis(); sateHookGuiPump(); }
+  s_http.setReuse(true);
+  s_http.setConnectTimeout(6000);   // cap a flaky connect so a bad attempt fails fast
+  s_http.setTimeout(12000);
+  bool began = tls ? s_http.begin(s_httpsClient, url) : s_http.begin(s_httpClient, url);
+  if (!began) return false;
+  s_http.addHeader("Content-Type", "audio/wav");
+  if (cfgDeviceKey[0]) {
+    char auth[80];
+    snprintf(auth, sizeof(auth), "Bearer %s", cfgDeviceKey);
+    s_http.addHeader("Authorization", auth);
   }
+  if (tls) s_http.addHeader("apikey", SUPABASE_ANON_KEY);
 
-  int code = 0;
-  if (ok) {
-    char line[80];
-    size_t li = 0;
-    uint32_t t0 = millis();
-    while (millis() - t0 < 8000) {
-      int c = client.read();
-      if (c < 0) {
-        if (!client.connected() && !client.available()) break;
-        sateHookGuiPump();
-        delay(1);
-        continue;
-      }
-      if (c == '\n') break;
-      if (c != '\r' && li < sizeof(line) - 1) line[li++] = (char)c;
-    }
-    line[li] = '\0';
-    sscanf(line, "HTTP/1.%*d %d", &code);
-  }
-  client.stop();
+  // Stream exactly `len` bytes from the seeked file as the POST body. File is a
+  // Stream, so HTTPClient reads it directly - no big RAM buffer of our own.
+  int code = s_http.sendRequest("POST", static_cast<Stream *>(&wf), len);
+  s_http.end();   // reuse(true): returns the socket to the pool, not a hard close
   return code >= 200 && code < 300;
 }
 
@@ -767,7 +762,7 @@ static void uploadStep()
 
   if (len > 0 &&
       !sendSessionChunk(upHost, upPort, upMetaQuery, upServerOffset, fileSeek, len, isFinal, upFile)) {
-    if (++upRetries >= 8) {
+    if (++upRetries >= 4) {
       if (upHasFile) { upFile.close(); upHasFile = false; }
       upActive = false; // sweep retries the whole session later (from offset 0)
       sateHookUploadEnd();
@@ -1402,6 +1397,7 @@ static void pollCommands()
 void connInit(const char *fw)
 {
   snprintf(fwVersion, sizeof(fwVersion), "%s", fw);
+  if (!pendMux) pendMux = xSemaphoreCreateMutex();
   WiFi.onEvent(onWifiStaDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   WiFi.mode(WIFI_STA); // also powers up the radio so the MAC is readable
   buildSerial();
@@ -1505,30 +1501,47 @@ void connLoop()
         enterBleMode();
         break;
       }
+      if (forcePollDue) {        // connSetLiveState() asked to push state now
+        forcePollDue = false;
+        pollCommands();
+      }
       if (now > nextCmdPoll) {
         nextCmdPoll = now + CMD_POLL_PERIOD_MS;
-        sateHookGuiPump();       // paint a fresh frame before the blocking poll
-        pollCommands();          // picks up app commands within ~12 s
-        sateHookGuiPump();       // repaint immediately so touch feels responsive
+        pollCommands();          // picks up app commands within ~12 s (runs on the
+                                 // net task now, so it no longer freezes the GUI)
       }
-      if (now > nextHeartbeat) {
-        nextHeartbeat = now + HEARTBEAT_PERIOD_MS;
-        scanPending();           // slow: refresh the cached pending count
-      }
-      if (patientsFetchDue) {
-        patientsFetchDue = false;
-        fetchPatients();
-      }
-      if (upActive) {
-        // Send ONE slice this pass, then return to loop() - GUI + command poll
-        // keep running, so a big upload doesn't make the device feel laggy.
-        uploadStep();
-      } else if (uploadSweepDue) {
-        scanPending();
-        if (pendCount > 0) {
-          if (!beginUpload(pendTable[0])) uploadSweepDue = false; // can't open; stop
-        } else {
-          uploadSweepDue = false; // nothing left to send
+      // While the UI core is doing its own SD work (recording, saving, playback),
+      // hold off ALL SD access here. The SD bus + FATFS volume lock are shared, so
+      // overlapping the net task's walks/uploads with a take made begin/stop/record
+      // drag. HTTP polling above has no SD, so it keeps running - only SD work waits
+      // (a few hundred ms, until the take ends), then uploads resume. This restores
+      // the old "record, THEN sync" timing without losing dual-core responsiveness.
+      if (!uiSdBusy) {
+        if (now > nextHeartbeat) {
+          nextHeartbeat = now + HEARTBEAT_PERIOD_MS;
+          scanPending();           // slow: refresh the cached pending count
+          // Never sit idle with work pending. The sweep is otherwise only armed by
+          // go-online / sync_now / a new recording, so if it ever stopped early
+          // (e.g. one beginUpload failed) the backlog stalled until the next take -
+          // exactly the "stuck at uploading" we saw. Re-arm it here so anything
+          // pending drains on its own, at the heartbeat cadence.
+          if (pendCount > 0 && !upActive) uploadSweepDue = true;
+        }
+        if (patientsFetchDue) {
+          patientsFetchDue = false;
+          fetchPatients();
+        }
+        if (upActive) {
+          // Send ONE slice this pass, then return - command poll keeps running, so a
+          // big upload doesn't make the device feel laggy.
+          uploadStep();
+        } else if (uploadSweepDue) {
+          scanPending();
+          if (pendCount > 0) {
+            if (!beginUpload(pendTable[0])) uploadSweepDue = false; // can't open; stop
+          } else {
+            uploadSweepDue = false; // nothing left to send
+          }
         }
       }
       break;
@@ -1589,7 +1602,11 @@ bool connProvisioned() { return provisioned; }
 
 uint32_t connPendingTotal()
 {
-  return (uint32_t)scanPending();
+  // Return the CACHED count - no SD walk. This is polled by the GUI core every
+  // ~250 ms; walking the card here (on core 1) fought the net task's upload reads
+  // (core 0) and slowed sync. The net task refreshes pendCount on its heartbeat,
+  // each upload sweep, and after every synced session, so the cache stays current.
+  return (pendCount < 0) ? 0 : (uint32_t)pendCount;
 }
 
 // Byte-level progress of the session currently uploading. Returns true while a
@@ -1653,9 +1670,16 @@ void connFactoryReset()
 void connSetLiveState(const char *s)
 {
   snprintf(liveState, sizeof(liveState), "%s", s ? s : "idle");
-  // Push it right away when online so the app sees the change instantly.
-  // (pollCommands() no-ops if Wi-Fi is down.)
-  if (mode == CONN_WIFI_ONLINE) pollCommands();
+  // Ask the net task to push it on its next pass (immediately). We must NOT call
+  // pollCommands() here: this runs on the GUI core, and the poller (s_http) is
+  // owned by the net task - calling it here would block the GUI and race the
+  // shared HTTP client. The flag is consumed in connLoop() within a few ms.
+  if (mode == CONN_WIFI_ONLINE) forcePollDue = true;
+}
+
+void connSetUiSdBusy(bool busy)
+{
+  uiSdBusy = busy;
 }
 
 void connNotifyNewSession()
@@ -1666,4 +1690,26 @@ void connNotifyNewSession()
     scanPending();
     bleUpdateAdvertising();
   }
+}
+
+// All connectivity work (HTTP/TLS poll, heartbeat, uploads, BLE provisioning)
+// runs here, pinned to the core the Arduino loop does NOT use. A blocking poll or
+// TLS handshake then stalls only this task - the GUI + physical buttons on the
+// loop core stay responsive. The ESP32-S3's two cores make this a clean split:
+// Wi-Fi/BT stacks already live on core 0, so we pin the net task there and leave
+// core 1 entirely to the UI. connInit() must have run first.
+static void netTaskFn(void *)
+{
+  for (;;) {
+    connLoop();
+    vTaskDelay(pdMS_TO_TICKS(5));   // yield so core 0's idle/Wi-Fi tasks run
+  }
+}
+
+void connStartNetTask()
+{
+  // 16 KB stack: a Supabase TLS handshake (mbedTLS) is stack-heavy; the big I/O
+  // buffers are static, so this headroom is for the handshake + JSON parse.
+  // Core 0 (PRO_CPU) alongside the Wi-Fi/BT stacks; the Arduino loop is on core 1.
+  xTaskCreatePinnedToCore(netTaskFn, "sateNet", 16384, nullptr, 1, nullptr, 0);
 }
