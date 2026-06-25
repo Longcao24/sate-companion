@@ -6,10 +6,10 @@ import { Image, View } from "react-native";
 // DeviceFrame. The bezel image sits on top; the screen content renders behind it
 // and shows through the transparent cutout.
 
-// Screen cutout as a fraction of the frame image (732×1385).
-const SCREEN = { left: 0.168, top: 0.1856, width: 0.668, height: 0.5264 };
-const FRAME_RATIO = 1385 / 732; // height / width
-const FRAME = require("../../assets/sate-device-frame.png");
+// Screen cutout as a fraction of the frame image (1024×1536).
+const SCREEN = { left: 0.2695, top: 0.2090, width: 0.4590, height: 0.4342 };
+const FRAME_RATIO = 1536 / 1024; // height / width = 1.5
+const FRAME = require("../../assets/device.png");
 
 export function DeviceFrame({
   children,
