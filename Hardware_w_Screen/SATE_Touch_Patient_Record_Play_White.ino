@@ -107,7 +107,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.2.14";
+static const char    *FIRMWARE_VERSION  = "1.2.23";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -2759,9 +2759,9 @@ void setup()
 
   bootStepBegin(3);                       // SATE services: Wi-Fi / BLE bring-up
   connInit(FIRMWARE_VERSION);
-  connStartNetTask();   // all HTTP/BLE work now runs on core 0; loop() (core 1)
-                        // stays free for the GUI + buttons. Do NOT call connLoop()
-                        // from loop() anymore.
+  // Net task is NOT started here. During provisioning connLoop() runs on the main
+  // loop (see loop()) so the register TLS handshake has heap to spare while BLE is
+  // up - matching single-core SATE_Up. loop() starts the net task once online.
   pumpGuiMs(400);
   bootStepDone(3, true);
 
@@ -2794,8 +2794,15 @@ void loop()
   (void)btnPressed(flagBtn);    // FLAG only acts during a take; drain its edge here
 
   if (currentState != ERROR_STATE) {
-    // connLoop() runs on the core-0 net task now (started in setup) - we no longer
-    // call it here, so the GUI + buttons never wait on HTTP. We only consume the
+    // Until the device is online, drive connectivity HERE on the main loop (BLE +
+    // Wi-Fi connect + register), exactly like single-core SATE_Up - this keeps the
+    // heap roomy for the register TLS handshake. Once online, connStartNetTask()
+    // hands connLoop() to core 0 and the GUI/buttons never wait on HTTP again.
+    if (!connNetTaskStarted()) {
+      connLoop();
+      if (connNetTaskWanted()) connStartNetTask();
+    }
+    // connLoop() runs on the core-0 net task once online - then we only consume the
     // request flags it sets and render the upload overlay from its flags.
     renderUploadOverlay();
 

@@ -248,12 +248,24 @@ export function WifiSteps({
   }
 
   // ----- failed -----
+  // Headline is the recorder's own reason (firmware sends "Network not found",
+  // "Wrong Wi-Fi password", "no response from router - is it 2.4 GHz?", or
+  // "weak signal or out of range"). The recorder already retried the join a few
+  // times before reporting, so the tips below match the real causes - a "weak
+  // signal / out of range" message is usually 5 GHz or distance, not true range.
   return (
     <Card>
       <Pill text="FAILED" tone="err" />
       <Muted style={{ marginTop: 10 }}>
         {error ?? "Something went wrong. Try again."}
       </Muted>
+      <View style={{ marginTop: 12, gap: 4 }}>
+        <Muted>
+          • Use a <Text style={s.tipBold}>2.4 GHz</Text> network — the recorder can’t join 5 GHz.
+        </Muted>
+        <Muted>• Double-check the password (case-sensitive).</Muted>
+        <Muted>• Keep the recorder near the router during setup.</Muted>
+      </View>
       <View style={{ marginTop: 16, gap: 10 }}>
         <Button title="Try again" onPress={() => setStep("password")} />
         <Button title="Pick another network" kind="secondary" onPress={scan} />
@@ -300,4 +312,5 @@ const s = StyleSheet.create({
   manualRow: { paddingVertical: 14, marginTop: 4 },
   manualTxt: { color: D.sky, fontSize: 15, fontWeight: "700" },
   stepLine: { flexDirection: "row", alignItems: "center", marginVertical: 6 },
+  tipBold: { fontWeight: "800", color: D.ink },
 });

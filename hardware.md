@@ -6,7 +6,7 @@ the part most worth reading — **how the firmware is optimized for memory, RAM,
 and the two CPU cores** so long recordings run smooth and never reboot.
 
 Firmware lives in `SATE_Touch_Patient_Record_Play_White/`. Current good version:
-**fw 1.2.14** (`main`). Rollback tag: `fw-0.9.1-working`.
+**fw 1.2.23** (`main`). Rollback tag: `fw-0.9.1-working`.
 
 > ### ⭐ Versioning rule (always)
 > **Bump `FIRMWARE_VERSION` on EVERY change you flash — including a fix to the
@@ -459,3 +459,49 @@ Healthy: `min` stays well above ~40 KB and is **flat** across a long record
 Battery (1S LiPo + PMU/fuel-gauge, USB-C charge); dedicated MEMS/electret mic
 near a front grille for better clinical SNR; TLS uploads; device ID + clinician
 PIN; handheld wipeable enclosure.
+
+### 8.22 Wi-Fi join reliability under BLE coexistence (fw 1.2.15+)
+Symptom: a **correct** SSID/password sometimes fails to connect and the app shows
+**"weak signal / out of range"**. Cause: provisioning joins Wi-Fi while the **BLE
+link stays open** (app watching progress), so both share the one 2.4 GHz radio;
+under coexistence a valid join can miss beacons / fail the 4-way handshake, time
+out at 28 s, and fall through to the generic out-of-range message (it's not really
+range). Fixes: `WiFi.setSleep(false)` during the connect (and once online) so the
+STA doesn't modem-sleep through beacons mid-handshake; and **re-issue `WiFi.begin()`
+every 8 s** across the window (~3 tries) instead of a single re-begin at 11 s.
+`esp_coex_preference_set(ESP_COEX_PREFER_WIFI)` during the connect window stays.
+If it still fails: the AP must be **2.4 GHz** (ESP32 has no 5 GHz), and a clear
+`WL_NO_SSID_AVAIL` still fast-fails as "Network not found".
+
+### 8.23 ⭐ Provisioning runs single-core — register needs the heap (fw 1.2.22+)
+**The dual-core split (§8.15) broke device registration.** Symptom: Wi-Fi joins fine,
+but "Saving to the recorder" fails with `Server registration failed`; the diagnostic
+build showed `code -1, ssl -32512, mem ~31732`. `ssl -32512` = `MBEDTLS_ERR_SSL_ALLOC_FAILED`
+— the register TLS handshake **couldn't allocate memory**. The `/api/devices/register`
+POST is a fresh Supabase HTTPS handshake done **while the app's BLE link is still
+open**; mbedTLS needs **two ~16 KB buffers**, but with NimBLE holding RAM the largest
+free block was only ~31 KB → the 2nd alloc fails and the POST never reaches the
+server (confirmed: no `/register` in the Supabase device-api logs).
+
+The old single-core **SATE_Up** never hit this: with no 16 KB net-task stack eating
+the heap, registration had room with BLE up. So the fix makes provisioning behave
+the same:
+
+- **The net task is NOT started at boot** (`connStartNetTask` deferred). During
+  provisioning `connLoop()` runs on the **main loop** (core 1), so the register
+  handshake has heap to spare while BLE stays connected. No BLE teardown, no reboot.
+- `enterWifiOnline()` sets `g_wantNetTask`; `loop()` then calls `connStartNetTask()`
+  **once** (`connNetTaskStarted()` gates it) and hands `connLoop()` to core 0 — so the
+  dual-core upload speed + instant buttons are back **after** setup.
+- Register itself reverted to the SATE_Up flow: notify `registered` over the live
+  BLE link, a few retries, 4xx fails fast as "Setup link expired".
+
+Rule: **a fresh TLS handshake needs ~32 KB of contiguous heap. Don't do one while
+NimBLE is active unless you've confirmed the largest free block is big enough** — or
+do it on the main loop before the net task exists, like provisioning does. The blocking
+register on the loop task is fine: Arduino's loopTask isn't on the task-WDT by default
+(matches SATE_Up), and TLS socket reads yield.
+
+> A dead-end worth remembering: trying to free RAM by `bleStop()` (NimBLE deinit)
+> mid-provisioning **crash-reboots** the board — deinit while a client is connected is
+> unsafe. The single-core-during-setup approach above avoids needing to free BLE at all.

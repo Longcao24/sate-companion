@@ -43,7 +43,7 @@ static const size_t BLE_CHUNK = 180;
 
 static const uint32_t WIFI_BOOT_TIMEOUT_MS  = 18000;
 static const uint32_t WIFI_PROV_TIMEOUT_MS  = 28000;
-static const uint32_t WIFI_PROV_RETRY_MS    = 11000;   // re-begin once if stalled
+static const uint32_t WIFI_PROV_RETRY_MS    = 8000;    // re-begin every 8s if stalled (~3 tries in the window)
 static const uint32_t WIFI_RETRY_PERIOD_MS  = 90000;
 // Command poll is FAST so app->device commands (record / sync) feel
 // near-instant. The heavy pending-scan (walks the SD) stays slow and reports a
@@ -108,6 +108,12 @@ static uint32_t factoryResetAtMs      = 0;
 static volatile bool forcePollDue = false;        // connSetLiveState() wants an immediate poll
 static volatile bool uiSdBusy    = false;          // UI core is recording/saving/playing -> pause net SD
 static SemaphoreHandle_t pendMux = nullptr;        // serializes scanPending() across cores
+// The net task is NOT started at boot. During provisioning connLoop() runs on the
+// main loop (core 1), exactly like the old single-core SATE_Up, so the heap has
+// room for the register TLS handshake while BLE is connected. Once the device goes
+// online we start the net task and hand connLoop() to core 0 for fast uploads.
+static volatile bool g_wantNetTask = false;        // set on first WIFI_ONLINE
+static volatile bool g_netStarted  = false;        // true once the net task exists
 
 // Wi-Fi scan runs async so connLoop / BLE notifications never block on the
 // radio (a synchronous scan stalls many seconds under BLE coexistence).
@@ -122,6 +128,12 @@ static ProvState provState = PROV_IDLE;
 static uint32_t  provDeadline = 0;
 static uint32_t  provRetryAt  = 0;     // re-issue WiFi.begin() once if stalled
 static bool      provRetried  = false;
+// Server-register retry: the register POST is a fresh TLS handshake while the BLE
+// link is still open, so under coexistence it can fail to connect (the
+// "Server registration failed" we saw - the POST never reaches the server). Retry
+// it a few times across connLoop passes; a real 4xx (claim/account) fails fast.
+static int       regAttempts = 0;
+static uint32_t  regNextTry  = 0;
 static char provSsid[33], provPass[65], provServer[96], provClaim[48];
 // Change-Wi-Fi (NOT re-registration): connect to a new network and persist the
 // creds against the SAME account/device key. Set when the app sends `change_wifi`
@@ -848,7 +860,10 @@ static void enterWifiOnline()
 {
   mode = CONN_WIFI_ONLINE;
   wifiChangeMode = false;  // back online: any pending Change-Wi-Fi window is over
+  WiFi.setSleep(false);    // keep the radio fully awake online too - steadier polls
+                           // + uploads (USB-powered, so power cost is irrelevant)
   bleStop(); // Wi-Fi mode does not advertise; frees NimBLE RAM
+  g_wantNetTask = true;    // online now -> loop() will spin up the core-0 net task
   nextHeartbeat = 0;       // scan pending immediately
   nextCmdPoll = 0;         // and poll commands immediately
   uploadSweepDue = true;   // push pending sessions right away
@@ -932,6 +947,8 @@ static void handleProvisionTick()
       }
       statusNotify("{\"ev\":\"state\",\"state\":\"registering\"}");
       setStatus("Wi-Fi connected - registering with SATE...");
+      regAttempts = 0;
+      regNextTry  = 0;
       provState = PROV_REGISTER;
       return;
     }
@@ -960,10 +977,13 @@ static void handleProvisionTick()
       provState = PROV_IDLE;
       return;
     }
-    // One re-issue of begin() in case the first was swallowed by BLE coexistence.
-    if (!provRetried && millis() > provRetryAt) {
-      provRetried = true;
+    // Re-issue begin() periodically: under BLE coexistence the first (or second)
+    // association attempt is often swallowed even with a correct password, so keep
+    // retrying across the whole window instead of giving up after one re-begin.
+    if (millis() > provRetryAt) {
+      provRetryAt = millis() + WIFI_PROV_RETRY_MS;
       Serial.println("[CONN] Wi-Fi stalled - retrying begin()");
+      WiFi.setSleep(false);          // no modem sleep: don't miss beacons mid-handshake
       WiFi.disconnect(false);
       WiFi.begin(provSsid, provPass);
     }
@@ -987,7 +1007,14 @@ static void handleProvisionTick()
   }
 
   if (provState == PROV_REGISTER) {
-    char body[256], resp[256];
+    // Provisioning runs on the MAIN loop (the net task isn't started until the device
+    // goes online - see connStartNetTask / loop()), so the heap here matches the old
+    // single-core SATE_Up: plenty of contiguous RAM for the TLS handshake while BLE
+    // stays connected. No BLE teardown needed - the app gets "registered" over its
+    // live link. A couple of retries cover a transient coexistence hiccup.
+    if (millis() < regNextTry) return;   // brief backoff between attempts
+
+    char body[256];
     snprintf(body, sizeof(body), "{\"serial\":\"%s\",\"claim_token\":\"%s\",\"fw\":\"%s\"}",
              serialStr, provClaim, fwVersion);
     // register before we have a device key; server allows this route unauthenticated
@@ -996,17 +1023,23 @@ static void handleProvisionTick()
     WiFiClient plain;
     WiFiClientSecure tls;
     bool useTls = strstr(provServer, "supabase.co") != nullptr;
-    if (useTls) tls.setInsecure();
+    if (useTls) {
+      tls.setInsecure();
+      tls.setHandshakeTimeout(5);   // fail a stalled handshake fast so we retry sooner
+    }
     WiFiClient &client = useTls ? static_cast<WiFiClient &>(tls) : plain;
     HTTPClient http;
+    http.setConnectTimeout(6000);
     http.setTimeout(8000);
+    int  code = 0;
     bool ok = false;
     if (http.begin(client, url)) {
       http.addHeader("Content-Type", "application/json");
       if (useTls) http.addHeader("apikey", SUPABASE_ANON_KEY);
-      int code = http.POST((uint8_t *)body, strlen(body));
-      Serial.printf("[CONN] register code=%d freeHeap=%u maxAlloc=%u\n",
-                    code, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+      code = http.POST((uint8_t *)body, strlen(body));
+      Serial.printf("[CONN] register attempt %d code=%d freeHeap=%u maxAlloc=%u\n",
+                    regAttempts + 1, code, (unsigned)ESP.getFreeHeap(),
+                    (unsigned)ESP.getMaxAllocHeap());
       if (code >= 200 && code < 300) {
         JsonDocument doc;
         if (deserializeJson(doc, http.getString()) == DeserializationError::Ok) {
@@ -1021,20 +1054,36 @@ static void handleProvisionTick()
       }
       http.end();
     }
+
     if (ok) {
       char j[128];
       snprintf(j, sizeof(j), "{\"ev\":\"state\",\"state\":\"registered\",\"device_id\":\"%s\"}",
                cfgDeviceId);
       statusNotify(j);
       setStatus("Setup complete! Claimed to your account");
-      // stay in BLE until the app disconnects; then Wi-Fi mode takes over
-    } else {
-      statusNotify("{\"ev\":\"state\",\"state\":\"error\",\"msg\":\"Server registration failed\"}");
-      setStatus("Server registration failed");
+      esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+      provState = PROV_IDLE;   // stay in BLE until the app disconnects, then go online
+      return;
     }
-    // Connect + register done; hand the radio back to balanced coexistence.
-    esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
-    provState = PROV_IDLE;
+
+    // 4xx = bad claim token / account: retrying won't help, fail fast.
+    if (code >= 400 && code < 500) {
+      statusNotify("{\"ev\":\"state\",\"state\":\"error\","
+                   "\"msg\":\"Setup link expired - sign out and back in, then retry\"}");
+      setStatus("Registration rejected");
+      esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+      provState = PROV_IDLE;
+      return;
+    }
+    if (++regAttempts >= 5) {
+      statusNotify("{\"ev\":\"state\",\"state\":\"error\","
+                   "\"msg\":\"Couldn't reach SATE to finish setup - check Wi-Fi and try again\"}");
+      setStatus("Server registration failed (code %d)", code);
+      esp_coex_preference_set(ESP_COEX_PREFER_BALANCE);
+      provState = PROV_IDLE;
+      return;
+    }
+    regNextTry = millis() + 600;    // back off briefly, then retry (stay in REGISTER)
   }
 }
 
@@ -1100,6 +1149,8 @@ static void handleBleOp(const char *json)
     WiFi.persistent(false);          // creds are saved by us in NVS, not the core
     WiFi.setAutoReconnect(true);
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);            // no modem sleep during the BLE-open connect:
+                                     // stops beacon misses that fail a valid join
     WiFi.disconnect(false);          // clear any half-open association
     WiFi.begin(provSsid, provPass);
     provDeadline = millis() + WIFI_PROV_TIMEOUT_MS;
@@ -1129,6 +1180,7 @@ static void handleBleOp(const char *json)
     WiFi.persistent(false);
     WiFi.setAutoReconnect(true);
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);            // no modem sleep during the BLE-open connect
     WiFi.disconnect(false);
     WiFi.begin(provSsid, provPass);
     provDeadline = millis() + WIFI_PROV_TIMEOUT_MS;
@@ -1708,8 +1760,15 @@ static void netTaskFn(void *)
 
 void connStartNetTask()
 {
+  if (g_netStarted) return;            // once only
+  g_netStarted = true;
   // 16 KB stack: a Supabase TLS handshake (mbedTLS) is stack-heavy; the big I/O
   // buffers are static, so this headroom is for the handshake + JSON parse.
   // Core 0 (PRO_CPU) alongside the Wi-Fi/BT stacks; the Arduino loop is on core 1.
   xTaskCreatePinnedToCore(netTaskFn, "sateNet", 16384, nullptr, 1, nullptr, 0);
 }
+
+// True once the net task owns connLoop(); until then the main loop drives it.
+bool connNetTaskStarted() { return g_netStarted; }
+// True when the device just went online and the net task should be started.
+bool connNetTaskWanted()  { return g_wantNetTask; }

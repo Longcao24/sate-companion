@@ -290,9 +290,9 @@ export class BleLink implements SateLink {
     onProgress: (p: ProvisionProgress) => void
   ): Promise<ProvisionProgress> {
     return new Promise(async (resolve, reject) => {
-      // Firmware worst case: ~28 s Wi-Fi connect (with one retry) + ~8 s server
-      // register. Guard a bit past that so a mid-provision BLE drop can't wedge
-      // the UI forever.
+      // Firmware worst case (fw 1.2.15): ~28 s Wi-Fi connect window (re-issues the
+      // join every ~8 s, modem-sleep off) + ~8 s server register. Guard well past
+      // that so a mid-provision BLE drop can't wedge the UI forever.
       const guard = setTimeout(() => {
         this.statusWaiters = this.statusWaiters.filter((w) => w !== waiter);
         resolve({
@@ -332,8 +332,9 @@ export class BleLink implements SateLink {
     onProgress: (p: ProvisionProgress) => void
   ): Promise<ProvisionProgress> {
     return new Promise(async (resolve, reject) => {
-      // Worst case ~28 s Wi-Fi connect (with one retry). No server register step,
-      // so a tighter guard than provision() is fine.
+      // Worst case ~28 s Wi-Fi connect window (fw 1.2.15 re-issues the join every
+      // ~8 s, modem-sleep off). No server register step, so a tighter guard than
+      // provision() is fine.
       const guard = setTimeout(() => {
         this.statusWaiters = this.statusWaiters.filter((w) => w !== waiter);
         resolve({

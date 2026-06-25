@@ -28,7 +28,12 @@ void        connLoop();              // the net-task body; runs all HTTP/BLE wor
 // Spawn the connectivity task pinned to the core the Arduino loop does NOT use,
 // so blocking HTTP/TLS never stalls the GUI + buttons. Call once, after connInit.
 // connLoop() then runs only from that task - do NOT also call it from loop().
+// NOT started at boot: during provisioning connLoop() runs on the main loop so the
+// register TLS handshake has heap to spare (like single-core SATE_Up). loop() calls
+// this once the device goes online (connNetTaskWanted()), then hands off connLoop().
 void        connStartNetTask();
+bool        connNetTaskStarted();    // true once the net task owns connLoop()
+bool        connNetTaskWanted();     // true when going online -> loop() should start it
 // Tell the net task the UI core is mid-recording/saving/playback so it pauses its
 // own SD work (uploads/scans) - the SD bus + FATFS lock are shared, and
 // overlapping them makes a take begin/stop/record drag. HTTP polling continues.
