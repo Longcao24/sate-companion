@@ -107,7 +107,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.2.23";
+static const char    *FIRMWARE_VERSION  = "1.3.0";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -1145,6 +1145,19 @@ static void deleteSession(const char *dir, uint32_t n)
   for (uint32_t m = n + 1; m <= total; m++) renameSessionFiles(dir, m, m - 1);
 }
 
+// Keep only the newest MAX_SESSIONS_ON_DEVICE sessions, deleting older ones.
+// Called after every new recording so the SD card stays light and the Sessions
+// screen stays fast. Oldest session is always #1 (contiguous numbering).
+static const int MAX_SESSIONS_ON_DEVICE = 5;
+static void trimSessionsToMax(const char *dir)
+{
+  uint32_t total = sessionCount(dir);
+  while (total > (uint32_t)MAX_SESSIONS_ON_DEVICE) {
+    deleteSession(dir, 1);   // remove oldest; renumbers remaining
+    total--;
+  }
+}
+
 // On boot, reclaim space: any session already marked .synced has its audio on
 // the server, so drop the local copy.
 static void purgeSyncedAudio()
@@ -2025,7 +2038,7 @@ static void showHomeScreen()
   // Patient card - taller now that the record dial/legend are gone, so Home is
   // balanced: a roomy patient panel up top, live status centred below.
   patientCard = lv_obj_create(lv_scr_act());
-  lv_obj_set_size(patientCard, 220, 128);
+  lv_obj_set_size(patientCard, 220, 142);
   lv_obj_align(patientCard, LV_ALIGN_TOP_MID, 0, 48);
   stylePanel(patientCard);
   lv_obj_set_style_pad_all(patientCard, 14, 0);
@@ -2034,7 +2047,7 @@ static void showHomeScreen()
 
   patientName = lv_label_create(patientCard);
   lv_label_set_text(patientName, p.displayName);
-  setFont(patientName, &lv_font_montserrat_14);
+  setFont(patientName, &lv_font_montserrat_20);
   lv_obj_set_style_text_color(patientName, lv_color_hex(COL_TEXT_DARK), 0);
   lv_obj_align(patientName, LV_ALIGN_TOP_LEFT, 0, 0);
 
@@ -2081,11 +2094,11 @@ static void showHomeScreen()
   uint32_t pending = SD_MMC.exists(dir) ? countUnsynced(dir) : 0;
 
   patientRows = lv_label_create(patientCard);
-  lv_obj_set_width(patientRows, 196);
-  lv_label_set_long_mode(patientRows, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(patientRows, 128);
+  lv_label_set_long_mode(patientRows, LV_LABEL_LONG_DOT);
   lv_obj_set_style_text_color(patientRows, lv_color_hex(COL_TEXT_MUTED), 0);
-  lv_obj_set_style_text_line_space(patientRows, 10, 0);
-  lv_obj_align(patientRows, LV_ALIGN_TOP_LEFT, 0, 36);
+  lv_obj_set_style_text_line_space(patientRows, 8, 0);
+  lv_obj_align(patientRows, LV_ALIGN_TOP_LEFT, 0, 42);
 
   char rows[200];
   snprintf(rows, sizeof(rows),
@@ -2128,7 +2141,7 @@ static void showHomeScreen()
 
   // Two big, easy-to-hit nav buttons. Uploading is automatic now, so there is
   // no Sync button to find: Next patient + Sessions are all that's left.
-  lv_obj_t *btnNext = makeActionButton(lv_scr_act(), "Next " LV_SYMBOL_RIGHT,
+  lv_obj_t *btnNext = makeActionButton(lv_scr_act(), LV_SYMBOL_RIGHT,
                                        COL_PRIMARY_BG, COL_PRIMARY_DK, ACT_NEXT_PATIENT);
   lv_obj_set_size(btnNext, 104, 44);
   lv_obj_align(btnNext, LV_ALIGN_BOTTOM_LEFT, 10, -8);
@@ -2158,10 +2171,11 @@ static void showSessionsScreen()
 
   lv_obj_t *who = lv_label_create(lv_scr_act());
   char whoTxt[64];
-  snprintf(whoTxt, sizeof(whoTxt), "%s  (%s)", p.displayName, p.patientId);
+  snprintf(whoTxt, sizeof(whoTxt), "%s", p.displayName);
   lv_label_set_text(who, whoTxt);
-  lv_obj_set_style_text_color(who, lv_color_hex(COL_TEXT_MUTED), 0);
-  lv_obj_align(who, LV_ALIGN_TOP_MID, 0, 50);
+  setFont(who, &lv_font_montserrat_20);
+  lv_obj_set_style_text_color(who, lv_color_hex(COL_TEXT_DARK), 0);
+  lv_obj_align(who, LV_ALIGN_TOP_MID, 0, 48);
 
   char dir[96];
   patientDirPath(dir, sizeof(dir));
@@ -2182,8 +2196,8 @@ static void showSessionsScreen()
   // so refreshSessionsUpload() can drive it live: the session in flight shows a
   // percent, freshly-synced rows flip to the SATE tick.
   lv_obj_t *list = lv_obj_create(lv_scr_act());
-  lv_obj_set_size(list, 232, 222);
-  lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 70);
+  lv_obj_set_size(list, 232, 240);
+  lv_obj_align(list, LV_ALIGN_TOP_MID, 0, 74);
   lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(list, 0, 0);
   lv_obj_set_style_pad_all(list, 4, 0);
@@ -2201,15 +2215,16 @@ static void showSessionsScreen()
   for (uint32_t n = total; n >= 1; n--) {
     lv_obj_t *row = makeActionButton(list, "", COL_CARD_BG, COL_TEXT_DARK,
                                      ACT_PLAY_SESSION, (int)n);
-    lv_obj_set_size(row, 216, 34);
+    lv_obj_set_size(row, 216, 42);
     lv_obj_set_style_radius(row, 10, 0);
     lv_obj_set_style_border_color(row, lv_color_hex(COL_CARD_BORDER), 0);
     lv_obj_set_style_border_width(row, 1, 0);
 
     lv_obj_t *name = lv_label_create(row);
     char nameTxt[40];
-    snprintf(nameTxt, sizeof(nameTxt), LV_SYMBOL_PLAY "  session_%04lu", (unsigned long)n);
+    snprintf(nameTxt, sizeof(nameTxt), LV_SYMBOL_PLAY "  Session %lu", (unsigned long)n);
     lv_label_set_text(name, nameTxt);
+    setFont(name, &lv_font_montserrat_20);
     lv_obj_set_style_text_color(name, lv_color_hex(COL_TEXT_DARK), 0);
     lv_obj_align(name, LV_ALIGN_LEFT_MID, 6, 0);
 
@@ -2217,7 +2232,7 @@ static void showSessionsScreen()
     // button nested in the row button, so a tap here fires delete (not play).
     lv_obj_t *del = makeActionButton(row, LV_SYMBOL_TRASH, COL_REC, 0xFFFFFF,
                                      ACT_DELETE_SESSION, (int)n);
-    lv_obj_set_size(del, 32, 28);
+    lv_obj_set_size(del, 36, 34);
     lv_obj_align(del, LV_ALIGN_RIGHT_MID, -3, 0);
     lv_obj_set_style_radius(del, 8, 0);
 
@@ -2611,6 +2626,7 @@ static void runRecordSavePlaySession(bool review = true,
 
   uint32_t durationSec = pcmBytes / PCM_BYTES_PER_SEC;
   saveMetadataToSd(jsonPath, wavPath, pcmBytes, durationSec, sessionNum);
+  trimSessionsToMax(dir);   // keep only 5 newest; older sessions deleted here
   // Update the cached usage by what we just wrote, so the Home storage chip is
   // right without a fresh f_getfree scan.
   g_sdUsedCache += pcmBytes;
