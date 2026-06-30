@@ -45,6 +45,7 @@
 #include <FS.h>
 #include <SD_MMC.h>
 #include <Wire.h>
+#include <Preferences.h>
 #include "esp_heap_caps.h"
 #include "esp_random.h"
 
@@ -107,7 +108,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.3.0";
+static const char    *FIRMWARE_VERSION  = "1.5.0";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -397,6 +398,61 @@ static void pumpGuiMs(unsigned long durationMs)
   }
 }
 
+// -----------------------------------------------------------------------------
+// Backlight + screen auto-dim (battery saver)
+// FNK0104AB drives the LCD backlight on GPIO45 (active HIGH, see the TFT_eSPI
+// FNK0104AB setup). We take the pin over with LEDC PWM after display init so we
+// can fade it: full brightness in use, a low duty after 5 min idle. Any touch or
+// button press wakes it back to full. Dimming the backlight is the real power
+// saver on an LCD (an on-screen overlay would not cut backlight current).
+// -----------------------------------------------------------------------------
+
+#define TFT_BL_PIN        45
+static const int     BL_PWM_FREQ = 5000;
+static const int     BL_PWM_RES  = 8;     // 8-bit duty: 0-255
+static const uint8_t BL_FULL     = 255;   // in-use brightness
+static const uint8_t BL_DIM      = 10;    // idle brightness (~4%): readable, low draw
+static const uint32_t SCREEN_DIM_MS = 5UL * 60UL * 1000UL;  // 5 min idle -> dim
+
+static bool g_blPwm        = false;   // true once LEDC owns the pin
+static bool g_screenDimmed = false;
+
+static void backlightSet(uint8_t duty)
+{
+  if (g_blPwm) ledcWrite(TFT_BL_PIN, duty);
+  else { pinMode(TFT_BL_PIN, OUTPUT); digitalWrite(TFT_BL_PIN, duty ? HIGH : LOW); }
+}
+
+static void backlightInit()
+{
+  // Reconfigure GPIO45 from the plain HIGH that TFT_eSPI set in begin() to LEDC
+  // PWM so brightness is adjustable. Fall back to digital on/off if attach fails.
+  g_blPwm = ledcAttach(TFT_BL_PIN, BL_PWM_FREQ, BL_PWM_RES);
+  backlightSet(BL_FULL);
+}
+
+// Restore full brightness and reset the idle timer. Call on any user event and
+// before blocking work that should keep the screen lit (recording).
+static void wakeScreen()
+{
+  lv_disp_trig_activity(NULL);   // count this as activity for the dim timer
+  if (g_screenDimmed) { backlightSet(BL_FULL); g_screenDimmed = false; }
+}
+
+// Dim after SCREEN_DIM_MS of no touch/button activity; wake otherwise. Cheap;
+// called every loop pass. LVGL tracks touch inactivity; button presses call
+// wakeScreen()/lv_disp_trig_activity() so they reset it too.
+static void serviceScreenDim()
+{
+  uint32_t idle = lv_disp_get_inactive_time(NULL);
+  if (idle >= SCREEN_DIM_MS) {
+    if (!g_screenDimmed) { backlightSet(BL_DIM); g_screenDimmed = true; }
+  } else if (g_screenDimmed) {
+    backlightSet(BL_FULL);
+    g_screenDimmed = false;
+  }
+}
+
 static void setScreenWhite()
 {
   lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(COL_BG), 0);
@@ -554,6 +610,27 @@ static bool btnPressed(Btn &b)
 static const int FLAG_CAP_MAX = 64;
 static uint32_t  g_flagMs[FLAG_CAP_MAX];
 static int       g_flagCount = 0;
+
+// Lifetime recording counter, reported to the admin dashboard in the heartbeat.
+// Persisted in NVS so it survives reboots AND the on-device 5-session auto-trim
+// (which is why we can't just count files). Loaded at boot, bumped per take.
+static Preferences g_prefs;
+static uint32_t    g_totalRecordings = 0;
+
+static void loadTotalRecordings()
+{
+  g_prefs.begin("sate-stats", false);
+  g_totalRecordings = g_prefs.getUInt("recs", 0);
+  g_prefs.end();
+}
+
+static void bumpTotalRecordings()
+{
+  g_totalRecordings++;
+  g_prefs.begin("sate-stats", false);
+  g_prefs.putUInt("recs", g_totalRecordings);
+  g_prefs.end();
+}
 
 static lv_obj_t *makeActionButton(lv_obj_t *parent, const char *text,
                                   uint32_t bg, uint32_t fg,
@@ -2035,35 +2112,9 @@ static void showHomeScreen()
   setScreenWhite();
   createHeader("SATE Recorder");
 
-  // Patient card - taller now that the record dial/legend are gone, so Home is
-  // balanced: a roomy patient panel up top, live status centred below.
-  patientCard = lv_obj_create(lv_scr_act());
-  lv_obj_set_size(patientCard, 220, 142);
-  lv_obj_align(patientCard, LV_ALIGN_TOP_MID, 0, 48);
-  stylePanel(patientCard);
-  lv_obj_set_style_pad_all(patientCard, 14, 0);
-
-  const SatePatient &p = g_patients[currentPatientIndex];
-
-  patientName = lv_label_create(patientCard);
-  lv_label_set_text(patientName, p.displayName);
-  setFont(patientName, &lv_font_montserrat_20);
-  lv_obj_set_style_text_color(patientName, lv_color_hex(COL_TEXT_DARK), 0);
-  lv_obj_align(patientName, LV_ALIGN_TOP_LEFT, 0, 0);
-
-  patientIdChip = lv_label_create(patientCard);
-  lv_label_set_text(patientIdChip, p.patientId);
-  lv_obj_set_style_text_color(patientIdChip, lv_color_hex(COL_PRIMARY_DK), 0);
-  lv_obj_set_style_bg_color(patientIdChip, lv_color_hex(COL_PRIMARY_BG), 0);
-  lv_obj_set_style_bg_opa(patientIdChip, LV_OPA_COVER, 0);
-  lv_obj_set_style_radius(patientIdChip, 8, 0);
-  lv_obj_set_style_pad_hor(patientIdChip, 7, 0);
-  lv_obj_set_style_pad_ver(patientIdChip, 3, 0);
-  lv_obj_align(patientIdChip, LV_ALIGN_TOP_RIGHT, 0, -2);
-
-  // SD card usage, top-right under the ID chip. Auto-detected capacity; turns
-  // amber past 75% and red past 90% so the SLP sees storage filling up.
-  lv_obj_t *sdLbl = lv_label_create(patientCard);
+  // --- Top status chips (SD + battery), small, right under the header --------
+  // SD usage chip, top-left. Auto-detected capacity; amber past 75%, red past 90%.
+  lv_obj_t *sdLbl = lv_label_create(lv_scr_act());
   setFont(sdLbl, &lv_font_montserrat_14);
   uint8_t sdPct = sdUsedPercent();
   char sdTxt[24];
@@ -2071,64 +2122,75 @@ static void showHomeScreen()
   lv_label_set_text(sdLbl, sdTxt);
   uint32_t sdCol = (sdPct >= 90) ? COL_REC : (sdPct >= 75) ? COL_WARN : COL_TEXT_MUTED;
   lv_obj_set_style_text_color(sdLbl, lv_color_hex(sdCol), 0);
-  lv_obj_align(sdLbl, LV_ALIGN_TOP_RIGHT, 0, 24);
+  lv_obj_align(sdLbl, LV_ALIGN_TOP_LEFT, 14, 50);
 
-  // Battery state-of-charge, below the SD chip. Updated live by
-  // refreshHomeUpload(); red under 15%, amber under 35%. Only shown when the
-  // board can actually sense the battery (skipped otherwise, see BAT_SENSE_ENABLED).
+  // Battery chip, top-right. Live-refreshed by refreshHomeUpload(). Only shown
+  // when the board can actually sense the battery (see BAT_SENSE_ENABLED).
   uint8_t batPct = batteryPercent();
   if (batPct != 255) {
-    homeBatText = lv_label_create(patientCard);
+    homeBatText = lv_label_create(lv_scr_act());
     setFont(homeBatText, &lv_font_montserrat_14);
     char batTxt[24];
     snprintf(batTxt, sizeof(batTxt), "%s %u%%", batterySymbol(batPct), batPct);
     lv_label_set_text(homeBatText, batTxt);
     uint32_t batCol = (batPct < 15) ? COL_REC : (batPct < 35) ? COL_WARN : COL_OK;
     lv_obj_set_style_text_color(homeBatText, lv_color_hex(batCol), 0);
-    lv_obj_align(homeBatText, LV_ALIGN_TOP_RIGHT, 0, 46);
+    lv_obj_align(homeBatText, LV_ALIGN_TOP_RIGHT, -14, 50);
   }
 
-  char dir[96];
-  patientDirPath(dir, sizeof(dir));
-  uint32_t total   = SD_MMC.exists(dir) ? sessionCount(dir) : 0;
-  uint32_t pending = SD_MMC.exists(dir) ? countUnsynced(dir) : 0;
+  // On-screen RECORD button: a big red circular target. Tapping it fires
+  // ACT_RECORD (same path as the physical RECORD button on GPIO2), so the SLP
+  // can start a take either way. The pressed state darkens the ring for feedback.
+  lv_obj_t *recUi = lv_btn_create(lv_scr_act());
+  lv_obj_set_size(recUi, 88, 88);
+  lv_obj_align(recUi, LV_ALIGN_TOP_MID, 0, 72);
+  lv_obj_set_style_radius(recUi, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(recUi, lv_color_hex(COL_REC_BG), 0);
+  lv_obj_set_style_bg_opa(recUi, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(recUi, 0, 0);
+  lv_obj_set_style_shadow_width(recUi, 12, 0);
+  lv_obj_set_style_shadow_ofs_y(recUi, 3, 0);
+  lv_obj_set_style_shadow_color(recUi, lv_color_hex(COL_REC), 0);
+  lv_obj_set_style_shadow_opa(recUi, LV_OPA_30, 0);
+  lv_obj_set_style_bg_color(recUi, lv_color_hex(COL_REC), LV_STATE_PRESSED);
+  lv_obj_set_style_translate_y(recUi, 1, LV_STATE_PRESSED);
+  lv_obj_add_event_cb(recUi, actionEvent, LV_EVENT_CLICKED, (void *)(intptr_t)ACT_RECORD);
 
-  patientRows = lv_label_create(patientCard);
-  lv_obj_set_width(patientRows, 128);
-  lv_label_set_long_mode(patientRows, LV_LABEL_LONG_DOT);
-  lv_obj_set_style_text_color(patientRows, lv_color_hex(COL_TEXT_MUTED), 0);
-  lv_obj_set_style_text_line_space(patientRows, 8, 0);
-  lv_obj_align(patientRows, LV_ALIGN_TOP_LEFT, 0, 42);
+  lv_obj_t *recDot = lv_obj_create(recUi);
+  lv_obj_set_size(recDot, 42, 42);
+  lv_obj_center(recDot);
+  lv_obj_set_style_radius(recDot, LV_RADIUS_CIRCLE, 0);
+  lv_obj_set_style_bg_color(recDot, lv_color_hex(COL_REC), 0);
+  lv_obj_set_style_bg_opa(recDot, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(recDot, 0, 0);
+  lv_obj_clear_flag(recDot, LV_OBJ_FLAG_CLICKABLE);   // let the parent get the tap
+  lv_obj_clear_flag(recDot, LV_OBJ_FLAG_SCROLLABLE);
 
-  char rows[200];
-  snprintf(rows, sizeof(rows),
-           "Age:  %s\nSession:  %s\nSLP:  %s",
-           p.age, p.sessionType, p.clinician);
-  lv_label_set_text(patientRows, rows);
+  patientName = lv_label_create(lv_scr_act());
+  lv_label_set_text(patientName, "Ready to Record");
+  setFont(patientName, &lv_font_montserrat_20);
+  lv_obj_set_style_text_color(patientName, lv_color_hex(COL_TEXT_DARK), 0);
+  lv_obj_align(patientName, LV_ALIGN_TOP_MID, 0, 174);
 
-  (void)total; (void)pending;   // live footer reads counts via connectivity
-
-  // Always-visible upload status: a coloured dot + one plain-language line, with
-  // a thin byte-level bar that appears only while a session is streaming. No
-  // hidden Sync screen, no guessing - the device tells you what it's doing.
+  // --- Always-visible upload status: a coloured dot + one line + a thin bar ---
   homeUpDot = lv_obj_create(lv_scr_act());
   lv_obj_set_size(homeUpDot, 10, 10);
   lv_obj_set_style_radius(homeUpDot, LV_RADIUS_CIRCLE, 0);
   lv_obj_set_style_border_width(homeUpDot, 0, 0);
   lv_obj_set_style_bg_color(homeUpDot, lv_color_hex(COL_OK), 0);
   lv_obj_clear_flag(homeUpDot, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_align(homeUpDot, LV_ALIGN_TOP_LEFT, 14, 214);
+  lv_obj_align(homeUpDot, LV_ALIGN_TOP_LEFT, 14, 234);
 
   homeUpText = lv_label_create(lv_scr_act());
   setFont(homeUpText, &lv_font_montserrat_14);
   lv_obj_set_style_text_color(homeUpText, lv_color_hex(COL_OK), 0);
-  lv_obj_set_width(homeUpText, 194);                 // 32px left + 14px right margin
-  lv_label_set_long_mode(homeUpText, LV_LABEL_LONG_DOT); // clip, never overflow
-  lv_obj_align(homeUpText, LV_ALIGN_TOP_LEFT, 32, 210);
+  lv_obj_set_width(homeUpText, 194);
+  lv_label_set_long_mode(homeUpText, LV_LABEL_LONG_DOT);
+  lv_obj_align(homeUpText, LV_ALIGN_TOP_LEFT, 32, 230);
 
   homeUpBar = lv_bar_create(lv_scr_act());
   lv_obj_set_size(homeUpBar, 212, 6);
-  lv_obj_align(homeUpBar, LV_ALIGN_TOP_MID, 0, 234);
+  lv_obj_align(homeUpBar, LV_ALIGN_TOP_MID, 0, 254);
   lv_obj_set_style_radius(homeUpBar, 3, LV_PART_MAIN);
   lv_obj_set_style_radius(homeUpBar, 3, LV_PART_INDICATOR);
   lv_bar_set_range(homeUpBar, 0, 1000);
@@ -2136,20 +2198,13 @@ static void showHomeScreen()
   lv_obj_set_style_bg_color(homeUpBar, lv_color_hex(COL_PRIMARY), LV_PART_INDICATOR);
   lv_obj_add_flag(homeUpBar, LV_OBJ_FLAG_HIDDEN);
 
-  // No on-screen record dial and no button legend: the external RECORD/FLAG
-  // buttons drive capture, so Home stays clean (patient + live status only).
-
-  // Two big, easy-to-hit nav buttons. Uploading is automatic now, so there is
-  // no Sync button to find: Next patient + Sessions are all that's left.
-  lv_obj_t *btnNext = makeActionButton(lv_scr_act(), LV_SYMBOL_RIGHT,
-                                       COL_PRIMARY_BG, COL_PRIMARY_DK, ACT_NEXT_PATIENT);
-  lv_obj_set_size(btnNext, 104, 44);
-  lv_obj_align(btnNext, LV_ALIGN_BOTTOM_LEFT, 10, -8);
-
+  // One full-width button: Sessions. Recording is the physical RECORD button,
+  // uploading is automatic, and there is no patient to switch (standalone), so
+  // Sessions is the only on-screen control left.
   lv_obj_t *btnSessions = makeActionButton(lv_scr_act(), LV_SYMBOL_LIST "  Sessions",
                                            COL_PRIMARY_BG, COL_PRIMARY_DK, ACT_OPEN_SESSIONS);
-  lv_obj_set_size(btnSessions, 104, 44);
-  lv_obj_align(btnSessions, LV_ALIGN_BOTTOM_RIGHT, -10, -8);
+  lv_obj_set_size(btnSessions, 220, 46);
+  lv_obj_align(btnSessions, LV_ALIGN_BOTTOM_MID, 0, -8);
 
   setStatePill("READY", COL_OK_BG, COL_OK);
   refreshHomeUpload();   // paint the live status immediately
@@ -2170,9 +2225,8 @@ static void showSessionsScreen()
   const SatePatient &p = g_patients[currentPatientIndex];
 
   lv_obj_t *who = lv_label_create(lv_scr_act());
-  char whoTxt[64];
-  snprintf(whoTxt, sizeof(whoTxt), "%s", p.displayName);
-  lv_label_set_text(who, whoTxt);
+  // Standalone is the implicit default - never surface the placeholder name.
+  lv_label_set_text(who, g_standalonePatient ? "Recordings" : p.displayName);
   setFont(who, &lv_font_montserrat_20);
   lv_obj_set_style_text_color(who, lv_color_hex(COL_TEXT_DARK), 0);
   lv_obj_align(who, LV_ALIGN_TOP_MID, 0, 48);
@@ -2213,23 +2267,29 @@ static void showSessionsScreen()
   snprintf(sessRowPid, sizeof(sessRowPid), "%s", p.patientId);
 
   for (uint32_t n = total; n >= 1; n--) {
-    lv_obj_t *row = makeActionButton(list, "", COL_CARD_BG, COL_TEXT_DARK,
-                                     ACT_PLAY_SESSION, (int)n);
+    // Plain info row (NOT a button): the device has no speaker, so sessions are
+    // never played on-device - they only upload to SATE. Tapping the row does
+    // nothing; the only control is the trash chip to delete.
+    lv_obj_t *row = lv_obj_create(list);
     lv_obj_set_size(row, 216, 42);
     lv_obj_set_style_radius(row, 10, 0);
+    lv_obj_set_style_bg_color(row, lv_color_hex(COL_CARD_BG), 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
     lv_obj_set_style_border_color(row, lv_color_hex(COL_CARD_BORDER), 0);
     lv_obj_set_style_border_width(row, 1, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *name = lv_label_create(row);
     char nameTxt[40];
-    snprintf(nameTxt, sizeof(nameTxt), LV_SYMBOL_PLAY "  Session %lu", (unsigned long)n);
+    snprintf(nameTxt, sizeof(nameTxt), LV_SYMBOL_AUDIO "  Session %lu", (unsigned long)n);
     lv_label_set_text(name, nameTxt);
     setFont(name, &lv_font_montserrat_20);
     lv_obj_set_style_text_color(name, lv_color_hex(COL_TEXT_DARK), 0);
     lv_obj_align(name, LV_ALIGN_LEFT_MID, 6, 0);
 
-    // Delete control: red trash chip on the right edge of the row. It's a
-    // button nested in the row button, so a tap here fires delete (not play).
+    // Delete control: red trash chip on the right edge. A button nested in the
+    // plain row, so a tap here fires delete.
     lv_obj_t *del = makeActionButton(row, LV_SYMBOL_TRASH, COL_REC, 0xFFFFFF,
                                      ACT_DELETE_SESSION, (int)n);
     lv_obj_set_size(del, 36, 34);
@@ -2250,7 +2310,7 @@ static void showSessionsScreen()
   refreshSessionsUpload();   // paint each badge's live status now
 
   lv_obj_t *hint = lv_label_create(lv_scr_act());
-  lv_label_set_text(hint, "Tap to play  -  trash to delete");
+  lv_label_set_text(hint, "Auto-uploads to SATE  -  trash to delete");
   lv_obj_set_style_text_color(hint, lv_color_hex(COL_TEXT_MUTED), 0);
   lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -8);
 
@@ -2576,6 +2636,8 @@ static void showResultsScreen()
 static void runRecordSavePlaySession(bool review = true,
                                      uint32_t pcmTotal = PCM_MAX_BYTES)
 {
+  wakeScreen();   // keep the screen lit through the take (loop's dim-check is blocked)
+
   // Own the SD bus for the whole take: the net task pauses its uploads/scans so
   // they don't fight the capture writes (was a big source of begin/stop drag).
   connSetUiSdBusy(true);
@@ -2626,6 +2688,7 @@ static void runRecordSavePlaySession(bool review = true,
 
   uint32_t durationSec = pcmBytes / PCM_BYTES_PER_SEC;
   saveMetadataToSd(jsonPath, wavPath, pcmBytes, durationSec, sessionNum);
+  bumpTotalRecordings();    // lifetime count for the admin dashboard (survives trim)
   trimSessionsToMax(dir);   // keep only 5 newest; older sessions deleted here
   // Update the cached usage by what we just wrote, so the Home storage chip is
   // right without a fresh f_getfree scan.
@@ -2744,6 +2807,7 @@ void setup()
   Wire.begin(I2C_SDA, I2C_SCL, I2C_SPEED);
 
   screen.init();
+  backlightInit();        // take over GPIO45 with PWM so the screen can auto-dim
   bootScreenCreate();
 
   bootStepBegin(0);                       // display & touch already up
@@ -2758,6 +2822,7 @@ void setup()
     return;
   }
   loadPatientsFromSd();                   // server/app-pushed list, if any
+  loadTotalRecordings();                   // lifetime recording count (NVS) for telemetry
   purgeSyncedAudio();                      // reclaim SD: drop audio already synced
   sdRefreshUsage(true);                    // prime the usage cache so the first
                                            // record-begin / Home never pays f_getfree
@@ -2793,11 +2858,13 @@ void loop()
 {
   runGui();
   serviceFactoryResetButton(); // hold BOOT 5 s -> wipe config + reboot
+  serviceScreenDim();          // dim backlight after 5 min idle, wake on activity
 
   // Physical RECORD button when idle: start a take from Home, otherwise jump
   // back to Home from any sub-screen. (While RECORDING, loop() is blocked inside
   // the capture, where the same button is polled to Stop - see recordWavStreamToSd.)
   if (btnPressed(recBtn)) {
+    wakeScreen();              // a button press always wakes the screen
     if (millis() < g_recSettleUntil) {
       // Stray tap right after a take just ended - ignore (see g_recSettleUntil).
     } else if (currentState == HOME && deviceReady()) {
@@ -2807,7 +2874,7 @@ void loop()
       showHomeScreen();
     }
   }
-  (void)btnPressed(flagBtn);    // FLAG only acts during a take; drain its edge here
+  if (btnPressed(flagBtn)) wakeScreen();   // FLAG acts only during a take; here just wake
 
   if (currentState != ERROR_STATE) {
     // Until the device is online, drive connectivity HERE on the main loop (BLE +
@@ -2897,6 +2964,15 @@ void loop()
     // f_getfree per 30 s, on Home, when idle - so record-begin / showHomeScreen
     // never pay the scan, and the storage chip stays accurate.
     if (currentState == HOME) sdRefreshUsage(false);
+
+    // Device telemetry for the admin dashboard: refresh battery % + lifetime
+    // recording count into connectivity every ~10 s (sent on the next heartbeat).
+    // Slow cadence keeps the battery ADC sampling light.
+    static uint32_t lastTelemetry = 0;
+    if (lastTelemetry == 0 || nowMs - lastTelemetry >= 10000) {
+      lastTelemetry = nowMs;
+      connSetTelemetry((int)batteryPercent(), g_totalRecordings);
+    }
 
     // Immediate GUI tick after any network/SD work so a screen rebuilt by the
     // flag handlers above paints now instead of waiting a whole loop.

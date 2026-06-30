@@ -186,6 +186,11 @@ static char ipText[20] = "";
 // Live activity reported to the server in the heartbeat (idle/recording/uploading).
 static char liveState[16] = "idle";
 
+// Device telemetry for the admin dashboard, set by connSetTelemetry() from the
+// UI task and sent as &bat=&recs= on every heartbeat. 255 = battery unknown.
+static int      telBatteryPct = 255;
+static uint32_t telRecordings = 0;
+
 static void setStatus(const char *fmt, ...)
 {
   va_list ap;
@@ -1283,10 +1288,11 @@ static void runRemoteCommand(const char *op)
 // (own buffers, so it is safe to call mid-poll). Body ignored.
 static void pushHeartbeatState()
 {
-  char path[200];
+  char path[256];
   static char tmp[256];
-  snprintf(path, sizeof(path), "/api/devices/%s/commands?pending=%d&state=%s&fw=%s&ota=%s",
-           cfgDeviceId, pendCount, liveState, fwVersion, otaPhase);
+  snprintf(path, sizeof(path), "/api/devices/%s/commands?pending=%d&state=%s&fw=%s&ota=%s&bat=%d&recs=%lu",
+           cfgDeviceId, pendCount, liveState, fwVersion, otaPhase,
+           telBatteryPct, (unsigned long)telRecordings);
   httpJson("GET", path, nullptr, tmp, sizeof(tmp), nullptr);
 }
 
@@ -1401,12 +1407,14 @@ static void runOtaUpdate(const char *url, const char *version)
 static void pollCommands()
 {
   // static resp: keeps 1 KB off the loop-task stack (single-threaded connLoop).
-  char path[200];
+  char path[256];
   static char resp[1024];
   // Report fw + ota phase every heartbeat so the dashboard learns the running
-  // version (and shows update progress) without a separate endpoint.
-  snprintf(path, sizeof(path), "/api/devices/%s/commands?pending=%d&state=%s&fw=%s&ota=%s",
-           cfgDeviceId, pendCount, liveState, fwVersion, otaPhase);
+  // version (and shows update progress) without a separate endpoint. bat/recs
+  // are device telemetry for the admin dashboard (battery %, lifetime count).
+  snprintf(path, sizeof(path), "/api/devices/%s/commands?pending=%d&state=%s&fw=%s&ota=%s&bat=%d&recs=%lu",
+           cfgDeviceId, pendCount, liveState, fwVersion, otaPhase,
+           telBatteryPct, (unsigned long)telRecordings);
   if (!httpJson("GET", path, nullptr, resp, sizeof(resp), nullptr)) return;
   JsonDocument doc;
   if (deserializeJson(doc, resp) != DeserializationError::Ok) return;
@@ -1727,6 +1735,12 @@ void connSetLiveState(const char *s)
   // owned by the net task - calling it here would block the GUI and race the
   // shared HTTP client. The flag is consumed in connLoop() within a few ms.
   if (mode == CONN_WIFI_ONLINE) forcePollDue = true;
+}
+
+void connSetTelemetry(int batteryPct, uint32_t totalRecordings)
+{
+  telBatteryPct = batteryPct;
+  telRecordings = totalRecordings;
 }
 
 void connSetUiSdBusy(bool busy)
