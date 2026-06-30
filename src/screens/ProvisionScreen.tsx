@@ -8,7 +8,7 @@ import {
   Text,
   View,
 } from "react-native";
-import { SateApi, makeApi, refreshSession } from "../api/sateApi";
+import { SateApi } from "../api/sateApi";
 import { FoundDevice, ProvisionProgress, SateLink } from "../ble/SateBle";
 import { Card, GlassBackground, Muted, Pill, Title } from "../components/ui";
 import { WifiSteps } from "../components/WifiSteps";
@@ -28,7 +28,7 @@ export function ProvisionScreen({
   link: SateLink;
   onClose: () => void;
 }) {
-  const { settings, update } = useStore();
+  const { settings } = useStore();
   const [phase, setPhase] = useState<Phase>("find");
   const [found, setFound] = useState<FoundDevice[]>([]);
   const [connecting, setConnecting] = useState<string | null>(null);
@@ -78,33 +78,21 @@ export function ProvisionScreen({
     pass: string,
     onProgress: (p: ProvisionProgress) => void
   ): Promise<ProvisionProgress> => {
-    let activeApi: SateApi = api;
-    if (
-      settings.refreshToken &&
-      (!settings.tokenExpiresAt || Date.now() > settings.tokenExpiresAt - 60000)
-    ) {
-      try {
-        const sess = await refreshSession(settings.refreshToken);
-        update({
-          token: sess.token,
-          refreshToken: sess.refreshToken,
-          tokenExpiresAt: sess.expiresAt,
-        });
-        activeApi = makeApi(settings.serverUrl, sess.token);
-      } catch {
-        /* surfaced below if claimToken then fails */
-      }
-    }
-
+    // Just use the shared api: it self-heals on a 401 (refresh token -> retry,
+    // see App.doRefresh) and only signs the user out when the refresh token is
+    // genuinely dead. So a near-expiry access token no longer derails setup -
+    // claimToken() transparently refreshes and succeeds. We must NOT re-implement
+    // auth here (the old code built a handler-less api with no retry, then showed
+    // a dead-end "sign out" message on any hiccup - that was the recurring bug).
     const needsClaim = settings.serverUrl.includes("supabase.co");
     let claimToken = "";
     try {
-      claimToken = await activeApi.claimToken();
+      claimToken = await api.claimToken();
     } catch {
       if (needsClaim) {
         return {
           state: "error",
-          msg: "Your session expired. Sign out and sign in again, then retry.",
+          msg: "Couldn't reach your SATE account to set up the recorder. Check the phone's internet and retry. If it keeps failing, sign out and back in.",
         };
       }
     }
