@@ -6,12 +6,12 @@ the part most worth reading — **how the firmware is optimized for memory, RAM,
 and the two CPU cores** so long recordings run smooth and never reboot.
 
 Firmware lives in `SATE_Touch_Patient_Record_Play_White/`. Current good version:
-**fw 1.5.0** (`Hardware_w_Screen/`, the two-button + screen variant). Rollback
+**fw 1.5.4** (`Hardware_w_Screen/`, the two-button + screen variant). Rollback
 tag: `fw-0.9.1-working`.
 
 > **Two firmware variants in the repo — don't confuse them:**
 > - `Hardware_w_Screen/` — **the shipping build** (dual-core, two external
->   buttons, screen). This is what gets flashed + OTA'd. Currently **fw 1.5.0**.
+>   buttons, screen). This is what gets flashed + OTA'd. Currently **fw 1.5.4**.
 > - `1_core/` — a **single-core fallback** build (`FIRMWARE_VERSION` ends `-1c`)
 >   kept for debugging core-interaction bugs. Not the default.
 > Edit + bump the variant you actually flash.
@@ -561,6 +561,8 @@ Tuned for low-vision SLPs and standalone use:
   per patient (`trimSessionsToMax`, `MAX_SESSIONS_ON_DEVICE = 5`) — older files are
   deleted so the SD stays light and the Sessions list stays fast. The lifetime
   count is tracked separately (see §8.27), so trimming doesn't lose the total.
+  **⚠️ Trim only deletes `.synced` sessions and yields the GUI between deletes —
+  see §8.29; the naive 1.5.0 version could freeze the "Saving..." screen.**
 
 ### 8.25 ⭐ Screen auto-dim — battery saver (fw 1.4.0)
 The LCD **backlight is on GPIO45** (active HIGH; defined in the TFT_eSPI
@@ -587,15 +589,20 @@ UI. **If a unit does have a speaker, re-enable the row's `ACT_PLAY_SESSION`
 action.** (The §1 table still lists the codec's speaker-amp output for boards that
 populate it.)
 
-### 8.27 Device telemetry to the admin dashboard (fw 1.5.0)
-Every heartbeat now also sends **battery %** and a **lifetime recording count**:
-`...&bat=<0-100|255>&recs=<n>` (`connSetTelemetry()`, refreshed every ~10 s). The
-count is **NVS-persisted** (`Preferences "sate-stats"`, key `recs`) so it survives
-reboots **and** the §8.24 auto-trim — you can't derive it from files on the card.
-255 = battery unknown (sensing unavailable). Server side: `device-api` writes
-`sate_devices.battery_pct` / `total_recordings`; the `/admin` page shows both
-columns so a super-admin sees every recorder's charge + total without logging into
-the owner's account. **`bat=255` must map to `null`** in the edge fn, not `255`.
+### 8.27 Device telemetry to the admin dashboard (fw 1.5.0, mV added 1.5.4)
+Every heartbeat now also sends **battery %**, a **lifetime recording count**, and
+(fw 1.5.4) the **raw cell mV**: `...&bat=<0-100|255>&recs=<n>&mv=<mV|-1>`
+(`connSetTelemetry()`, refreshed every ~10 s). The count is **NVS-persisted**
+(`Preferences "sate-stats"`, key `recs`) so it survives reboots **and** the §8.24
+auto-trim — you can't derive it from files on the card. 255 = battery unknown,
+`mv=-1` = sensing unavailable. Server side: `device-api` (v18) writes
+`sate_devices.battery_pct` / `total_recordings` / `battery_mv`; the `/admin` page
+shows all three columns so a super-admin sees every recorder's charge, raw cell
+voltage, and total without logging into the owner's account. **`bat=255` must map
+to `null`** in the edge fn, not `255` (same for `mv<=0`).
+> The **Cell mV** column is what to read for **battery-% calibration** (§8.31): pair
+> the shown mV against a multimeter on the cell at a few charge levels, then adjust
+> the divider scale in `readBatteryMv()` and the `batteryPercent()` LUT.
 
 ### 8.28 OTA is live — keep the dual-slot partition (fw 1.1.6+)
 The device pulls firmware updates over the air: the heartbeat returns
@@ -619,6 +626,98 @@ OTA compares it to decide whether to flash.
 > "didn't begin — check the image is published" message, but the image is fine —
 > read `ota_state` on the device row: `err-space` = partition too small,
 > `err-get<code>`/`err-write` = download/stream problem, `updating` = in progress.
+
+### 8.29 ⭐ Fix: "stuck at Saving" — safe auto-trim + uploader SD handshake (fw 1.5.1)
+1.5.0's §8.24 auto-trim ran on the **save path** with three faults that stacked
+into a freeze on the **"Saving..."** overlay (touch + buttons dead, sometimes
+indefinitely):
+1. **No GUI yield** in the save block — the core was blocked through the metadata
+   write + NVS bump + trim, so the spinner froze for the full duration.
+2. **Trim deleted the raw oldest session** regardless of upload state, and
+   **renamed every remaining session's files** to renumber. On a device that
+   recorded offline, the oldest was often **unsynced / still uploading** → it wiped
+   an un-uploaded recording (**data loss**) and did heavy SD metadata work in the
+   hot path.
+3. **The uploader kept its source file open across passes** and `connSetUiSdBusy()`
+   only flipped a flag — it never closed that handle. Trim's delete/rename then hit
+   the open file → FATFS returned **`FR_LOCKED`**, ops failed silently, and a single
+   SD call could block for seconds while the net task held the FATFS lock during a
+   slow TLS-backed read. Net effect: **stuck at Saving**.
+
+Fixes (fw 1.5.1):
+- **`trimSessionsToMax` only deletes `.synced` sessions** (`sessionSynced()` checks
+  the sync marker) — never an unsynced/uploading recording; it stops as soon as the
+  oldest isn't synced, and trims it on a later save once it uploads. No data loss.
+- **`lv_timer_handler()` between deletes** keeps the screen alive during trim.
+- **Uploader releases the SD on the net task:** when `uiSdBusy` goes true, the
+  connectivity state machine closes `upFile` and drops `upActive` (in
+  `connectivity.cpp`, the `else` on the `if (!uiSdBusy)` branch — done on **core 0**
+  to avoid a cross-core `File` race). The sweep re-begins the session from the
+  server's known offset once the UI releases the bus, same as an upload stall.
+
+### 8.30 Charging indicator — voltage-trend, no charge-status pin (fw 1.5.2)
+The board (and the external charge module) exposes **no CHRG status line** to the
+ESP, so the firmware cannot read the charger directly. 1.5.0/1.5.1 guessed with
+`if (Serial)` — which is true whenever USB is **enumerated for power**, so the unit
+showed **"charging" even when it wasn't** — plus a fixed `>= 4250 mV` check.
+
+**Fix (1.5.2):** `isUsbCharging()` now infers charge state from the **cell-voltage
+trend**. An external charger pushes the voltage **up**; the device's own load pulls
+an unplugged cell **down**. Sampled every ~5 s with **±15 mV hysteresis** (the ADC
+is an 8-read average, so noise is small):
+- rise ≥ 15 mV per sample → charging; drop ≥ 15 mV → unplugged; flat → hold last
+  state.
+- `mv ≥ 4300` → charging regardless (a resting 1S LiPo never reaches that).
+- no sensing (`mv < 0`) → not charging (unknown).
+
+Reliable for **unplug** (load sags the voltage at once) and **bulk charge** (voltage
+climbs). Weak spot: at a **full cell on the charger** the voltage is flat and high,
+so it holds the last state — acceptable since the unit really is still plugged.
+
+> **⭐ Upgrade to true detection (one wire):** TP4056/TP4057-class charge boards
+> have a **CHRG (STAT)** pad — open-drain, pulled **LOW while charging**, floating
+> when done. Solder CHRG → a spare ESP32 GPIO, enable the internal pull-up, and read
+> it (`LOW` = charging). That replaces the heuristic with a real hardware signal.
+> IP5306/power-bank ICs instead report status over **I²C** (no simple pin).
+
+### 8.31 ⭐ Battery protection: low-voltage cutoff + charging heat (fw 1.5.3)
+Two separate problems on a 1S LiPo (tested on a **1000 mAh** cell):
+
+**A) Over-discharge (firmware — fixed in 1.5.3).** A LiPo dragged below ~3.0 V is
+permanently damaged. The board has no low-voltage cutoff wired to the ESP, so the
+firmware now guards the cell in software:
+- `serviceBatteryGuard()` (every loop) — when the cell reads **< `BAT_CRIT_MV`
+  (3350 mV)** for **~24 s sustained** (3 samples @ 8 s, so a WiFi/record sag can't
+  false-trip) **and it isn't charging**, it warns then `esp_deep_sleep_start()`.
+  Deep sleep is **~10 µA vs the ~100 mA** running floor, so the discharge
+  effectively **stops** — the cell can't sink further.
+- Wakes on a **RECORD-button press** (GPIO2, ext0, RTC pull-up held) or a **5 min
+  timer**. `batteryBootGuard()` in `setup()` re-checks on every wake and only boots
+  normally once the cell has recovered (been charged) — it even re-samples for a
+  rising trend so a unit genuinely on the charger boots instead of re-sleeping.
+- Thresholds are **at-the-cell mV under load** (deliberately low; load sags the
+  reading). `BAT_SENSE_ENABLED` must be on (GPIO9 ADC) or the guard no-ops.
+> Firmware only protects the cell while the device is **on**. For a true cutoff
+> that works even when off, use a **protected charge board** — a TP4056 **with the
+> DW01 + FS8205 protection** (the 6-pad `B+ B- OUT+ OUT-` version), which cuts the
+> cell off at ~2.4 V in hardware.
+
+**B) Charging runs very hot (hardware — firmware can't fix).** The TP4056 is a
+**linear** charger: it burns `(Vin − Vcell) × Icharge` as heat in that tiny SOP-8.
+A stock module charges at **1 A = 1C** for a 1000 mAh cell → ~1.3 W in the chip →
+**hot**, and 1C is hard on a small cell. Firmware cannot set the charge current —
+it's fixed by the **`Rprog` resistor** (the SMD marked **`122` = 1.2 kΩ**):
+
+| Rprog | Marking | Charge current | For 1000 mAh |
+|-------|---------|----------------|--------------|
+| 1.2 kΩ (stock) | `122` | ~1000 mA (1C) | too hot |
+| 2.0 kΩ | `202` | ~580 mA | good |
+| **2.4 kΩ** | `242` | **~500 mA (0.5C)** | **ideal** |
+| 4.0 kΩ | `402` | ~300 mA (0.3C) | coolest, slow |
+
+Swap `122` → **`242`** (0.5C) to roughly **halve the heat** and charge gently. Also
+don't **record while charging** (stacks load + heat), give the board some airflow,
+and rule out a tired/high-ESR cell.
 
 ---
 

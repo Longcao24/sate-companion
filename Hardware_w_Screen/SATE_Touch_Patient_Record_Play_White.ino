@@ -48,6 +48,8 @@
 #include <Preferences.h>
 #include "esp_heap_caps.h"
 #include "esp_random.h"
+#include "esp_sleep.h"        // low-battery deep-sleep guard (fw 1.5.3)
+#include "driver/rtc_io.h"    // RTC pull-up so the wake button doesn't float
 
 #include <ArduinoJson.h>
 
@@ -108,7 +110,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.0";
+static const char    *FIRMWARE_VERSION  = "1.5.4";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -1222,15 +1224,35 @@ static void deleteSession(const char *dir, uint32_t n)
   for (uint32_t m = n + 1; m <= total; m++) renameSessionFiles(dir, m, m - 1);
 }
 
+// True if session n already has its .synced marker (audio is on the server, so
+// the local copy is safe to drop).
+static bool sessionSynced(const char *dir, uint32_t n)
+{
+  char mk[160];
+  sessionSyncMarkPath(mk, sizeof(mk), dir, n);
+  return SD_MMC.exists(mk);
+}
+
 // Keep only the newest MAX_SESSIONS_ON_DEVICE sessions, deleting older ones.
 // Called after every new recording so the SD card stays light and the Sessions
 // screen stays fast. Oldest session is always #1 (contiguous numbering).
+//
+// SAFETY (1.5.1): only ever delete a session that is already .synced. Deleting
+// the raw oldest (as 1.5.0 did) could wipe a recording still queued/uploading
+// AND rename files out from under the uploader's open handle -> FATFS FR_LOCKED,
+// which froze this on-save path ("stuck at Saving"). We stop trimming as soon as
+// the oldest isn't synced yet; it gets trimmed on the next save after it uploads.
+// The net task closes its upload file when the UI takes the SD bus, so the
+// deletes/renames below never hit a locked handle. lv_timer_handler() between
+// deletes keeps the screen alive so the save never appears to hang.
 static const int MAX_SESSIONS_ON_DEVICE = 5;
 static void trimSessionsToMax(const char *dir)
 {
   uint32_t total = sessionCount(dir);
   while (total > (uint32_t)MAX_SESSIONS_ON_DEVICE) {
-    deleteSession(dir, 1);   // remove oldest; renumbers remaining
+    if (!sessionSynced(dir, 1)) break;   // oldest not on server yet -> keep it
+    deleteSession(dir, 1);               // remove oldest; renumbers remaining
+    lv_timer_handler();                  // pump GUI so "Saving..." never freezes
     total--;
   }
 }
@@ -1370,15 +1392,105 @@ static const char *batterySymbol(uint8_t pct)
   return LV_SYMBOL_BATTERY_EMPTY;
 }
 
-// USB-C power / charging detection.
-// This board exposes no dedicated charge-status GPIO, so we infer "on USB":
-//   - the native USB-CDC link reports a host (plugged into a computer), OR
-//   - the cell is being held at the charger's constant-voltage ceiling
-//     (>= 4250 mV) — a level a resting 1S LiPo never reaches on its own.
+// Charging detection WITHOUT a dedicated charge-status GPIO (fw 1.5.2).
+// The board / charge module exposes no CHRG line to the ESP, so we can't read the
+// charger directly. The old code used `if (Serial)` (any USB *power* enumerated ->
+// "charging", a false positive whenever the unit was merely plugged for power) and
+// a fixed >= 4250 mV guess. Instead, watch the cell-voltage TREND: an external
+// charger pushes the voltage UP; the device's own load pulls an unplugged cell
+// DOWN. So a sustained RISE = on charge, a drop = unplugged. A level a resting 1S
+// LiPo can never reach (>= 4300 mV) also means external power. Sampled every ~5 s
+// with hysteresis so ADC noise doesn't flicker the icon.
+// (For rock-solid detection, wire the charge board's CHRG pad to a spare GPIO and
+//  read it LOW = charging — see Hardware.md §8.30.)
 static bool isUsbCharging()
 {
-  if (Serial) return true;            // HWCDC host present (data USB)
-  return readBatteryMv() >= 4250;     // CV-phase charge from any USB source
+  static uint32_t lastMs = 0;
+  static int      lastMv = -1;
+  static bool     state  = false;
+  uint32_t now = millis();
+  if (lastMs != 0 && now - lastMs < 5000) return state;  // decision cached ~5 s
+  lastMs = now;
+
+  int mv = readBatteryMv();
+  if (mv < 0) { state = false; lastMv = -1; return false; }  // no sensing -> unknown
+
+  if (mv >= 4300) {                       // above any resting level -> external power
+    state = true;
+  } else if (lastMv >= 0) {
+    int delta = mv - lastMv;
+    if (delta >= 15)       state = true;  // voltage climbing -> charging
+    else if (delta <= -15) state = false; // voltage sagging  -> unplugged
+    // |delta| < 15: flat -> keep previous state (hysteresis, avoids noise flicker)
+  }
+  lastMv = mv;
+  return state;
+}
+
+// --- Low-battery protection (fw 1.5.3) --------------------------------------
+// A LiPo driven below ~3.0 V is permanently damaged. This board has no hardware
+// low-voltage cutoff wired to the ESP, so the firmware guards the cell: near
+// empty it warns and drops the ESP into deep sleep (~10 uA vs the ~100 mA running
+// floor), which effectively STOPS the discharge so the cell can't sink further.
+// Thresholds are in mV AT THE CELL and are deliberately low because the device's
+// own load sags the reading below the true resting voltage.
+//   *** Use a PROTECTED charge board (TP4056 + DW01/8205, the 6-pad version) for a
+//   *** true hardware cutoff too - firmware alone can't protect a bare cell if the
+//   *** device is off. See Hardware.md §8.31.
+static const int BAT_CRIT_MV = 3350;   // ~3-5% under load -> sleep to protect cell
+
+// Warn, then deep sleep. Wakes on a RECORD-button press (GPIO2, active LOW) or a
+// 5-min timer; setup()'s boot guard re-checks the cell and only boots normally
+// once it has recovered (been charged).
+static void enterBatterySleep()
+{
+  recordStopReq = true;                        // abort any capture path cleanly
+  wakeScreen();
+  backlightSet(BL_FULL);
+  showStatus("Pin yeu - hay sac", "Thiet bi tam tat de bao ve pin");
+  pumpGuiMs(2600);
+  backlightSet(0);                             // screen fully off for the sleep
+  rtc_gpio_pullup_en((gpio_num_t)REC_BTN_PIN); // hold the button HIGH while asleep
+  rtc_gpio_pulldown_dis((gpio_num_t)REC_BTN_PIN);
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)REC_BTN_PIN, 0); // wake on press (LOW)
+  esp_sleep_enable_timer_wakeup(300ULL * 1000000ULL);       // and re-check in 5 min
+  esp_deep_sleep_start();                      // never returns
+}
+
+// Called every loop: if the cell is critically low for a sustained window and not
+// on charge, protect it by sleeping. Never interrupts a recording/save in flight.
+static void serviceBatteryGuard()
+{
+  if (currentState == RECORDING || currentState == SAVING_TO_SD) return;
+  static uint32_t last = 0;
+  static int      lowStreak = 0;
+  uint32_t now = millis();
+  if (last != 0 && now - last < 8000) return;  // sample ~8 s
+  last = now;
+  if (isUsbCharging()) { lowStreak = 0; return; }   // on charge -> never sleep
+  int mv = readBatteryMv();
+  if (mv < 0) return;                                // no sensing -> can't guard
+  if (mv < BAT_CRIT_MV) {
+    if (++lowStreak >= 3) enterBatterySleep();       // ~24 s sustained -> sleep
+  } else {
+    lowStreak = 0;
+  }
+}
+
+// At boot: if the cell is critically low AND not obviously being charged, don't
+// even spin up the ~100 mA running state - warn and go back to sleep. A short
+// re-sample lets a unit that's ACTUALLY on a charger (voltage climbing) boot.
+static void batteryBootGuard()
+{
+  int mv = readBatteryMv();
+  if (mv < 0 || mv >= BAT_CRIT_MV) return;     // sensing off or enough charge -> boot
+  backlightSet(BL_FULL);
+  showStatus("Kiem tra pin...", "");
+  int mv0 = mv;
+  delay(6000);                                 // rare path - watch for a charge climb
+  int mv1 = readBatteryMv();
+  if (mv1 >= BAT_CRIT_MV || (mv1 - mv0) >= 15) return; // recovered/rising -> boot
+  enterBatterySleep();
 }
 
 static bool isSessionSynced(const char *dir, uint32_t n)
@@ -2808,6 +2920,7 @@ void setup()
 
   screen.init();
   backlightInit();        // take over GPIO45 with PWM so the screen can auto-dim
+  batteryBootGuard();     // if the cell is critically low, sleep instead of booting
   bootScreenCreate();
 
   bootStepBegin(0);                       // display & touch already up
@@ -2859,6 +2972,7 @@ void loop()
   runGui();
   serviceFactoryResetButton(); // hold BOOT 5 s -> wipe config + reboot
   serviceScreenDim();          // dim backlight after 5 min idle, wake on activity
+  serviceBatteryGuard();       // sleep near-empty to protect the LiPo (fw 1.5.3)
 
   // Physical RECORD button when idle: start a take from Home, otherwise jump
   // back to Home from any sub-screen. (While RECORDING, loop() is blocked inside
@@ -2971,7 +3085,7 @@ void loop()
     static uint32_t lastTelemetry = 0;
     if (lastTelemetry == 0 || nowMs - lastTelemetry >= 10000) {
       lastTelemetry = nowMs;
-      connSetTelemetry((int)batteryPercent(), g_totalRecordings);
+      connSetTelemetry((int)batteryPercent(), g_totalRecordings, readBatteryMv());
     }
 
     // Immediate GUI tick after any network/SD work so a screen rebuilt by the

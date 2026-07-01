@@ -63,9 +63,10 @@ bool        connSetupActive();       // app connected over BLE / provisioning
 void        connSetLiveState(const char *state);
 
 // Device telemetry for the admin dashboard: battery state-of-charge (0-100, or
-// 255 = unknown/unsupported) and the lifetime recording count. Cached and sent
-// as &bat=&recs= on every heartbeat. Cheap; call it whenever the values change.
-void        connSetTelemetry(int batteryPct, uint32_t totalRecordings);
+// 255 = unknown/unsupported), the lifetime recording count, and the raw cell mV
+// (-1 = unknown) for admin-side battery calibration. Cached and sent as
+// &bat=&recs=&mv= on every heartbeat. Cheap; call it whenever the values change.
+void        connSetTelemetry(int batteryPct, uint32_t totalRecordings, int batteryMv);
 
 // Wipe stored Wi-Fi + account config and reboot, so the recorder comes back up
 // unprovisioned (back to first-time setup). Now triggered ONLY by the server

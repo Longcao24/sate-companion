@@ -190,6 +190,7 @@ static char liveState[16] = "idle";
 // UI task and sent as &bat=&recs= on every heartbeat. 255 = battery unknown.
 static int      telBatteryPct = 255;
 static uint32_t telRecordings = 0;
+static int      telBatteryMv  = -1;   // raw cell mV for admin-side calibration (-1 = unknown)
 
 static void setStatus(const char *fmt, ...)
 {
@@ -1288,11 +1289,11 @@ static void runRemoteCommand(const char *op)
 // (own buffers, so it is safe to call mid-poll). Body ignored.
 static void pushHeartbeatState()
 {
-  char path[256];
+  char path[280];
   static char tmp[256];
-  snprintf(path, sizeof(path), "/api/devices/%s/commands?pending=%d&state=%s&fw=%s&ota=%s&bat=%d&recs=%lu",
+  snprintf(path, sizeof(path), "/api/devices/%s/commands?pending=%d&state=%s&fw=%s&ota=%s&bat=%d&recs=%lu&mv=%d",
            cfgDeviceId, pendCount, liveState, fwVersion, otaPhase,
-           telBatteryPct, (unsigned long)telRecordings);
+           telBatteryPct, (unsigned long)telRecordings, telBatteryMv);
   httpJson("GET", path, nullptr, tmp, sizeof(tmp), nullptr);
 }
 
@@ -1407,14 +1408,15 @@ static void runOtaUpdate(const char *url, const char *version)
 static void pollCommands()
 {
   // static resp: keeps 1 KB off the loop-task stack (single-threaded connLoop).
-  char path[256];
+  char path[280];
   static char resp[1024];
   // Report fw + ota phase every heartbeat so the dashboard learns the running
   // version (and shows update progress) without a separate endpoint. bat/recs
-  // are device telemetry for the admin dashboard (battery %, lifetime count).
-  snprintf(path, sizeof(path), "/api/devices/%s/commands?pending=%d&state=%s&fw=%s&ota=%s&bat=%d&recs=%lu",
+  // are device telemetry for the admin dashboard (battery %, lifetime count);
+  // mv is the raw cell mV for admin-side battery calibration.
+  snprintf(path, sizeof(path), "/api/devices/%s/commands?pending=%d&state=%s&fw=%s&ota=%s&bat=%d&recs=%lu&mv=%d",
            cfgDeviceId, pendCount, liveState, fwVersion, otaPhase,
-           telBatteryPct, (unsigned long)telRecordings);
+           telBatteryPct, (unsigned long)telRecordings, telBatteryMv);
   if (!httpJson("GET", path, nullptr, resp, sizeof(resp), nullptr)) return;
   JsonDocument doc;
   if (deserializeJson(doc, resp) != DeserializationError::Ok) return;
@@ -1604,6 +1606,17 @@ void connLoop()
           }
         }
       }
+      else if (upActive) {
+        // UI core just took the SD bus (record / save / playback). Abort any
+        // in-flight upload HERE, on the net task, so the source file handle is
+        // closed before the UI's 1.5.1 auto-trim deletes/renames sessions.
+        // Otherwise FATFS returns FR_LOCKED on the open file and the "Saving..."
+        // screen hangs. The sweep re-begins this session from the server's known
+        // offset once the UI releases the bus (same path as an upload stall).
+        if (upHasFile) { upFile.close(); upHasFile = false; }
+        upActive = false;
+        sateHookUploadEnd();
+      }
       break;
 
     case CONN_BLE_ADV:
@@ -1737,10 +1750,11 @@ void connSetLiveState(const char *s)
   if (mode == CONN_WIFI_ONLINE) forcePollDue = true;
 }
 
-void connSetTelemetry(int batteryPct, uint32_t totalRecordings)
+void connSetTelemetry(int batteryPct, uint32_t totalRecordings, int batteryMv)
 {
   telBatteryPct = batteryPct;
   telRecordings = totalRecordings;
+  telBatteryMv  = batteryMv;
 }
 
 void connSetUiSdBusy(bool busy)
