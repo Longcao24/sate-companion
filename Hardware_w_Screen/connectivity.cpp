@@ -853,10 +853,20 @@ static void enterBleMode()
                         : "Ready for setup - open the SATE app");
 }
 
+// Force the radio to full transmit power. The ESP32-S3 can come up at a reduced
+// default, which hurts association at range / under BLE coexistence ("out of
+// range" even with the right password). Safe to call on every STA bring-up.
+static void wifiMaxTxPower()
+{
+  WiFi.setTxPower(WIFI_POWER_19_5dBm);            // Arduino wrapper (max enum)
+  esp_wifi_set_max_tx_power(80);                  // 80 = 20 dBm (0.25 dBm units)
+}
+
 static void enterWifiTrying()
 {
   mode = CONN_WIFI_TRYING;
   WiFi.mode(WIFI_STA);
+  wifiMaxTxPower();
   WiFi.begin(cfgSsid, cfgPass);
   wifiDeadline = millis() + WIFI_BOOT_TIMEOUT_MS;
   setStatus("Connecting to Wi-Fi \"%s\"...", cfgSsid);
@@ -1155,6 +1165,7 @@ static void handleBleOp(const char *json)
     WiFi.persistent(false);          // creds are saved by us in NVS, not the core
     WiFi.setAutoReconnect(true);
     WiFi.mode(WIFI_STA);
+    wifiMaxTxPower();                 // full TX power - helps association under BLE coex
     WiFi.setSleep(false);            // no modem sleep during the BLE-open connect:
                                      // stops beacon misses that fail a valid join
     WiFi.disconnect(false);          // clear any half-open association
@@ -1186,6 +1197,7 @@ static void handleBleOp(const char *json)
     WiFi.persistent(false);
     WiFi.setAutoReconnect(true);
     WiFi.mode(WIFI_STA);
+    wifiMaxTxPower();                 // full TX power - helps association under BLE coex
     WiFi.setSleep(false);            // no modem sleep during the BLE-open connect
     WiFi.disconnect(false);
     WiFi.begin(provSsid, provPass);

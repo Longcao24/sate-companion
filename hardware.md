@@ -6,12 +6,12 @@ the part most worth reading — **how the firmware is optimized for memory, RAM,
 and the two CPU cores** so long recordings run smooth and never reboot.
 
 Firmware lives in `SATE_Touch_Patient_Record_Play_White/`. Current good version:
-**fw 1.5.4** (`Hardware_w_Screen/`, the two-button + screen variant). Rollback
+**fw 1.5.8** (`Hardware_w_Screen/`, the two-button + screen variant). Rollback
 tag: `fw-0.9.1-working`.
 
 > **Two firmware variants in the repo — don't confuse them:**
 > - `Hardware_w_Screen/` — **the shipping build** (dual-core, two external
->   buttons, screen). This is what gets flashed + OTA'd. Currently **fw 1.5.4**.
+>   buttons, screen). This is what gets flashed + OTA'd. Currently **fw 1.5.8**.
 > - `1_core/` — a **single-core fallback** build (`FIRMWARE_VERSION` ends `-1c`)
 >   kept for debugging core-interaction bugs. Not the default.
 > Edit + bump the variant you actually flash.
@@ -682,6 +682,12 @@ so it holds the last state — acceptable since the unit really is still plugged
 
 ### 8.31 ⭐ Battery protection: low-voltage cutoff + charging heat (fw 1.5.3)
 Two separate problems on a 1S LiPo (tested on a **1000 mAh** cell):
+
+**Battery-% calibration (fw 1.5.8).** The raw read under-reads ~1.4% (divider
+tolerance + ESP32 ADC): a full cell measured **~4142 mV raw**, so `readBatteryMv()`
+applies a 1-point **gain `4200/4142 ≈ 1.014`** to put full at 4200 mV = 100%. Refine
+with a second low-end point (multimeter vs the /admin **Cell mV** column) and adjust
+`BAT_CAL_GAIN` (or the `batteryPercent()` LUT) if the low range drifts.
 
 **A) Over-discharge (firmware — fixed in 1.5.3).** A LiPo dragged below ~3.0 V is
 permanently damaged. The board has no low-voltage cutoff wired to the ESP, so the

@@ -110,7 +110,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.4";
+static const char    *FIRMWARE_VERSION  = "1.5.8";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -1347,12 +1347,19 @@ static const uint64_t SD_MIN_FREE_BYTES = (uint64_t)PCM_SEGMENT_BYTES + 256 * 10
 // ESP32 example, which isn't an ADC pin on the S3 -> adc_oneshot spam + bootloop.)
 #define BAT_SENSE_ENABLED 1
 
+// Temporary 1-point calibration (fw 1.5.5): a FULL cell read ~4142 mV raw on this
+// unit, so scale readings up to put full at 4200 mV = 100%. This corrects the
+// ~1.4% under-read from the divider tolerance + ESP32 ADC. Refine with a second
+// low-end point (multimeter vs the /admin Cell mV column) if the low range drifts.
+static const float BAT_CAL_GAIN = 4200.0f / 4142.0f;   // ~1.014
+
 static int readBatteryMv()
 {
 #if BAT_SENSE_ENABLED
   uint32_t acc = 0;
   for (int i = 0; i < 8; i++) acc += analogReadMilliVolts(BAT_ADC_PIN);
-  return (int)((acc / 8) * 2);   // *2 undoes the hardware divider
+  int cellMv = (int)((acc / 8) * 2);          // *2 undoes the hardware divider
+  return (int)(cellMv * BAT_CAL_GAIN + 0.5f); // apply the 1-point calibration
 #else
   return -1;
 #endif
@@ -2009,7 +2016,13 @@ static void refreshHomeUpload()
     static uint8_t  chgFrame = 0;
     static int8_t   wasCharging = -1;
     uint32_t now = millis();
+    // TEMP (fw 1.5.6): the voltage-trend charge detection isn't reliable yet, so
+    // hide the animated charging chip - always show the static %. Flip to 1 to
+    // restore the effect once detection (or a CHRG pin) is trustworthy. NOTE: the
+    // low-battery guard calls isUsbCharging() separately, so it's unaffected.
+    #define SHOW_CHARGE_EFFECT 0
     bool charging = isUsbCharging();
+    if (!SHOW_CHARGE_EFFECT) charging = false;
     bool sampled  = (lastBat == 0 || now - lastBat >= 5000);
     if (sampled) { lastBat = now; batPct = batteryPercent(); }
 

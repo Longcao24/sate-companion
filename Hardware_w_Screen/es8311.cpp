@@ -173,5 +173,9 @@ esp_err_t es8311_codec_init(void)
     ESP_RETURN_ON_ERROR(es8311_init(es_handle, &es_clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16), TAG, "init");
     ESP_RETURN_ON_ERROR(es8311_voice_volume_set(es_handle, EXAMPLE_VOICE_VOLUME, NULL), TAG, "volume");
     ESP_RETURN_ON_ERROR(es8311_microphone_config(es_handle, false), TAG, "microphone");
+    // The setup previously never set the analog mic PGA, so it sat at the ~0 dB
+    // reset value -> recordings came out very quiet. Boost the PGA (fw 1.5.8).
+    // 30 dB is a strong, clean level for close speech; go to 36 dB if still low.
+    ESP_RETURN_ON_ERROR(es8311_microphone_gain_set(es_handle, ES8311_MIC_GAIN_30DB), TAG, "mic gain");
     return ESP_OK;
 }
