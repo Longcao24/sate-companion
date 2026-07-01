@@ -608,6 +608,18 @@ single-slot scheme (`huge_app`) cannot receive OTA and needs one more USB flash
 onto the dual-slot layout first. Bump `FIRMWARE_VERSION` every release (§ top) —
 OTA compares it to decide whether to flash.
 
+> ⚠️ **`ota_state: err-space` = the image is bigger than the device's spare OTA
+> slot** (`Update.begin()` failed). This bit us going to 1.5.0: units still on an
+> **older/smaller** partition (the 4 MB `default` scheme has ~1.3 MB app slots, and
+> `huge_app` has no spare slot at all) took the small 1.1.x images fine, but the
+> **1.74 MB** 1.5.0 image no longer fits. There is **no OTA fix** — the target
+> partition is decided at USB-flash time. Any device provisioned before we
+> standardized on `default_8MB` (3.3 MB slots) needs **one more USB flash with
+> `default_8MB`**; after that it OTAs every future build. The web shows a generic
+> "didn't begin — check the image is published" message, but the image is fine —
+> read `ota_state` on the device row: `err-space` = partition too small,
+> `err-get<code>`/`err-write` = download/stream problem, `updating` = in progress.
+
 ---
 
 ## ⚠️ Edge function `verify_jwt` MUST stay `false` for `device-api`
