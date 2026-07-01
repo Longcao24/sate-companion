@@ -25,3 +25,6 @@ build/
 
 # Arduino/OTA build output (binaries, elf, map)
 ota_build/
+
+# firmware publish admin creds (never commit)
+scripts/.publish.env
