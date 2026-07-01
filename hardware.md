@@ -622,6 +622,38 @@ OTA compares it to decide whether to flash.
 
 ---
 
+## 12. Shipping an update to the fleet (publish → OTA)
+
+The whole "cut a new firmware and push it to every device" flow is scripted in
+**`scripts/publish_firmware.sh`** — the CLI equivalent of the web Admin
+**"Publish firmware"** card. It:
+1. Bumps `FIRMWARE_VERSION` (auto patch-bump, or pass an explicit version),
+2. Compiles `Hardware_w_Screen/` with the **OTA partition** (`default_8MB`),
+3. Admin-logs-in to Supabase → JWT,
+4. `POST`s the `.bin` to `device-api /firmware?version=…&notes=…` → uploads to the
+   `firmware` Storage bucket + inserts a `sate_firmware` row,
+5. every **online** device on an OTA-capable partition pulls it on its next
+   heartbeat (§8.28) — no USB.
+
+```bash
+./scripts/publish_firmware.sh                 # auto-bump patch (1.5.0 -> 1.5.1)
+./scripts/publish_firmware.sh 1.6.0 "notes"   # explicit version + release notes
+```
+
+Setup once: `cp scripts/.publish.env.example scripts/.publish.env` and fill in an
+**admin** account (must be in `sate_admins`). `scripts/.publish.env` is **gitignored**
+— never commit real creds. Requires `arduino-cli`, `curl`, `jq`.
+
+Guard rails baked in: refuses to reuse a version; forces `PartitionScheme=default_8MB`
+(so a publish can never ship an OTA-broken partition); creds stay out of git.
+
+> ⚠️ **First-ever flash of a NEW device is still USB** (bootstrap — a device with no
+> OTA-capable firmware can't receive OTA). Flash it once with `default_8MB` (§3), then
+> it lives on OTA. And see §8.28: a device already on `huge_app` / a too-small slot
+> needs one USB reflash before the first OTA works.
+
+---
+
 ## ⚠️ Edge function `verify_jwt` MUST stay `false` for `device-api`
 
 **Symptom:** recorder setup fails at the very end — screen shows **"Registration
