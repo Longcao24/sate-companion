@@ -6,7 +6,15 @@ the part most worth reading — **how the firmware is optimized for memory, RAM,
 and the two CPU cores** so long recordings run smooth and never reboot.
 
 Firmware lives in `SATE_Touch_Patient_Record_Play_White/`. Current good version:
-**fw 1.2.23** (`main`). Rollback tag: `fw-0.9.1-working`.
+**fw 1.5.0** (`Hardware_w_Screen/`, the two-button + screen variant). Rollback
+tag: `fw-0.9.1-working`.
+
+> **Two firmware variants in the repo — don't confuse them:**
+> - `Hardware_w_Screen/` — **the shipping build** (dual-core, two external
+>   buttons, screen). This is what gets flashed + OTA'd. Currently **fw 1.5.0**.
+> - `1_core/` — a **single-core fallback** build (`FIRMWARE_VERSION` ends `-1c`)
+>   kept for debugging core-interaction bugs. Not the default.
+> Edit + bump the variant you actually flash.
 
 > ### ⭐ Versioning rule (always)
 > **Bump `FIRMWARE_VERSION` on EVERY change you flash — including a fix to the
@@ -81,6 +89,8 @@ register interface. Begun once, before display init.
 | BOOT button | 0 | active LOW, `INPUT_PULLUP`; hold 5 s = factory reset |
 | RECORD button | 2 | external, active LOW, `INPUT_PULLUP` to GND (GPIO2 since fw 1.2.14; was 3) |
 | FLAG button | 14 | external, active LOW, `INPUT_PULLUP` to GND (fw 1.2.0+) |
+| **LCD backlight** | **45** | active HIGH; driven by **LEDC PWM** for auto-dim (fw 1.4.0, §8.25). Defined in the TFT_eSPI `FNK0104AB` setup, not the `.ino`. |
+| **Battery sense** | **9** | ADC1, behind the board's on-board **0.5 divider** (read ×2). `batteryPercent()` → Home chip + heartbeat telemetry (§8.27). *Not* GPIO34 — that's a classic-ESP32 pin, wrong on the S3. |
 
 **Demo buttons (fw 1.2.0+):** two external push buttons in `Hardware_w_Screen/`.
 - **RECORD (GPIO2):** on Home a press starts a take, press again stops it; from
@@ -97,12 +107,16 @@ free choice for RECORD - no boot-strap concern at all.
 > mid-upload/poll. This replaced an old 4–5 s delay where presses landed during a
 > blocking HTTP call. See §8.15 (dual-core) and §8.16 (button ISR).
 
-**Fully hardware-driven UI (fw 1.2.4+):** recording is started/stopped by the
-physical RECORD button, so Home has **no on-screen record dial and no button
-legend** — just the patient panel + live status. The recording overlay has **no
-on-screen Stop** either (press RECORD to stop). Playback keeps an on-screen Stop
-(there is no physical play button); the RECORD button also stops playback. Home
-was rebalanced around the removed widgets (taller patient card, status centred).
+**UI history — read together with §8.24 (the current 1.5.0 Home).**
+- **fw 1.2.4:** fully hardware-driven — recording started/stopped by the physical
+  RECORD button; Home had **no on-screen record dial**; the record overlay had no
+  on-screen Stop (press RECORD to stop). Playback kept an on-screen Stop.
+- **fw 1.5.0 (current):** Home is standalone-focused — a **big tappable red record
+  dot** (`ACT_RECORD`, same code path as the physical RECORD button, so tap *or*
+  press works) + "Ready to Record" + one **Sessions** button. No patient rows, no
+  "Next" button, "Standalone" never shown. ⚠️ **On-device playback is REMOVED**
+  (units have no speaker): Sessions rows are **info + delete only** (§8.26). So
+  "Playback keeps an on-screen Stop" no longer applies on shipping units.
 
 ⚠️ **Do NOT attach serial (`cat`/monitor) while recording** — opening the CDC
 port toggles DTR/RTS and resets the board mid-take. Watch the on-screen UI
@@ -116,22 +130,39 @@ Toolchain: `arduino-cli` 1.5.x, ESP32 core 3.3.x.
 
 **FQBN (exact):**
 ```
-esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,FlashSize=8M,PartitionScheme=huge_app,PSRAM=opi
+esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB,PSRAM=opi
 ```
 
 Key options and why:
 - `PSRAM=opi` — the board has OPI (octal) PSRAM; QSPI setting won't init it.
-- `PartitionScheme=huge_app` — the sketch is ~1.6 MB; huge_app gives a 3 MB app
-  partition with headroom. (Arduino IDE equivalent: "Huge APP".)
-- `USBMode=hwcdc,CDCOnBoot=cdc` — native USB CDC serial; the port enumerates as
-  `/dev/cu.usbmodem101`.
+- ⚠️ `PartitionScheme=default_8MB` — **"8M with spiffs (3MB APP/1.5MB SPIFFS)",
+  which has TWO app slots (`ota_0` + `ota_1`).** OTA is a shipped feature, and OTA
+  **requires dual app slots** — do **NOT** use `huge_app` ("3MB No OTA"): it gives
+  one big slot and **silently breaks OTA** (the device can't flash a spare slot).
+  The 1.5.0 sketch is ~1.74 MB = 51% of the 3 MB slot, fits with room for the spare.
+- `PSRAM=opi`, `FlashSize=8M` are mandatory. (USBMode/CDCOnBoot left default; the
+  native USB-CDC port still enumerates as `/dev/cu.usbmodemNNNN`.)
 
-**Compile + flash:**
+**Compile + flash** (arduino-cli requires the sketch folder name to match the
+`.ino`, so build a temp copy if your dir differs):
 ```bash
-cd SATE-companion
-arduino-cli compile --fqbn "esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,FlashSize=8M,PartitionScheme=huge_app,PSRAM=opi" SATE_Touch_Patient_Record_Play_White
-arduino-cli upload  -p /dev/cu.usbmodem101 --fqbn "esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,FlashSize=8M,PartitionScheme=huge_app,PSRAM=opi" SATE_Touch_Patient_Record_Play_White
+arduino-cli compile --fqbn "esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB,PSRAM=opi" Hardware_w_Screen
+arduino-cli upload  -p /dev/cu.usbmodemNNNN --fqbn "esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB,PSRAM=opi" Hardware_w_Screen
 ```
+
+> **First USB upload after a stuck board:** if `esptool` reports *"Failed to
+> connect … No serial data received"*, the running app owns the native USB-CDC and
+> won't auto-reset. Put the board in **download mode** manually: hold **BOOT**, tap
+> **RESET/EN**, release **BOOT**, then re-run upload. Subsequent updates can go OTA.
+
+> ⚠️ **Never `--erase` a provisioned unit.** A full-chip erase wipes NVS = the stored
+> Wi-Fi creds + SATE account/device-key, dropping the device back to first-time setup.
+> A normal flash keeps NVS, so an updated build comes back already claimed. Only erase
+> on a **first-ever** flash or a deliberate factory reset.
+
+> ⚠️ **Post-flash the board may sit idle** (no serial, no heartbeat) instead of booting
+> the new app — the S3's post-esptool reset doesn't always start the app. If a
+> just-flashed build never checks in, **tap RESET / power-cycle** once.
 
 A good flash ends with `Hard resetting via RTS pin...` + `New upload port`.
 
@@ -451,12 +482,25 @@ Healthy: `min` stays well above ~40 KB and is **flat** across a long record
 | Home "all synced" but a session stuck "queued" | old `scanPending` early-break | fw 0.9.3+ — fixed |
 | Crash right after "Connecting to Wi-Fi" | loop-task stack overflow | `SET_LOOP_TASK_STACK_SIZE(16K)` (§8.3) — fixed |
 | Screen pans sideways | scrollable LVGL screen + overrun child | scroll disabled globally (fw 0.9.4) — fixed |
+| **"Registration Rejected" / "Setup link expired"** (Wi-Fi joins, register fails) | `device-api` redeployed with `verify_jwt:true` → gateway 401s the device's unauthenticated register **before** the function runs | redeploy `device-api` with **`verify_jwt:false`**; verify via `list_edge_functions` (see the ⚠️ note after §11) |
+| Setup fails but registration debug/logs are empty | request dies at the Supabase **gateway**, not in the function (same as above) | check `verify_jwt` first — empty function logs = gateway-level rejection |
+| Just-flashed build never heartbeats | S3 didn't boot the app after esptool reset | tap **RESET** / power-cycle (§3) |
+| Device dropped to first-time setup after a flash | flashed with `--erase` (wiped NVS) | don't erase a provisioned unit (§3) |
+| OTA never reaches the device | board flashed with `huge_app` (single app slot) | reflash once over USB with `default_8MB` (§3), then OTA works |
 
 ---
 
-## 11. Toward a real product (not yet built)
+## 11. Toward a real product (partially built)
 
-Battery (1S LiPo + PMU/fuel-gauge, USB-C charge); dedicated MEMS/electret mic
+**Already in fw 1.5.0:** 1S-LiPo **battery sensing** (GPIO9 ADC ÷2 divider → live
+Home %-chip + admin telemetry, §8.27), **backlight auto-dim** to save power (§8.25),
+USB-C charge-detect. Estimated runtime on a 3000 mAh cell: ~14–16 h screen-on idle,
+~26–31 h dimmed idle, ~11–13 h continuous record+upload — the ESP32 + Wi-Fi radio
+(no modem-sleep yet) is the floor once the backlight is dimmed.
+
+**Still to do:** proper PMU / fuel-gauge IC (the GPIO9 divider is coarse; GPIO34
+bootloops the S3 — see §2 note); Wi-Fi modem-sleep / light-sleep to cut idle draw;
+dedicated MEMS/electret mic
 near a front grille for better clinical SNR; TLS uploads; device ID + clinician
 PIN; handheld wipeable enclosure.
 
@@ -505,3 +549,98 @@ register on the loop task is fine: Arduino's loopTask isn't on the task-WDT by d
 > A dead-end worth remembering: trying to free RAM by `bleStop()` (NimBLE deinit)
 > mid-provisioning **crash-reboots** the board — deinit while a client is connected is
 > unsafe. The single-core-during-setup approach above avoids needing to free BLE at all.
+
+### 8.24 SLP-focused UI + auto-trim 5 sessions (fw 1.3.0–1.3.3)
+Tuned for low-vision SLPs and standalone use:
+- **Bigger fonts** (patient name + session rows `montserrat_20`); Home reduced to a
+  big **"Ready to Record"** + a **tappable red record dot** (fires the same
+  `ACT_RECORD` path as the physical RECORD button — tap OR button both record) +
+  one full-width **Sessions** button. Removed the patient Age/Session/SLP rows, the
+  "Next patient" button, and the "Standalone" placeholder name (never shown).
+- **Auto-trim:** after every save the device keeps only the **5 newest** sessions
+  per patient (`trimSessionsToMax`, `MAX_SESSIONS_ON_DEVICE = 5`) — older files are
+  deleted so the SD stays light and the Sessions list stays fast. The lifetime
+  count is tracked separately (see §8.27), so trimming doesn't lose the total.
+
+### 8.25 ⭐ Screen auto-dim — battery saver (fw 1.4.0)
+The LCD **backlight is on GPIO45** (active HIGH; defined in the TFT_eSPI
+`FNK0104AB` setup). At boot `backlightInit()` takes the pin over with **LEDC PWM**
+so brightness is adjustable. After **5 min idle** (`SCREEN_DIM_MS`, tracked via
+`lv_disp_get_inactive_time()`) the backlight drops to ~4% (`BL_DIM`); **any touch
+or button press wakes it** to full (`wakeScreen()` also called at record start so
+the screen stays lit through a take). Dimming the backlight is the **only** real
+power saver on an LCD — an on-screen black overlay would not cut backlight current.
+> The radio is the next ceiling: the firmware runs a continuous loop with **no
+> Wi-Fi modem-sleep / light-sleep**, so even dimmed the ESP32+Wi-Fi floor is
+> ~90–110 mA. Rough runtime on a 3000 mAh 1S LiPo: ~14–16 h screen-on idle,
+> ~26–31 h dimmed idle, ~11–13 h recording+uploading. Modem-sleep
+> (`WiFi.setSleep(true)`) is the cheap next win and does **not** drop the Wi-Fi
+> association (no reconnect).
+
+### 8.26 No on-device playback on speakerless units (fw 1.4.0)
+The shipping units have **no speaker**, so on-device playback was removed: the
+Sessions screen is **info + delete only** (rows are plain panels, not play
+buttons; tapping does nothing). Recordings auto-upload to SATE and are reviewed in
+the web/app report. The `playSessionAudio` / I2S-out path still compiles (some
+board revisions have the ES8311 speaker amp) but is no longer reachable from the
+UI. **If a unit does have a speaker, re-enable the row's `ACT_PLAY_SESSION`
+action.** (The §1 table still lists the codec's speaker-amp output for boards that
+populate it.)
+
+### 8.27 Device telemetry to the admin dashboard (fw 1.5.0)
+Every heartbeat now also sends **battery %** and a **lifetime recording count**:
+`...&bat=<0-100|255>&recs=<n>` (`connSetTelemetry()`, refreshed every ~10 s). The
+count is **NVS-persisted** (`Preferences "sate-stats"`, key `recs`) so it survives
+reboots **and** the §8.24 auto-trim — you can't derive it from files on the card.
+255 = battery unknown (sensing unavailable). Server side: `device-api` writes
+`sate_devices.battery_pct` / `total_recordings`; the `/admin` page shows both
+columns so a super-admin sees every recorder's charge + total without logging into
+the owner's account. **`bat=255` must map to `null`** in the edge fn, not `255`.
+
+### 8.28 OTA is live — keep the dual-slot partition (fw 1.1.6+)
+The device pulls firmware updates over the air: the heartbeat returns
+`ota:{url,version}` when an `ota` command is queued (admin **Publish firmware**
+card uploads the `.bin` to Supabase Storage + `sate_firmware`); `runOtaUpdate()`
+downloads it, flashes the **spare** app slot, and reboots into it — a bad image
+auto-rolls-back (ESP keeps the old slot). **This only works because the build uses
+a dual-app-slot partition (`default_8MB`, see §3).** A unit flashed with a
+single-slot scheme (`huge_app`) cannot receive OTA and needs one more USB flash
+onto the dual-slot layout first. Bump `FIRMWARE_VERSION` every release (§ top) —
+OTA compares it to decide whether to flash.
+
+---
+
+## ⚠️ Edge function `verify_jwt` MUST stay `false` for `device-api`
+
+**Symptom:** recorder setup fails at the very end — screen shows **"Registration
+Rejected"**, the app shows **"Setup link expired — sign out and back in"**. WiFi
+connects fine; the failure is the register step. The app can still mint a claim
+token (it has a user JWT), so the token exists + stays `used=false`.
+
+**Root cause:** the `device-api` Edge Function was redeployed with
+**`verify_jwt: true`**. The recorder's `POST /api/devices/register` is
+*unauthenticated* (it carries only the `apikey` anon header + a claim token in the
+body — the device has no Supabase user JWT yet). With `verify_jwt: true` the
+**Supabase gateway rejects the call with 401 *before* the function runs**, so:
+- the device sees a 4xx → firmware's "Registration Rejected" path,
+- the function never executes → **no server-side log / no DB write** (this is the
+  tell: a 4xx the function can't account for = gateway-level rejection).
+
+`device-api` does its **own** auth inside the function (device keys `Bearer key-`,
+claim tokens, and `supabase.auth.getUser` for user routes), so the gateway check
+must be OFF. Same applies to the other unauthenticated functions: `mobile-link`,
+`process-device-session`, `process-mobile-uploads`, `stripe-webhook` — all
+`verify_jwt: false`.
+
+**The trap:** the MCP `deploy_edge_function` tool **defaults `verify_jwt` to
+`true`**. If you redeploy `device-api` and don't pass `verify_jwt: false`
+explicitly, you silently break ALL device endpoints (register, heartbeat, session
+upload) even though the app keeps working (the app sends a real user JWT).
+
+**Rule:** every `device-api` deploy MUST set **`verify_jwt: false`**. After any
+redeploy, verify with `list_edge_functions` that `device-api.verify_jwt === false`.
+
+> Diagnostic that nailed it: device on USB showed "Registration Rejected" (a real
+> 4xx) while the server's register-debug table stayed empty across attempts → the
+> request was dying at the gateway, not in our code. Firmware anon key + server URL
+> were both correct, which ruled everything else out.
