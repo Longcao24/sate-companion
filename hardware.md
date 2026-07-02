@@ -681,7 +681,13 @@ so it holds the last state — acceptable since the unit really is still plugged
 > IP5306/power-bank ICs instead report status over **I²C** (no simple pin).
 
 ### 8.31 ⭐ Battery protection: low-voltage cutoff + charging heat (fw 1.5.3)
-Two separate problems on a 1S LiPo (tested on a **1000 mAh** cell):
+Two separate problems on a 1S LiPo (**3000 mAh** cell as shipped).
+
+> **Capacity-independent protection:** the guard thresholds below are **per-cell
+> VOLTAGE** (mV), not capacity, so moving between a 1000 mAh and a 3000 mAh cell
+> needs **no code change** — only the runtime is ~3× longer on 3000 mAh (§8.25/§11).
+> The battery **%** is voltage-based too (no coulomb counting), so it's correct on
+> any capacity.
 
 **Battery-% calibration (fw 1.5.8).** The raw read under-reads ~1.4% (divider
 tolerance + ESP32 ADC): a full cell measured **~4142 mV raw**, so `readBatteryMv()`
@@ -708,22 +714,23 @@ firmware now guards the cell in software:
 > DW01 + FS8205 protection** (the 6-pad `B+ B- OUT+ OUT-` version), which cuts the
 > cell off at ~2.4 V in hardware.
 
-**B) Charging runs very hot (hardware — firmware can't fix).** The TP4056 is a
+**B) Charging runs warm — chip heat, NOT the cell (hardware).** The TP4056 is a
 **linear** charger: it burns `(Vin − Vcell) × Icharge` as heat in that tiny SOP-8.
-A stock module charges at **1 A = 1C** for a 1000 mAh cell → ~1.3 W in the chip →
-**hot**, and 1C is hard on a small cell. Firmware cannot set the charge current —
-it's fixed by the **`Rprog` resistor** (the SMD marked **`122` = 1.2 kΩ**):
+On a **3000 mAh** cell the stock **1 A = 0.33C**, which is **gentle on the cell**
+(the cell stays cool — expected/safe). Only the **chip** runs warm (~1.3 W), because
+that dissipation depends on Vin/current, not capacity. So a hot chip + cool cell =
+normal; the chip also self-limits with thermal regulation (~120 °C). Firmware cannot
+set the charge current — it's the **`Rprog` resistor** (SMD marked **`122` = 1.2 kΩ**):
 
-| Rprog | Marking | Charge current | For 1000 mAh |
-|-------|---------|----------------|--------------|
-| 1.2 kΩ (stock) | `122` | ~1000 mA (1C) | too hot |
-| 2.0 kΩ | `202` | ~580 mA | good |
-| **2.4 kΩ** | `242` | **~500 mA (0.5C)** | **ideal** |
-| 4.0 kΩ | `402` | ~300 mA (0.3C) | coolest, slow |
+| Rprog | Marking | Charge current | 3000 mAh C-rate | Full-charge time |
+|-------|---------|----------------|-----------------|------------------|
+| 1.2 kΩ (stock) | `122` | ~1000 mA | 0.33C (fine) | ~3.5 h, chip warm |
+| **2.4 kΩ** | `242` | **~500 mA** | 0.17C (gentle) | ~7 h, chip cooler |
+| 4.0 kΩ | `402` | ~300 mA | 0.1C | ~11 h, coolest |
 
-Swap `122` → **`242`** (0.5C) to roughly **halve the heat** and charge gently. Also
-don't **record while charging** (stacks load + heat), give the board some airflow,
-and rule out a tired/high-ESR cell.
+On 3000 mAh the stock 1 A is **fine for the cell** — only lower `Rprog` (→ `242`) if
+the **chip** running warm bothers you (cuts its heat ~half, at ~2× charge time).
+Don't **record while charging** (stacks load + heat) and give the board airflow.
 
 ---
 
