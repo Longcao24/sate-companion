@@ -23,6 +23,7 @@ import { Feather } from "@expo/vector-icons";
 import { SateApi } from "../api/sateApi";
 import { FoundDevice, SateLink } from "../ble/SateBle";
 import { GlassBackground, Logo } from "../components/ui";
+import { PlaudDeviceCard } from "../components/PlaudDeviceCard";
 import { DeviceFrame } from "../components/DeviceFrame";
 import {
   ManagedDevice,
@@ -69,6 +70,8 @@ export function HomeScreen({
   onOpenSettings,
   onOpenPreview,
   onSetupNew,
+  onConnectPlaud,
+  knownPlauds,
   onOpenRecorderSettings,
   onOpenReport,
 }: {
@@ -77,6 +80,12 @@ export function HomeScreen({
   onOpenSettings: () => void;
   onOpenPreview: () => void;
   onSetupNew: () => void;
+  /** Open the Plaud screen; pass a serial to reconnect that specific paired
+   *  Plaud (one account can pair several). */
+  onConnectPlaud: (targetSn?: string) => void;
+  /** Every Plaud this account has paired (most-recent first). Home lists them
+   *  so any can be opened/reconnected without hunting for Connect. */
+  knownPlauds: { sn: string; name: string }[];
   onOpenRecorderSettings: (d: ManagedDevice) => void;
   onOpenReport: (session: UploadedSession) => void;
 }) {
@@ -463,6 +472,38 @@ export function HomeScreen({
           >
             <Text style={s.ctaTxt}>Pair a recorder</Text>
           </Pressable>
+          {knownPlauds.length > 0 ? (
+            <View style={{ alignSelf: "stretch", marginTop: 20, gap: 10 }}>
+              {knownPlauds.map((p) => (
+                <Pressable
+                  key={p.sn}
+                  onPress={() => onConnectPlaud(p.sn)}
+                  accessibilityRole="button"
+                  style={({ pressed }) => [s.plaudRow, { opacity: pressed ? 0.9 : 1 }]}
+                >
+                  <PlaudDeviceCard width={44} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.plaudTitle}>{p.name}</Text>
+                    <Text style={s.plaudSub}>Paired Plaud · tap to open & sync</Text>
+                  </View>
+                  <Feather name="chevron-right" size={20} color={D.sub} />
+                </Pressable>
+              ))}
+              <Pressable onPress={() => onConnectPlaud()} accessibilityRole="button" hitSlop={8}>
+                <Text style={[s.headerLink, { marginTop: 6 }]}>+ Pair another Plaud</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <Pressable
+              onPress={() => onConnectPlaud()}
+              accessibilityRole="button"
+              hitSlop={8}
+            >
+              <Text style={[s.headerLink, { marginTop: 16 }]}>
+                + Connect with Plaud
+              </Text>
+            </Pressable>
+          )}
           <Pressable onPress={onOpenPreview} hitSlop={8} accessibilityRole="button">
             <Text style={[s.headerLink, { marginTop: 16 }]}>
               See how the recorder works ›
@@ -539,6 +580,23 @@ export function HomeScreen({
             <Text style={s.headerLink}>Settings</Text>
           </Pressable>
         </View>
+
+        {/* ---- your paired Plaud device(s): reconnect any in one tap ---- */}
+        {knownPlauds.map((p) => (
+          <Pressable
+            key={p.sn}
+            onPress={() => onConnectPlaud(p.sn)}
+            accessibilityRole="button"
+            style={({ pressed }) => [s.plaudRow, { opacity: pressed ? 0.9 : 1 }]}
+          >
+            <PlaudDeviceCard width={44} />
+            <View style={{ flex: 1 }}>
+              <Text style={s.plaudTitle}>{p.name}</Text>
+              <Text style={s.plaudSub}>Paired Plaud · tap to open & sync</Text>
+            </View>
+            <Feather name="chevron-right" size={20} color={D.sub} />
+          </Pressable>
+        ))}
 
         {/* ---- hero: the recorder + the one thing you do most ---- */}
         <View style={s.hero}>
@@ -849,6 +907,20 @@ const s = StyleSheet.create({
   dot: { width: 8, height: 8, borderRadius: 4, marginRight: 6 },
   statusTxt: { fontSize: 13, fontWeight: "700" },
   headerLink: { color: D.sky, fontSize: 15, fontWeight: "600" },
+
+  plaudRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: D.panel,
+    borderRadius: 16,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: D.line,
+    padding: 12,
+    marginBottom: 14,
+  },
+  plaudTitle: { color: D.ink, fontSize: 15, fontWeight: "700" },
+  plaudSub: { color: D.sub, fontSize: 12, marginTop: 2 },
 
   hero: {
     backgroundColor: D.panel,

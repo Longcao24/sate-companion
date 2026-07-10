@@ -66,11 +66,20 @@ export interface SateApi {
     session_number: number;
     sample_rate: number;
     wav_base64: string;
+    /** Ms offsets into the recording — same seek-bar-tick pipeline as the
+     * SATE hardware's physical flag button. */
+    flags?: number[];
   }): Promise<void>;
   /** The processed report row (transcript + analysis) — the SAME record the web app shows. */
   getRecording(id: string): Promise<Recording>;
   /** First-open review: rename + set protocol/notes and clear needs_review. */
   updateRecording(id: string, meta: RecordingMeta): Promise<void>;
+  /**
+   * Mint a short-lived (~24h) Plaud "User Access Token" for the Connect-with-
+   * Plaud flow. Partner secrets stay server-side in the mint-plaud-token Edge
+   * Function; the app only ever sees the per-user token.
+   */
+  getPlaudToken(): Promise<{ token: string; expiresAt: number }>;
 }
 
 // ---------------------------------------------------------------- real API
@@ -187,11 +196,37 @@ export class HttpApi implements SateApi {
     session_number: number;
     sample_rate: number;
     wav_base64: string;
+    flags?: number[];
   }) {
     await this.req("/api/sessions", {
       method: "POST",
       body: JSON.stringify(args),
     });
+  }
+  async getPlaudToken() {
+    // Lives on a different Edge Function than baseUrl (device-api), so call it
+    // directly; mirror req()'s single 401-refresh-and-retry.
+    const call = async (tok: string | null) =>
+      fetch(`${SUPABASE_URL}/functions/v1/mint-plaud-token`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: SUPABASE_ANON_KEY,
+          ...(tok ? { Authorization: `Bearer ${tok}` } : {}),
+        },
+      });
+    let res = await call(this.token);
+    if (res.status === 401 && this.onUnauthorized) {
+      const fresh = await this.onUnauthorized();
+      if (fresh) {
+        this.token = fresh;
+        res = await call(fresh);
+      }
+    }
+    if (!res.ok) {
+      throw new Error(`${res.status} ${(await res.text().catch(() => "")) || res.statusText}`);
+    }
+    return res.json() as Promise<{ token: string; expiresAt: number }>;
   }
 
   // ---- recordings: read the processed report straight from Supabase REST ----

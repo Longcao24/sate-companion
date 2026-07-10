@@ -67,6 +67,12 @@ export interface SateLink {
   setPatients(patients: Patient[]): Promise<void>;
   /** Direct control while connected over BLE (device has no Wi-Fi). */
   sendCommand(op: BleCommand): Promise<void>;
+  /** Fully release the Bluetooth radio: stop scanning, drop any connection,
+   *  and DESTROY the underlying CBCentralManager (not just stopScan). Used
+   *  before handing the radio to the Plaud SDK — two live central managers in
+   *  one process starve each other. The manager is lazily recreated on next
+   *  use, so SATE keeps working after returning. */
+  teardown(): void;
 }
 
 // ------------------------------------------------------------ frame codec
@@ -422,6 +428,22 @@ export class BleLink implements SateLink {
     const wait = this.waitStatus((m) => m.ev === "ok" && m.op === op, 10000);
     await this.writeControl({ op });
     await wait;
+  }
+
+  teardown(): void {
+    this.stopScan();
+    if (this.device) {
+      this.manager_?.cancelDeviceConnection(this.device.id).catch(() => {});
+      this.device = null;
+    }
+    // destroy() releases the native CBCentralManager entirely, freeing the
+    // radio for the Plaud SDK. The lazy getter rebuilds it on next access.
+    try {
+      this.manager_?.destroy();
+    } catch {
+      /* already gone */
+    }
+    this.manager_ = null;
   }
 }
 

@@ -28,3 +28,6 @@ ota_build/
 
 # firmware publish admin creds (never commit)
 scripts/.publish.env
+
+# Plaud SDK binaries — proprietary, copied in per-machine (see plaud-integration.md)
+modules/plaud-sate/ios/Frameworks/

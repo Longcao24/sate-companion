@@ -3,6 +3,9 @@ import { StatusBar } from "expo-status-bar";
 import { View } from "react-native";
 import { makeApi, refreshSession, RefreshError, RefreshHandler } from "./src/api/sateApi";
 import { makeLink } from "./src/ble/SateBle";
+import { makePlaudLink } from "./src/plaud/PlaudLink";
+import { PlaudConnectScreen } from "./src/screens/PlaudConnectScreen";
+import { PlaudSettingsScreen } from "./src/screens/PlaudSettingsScreen";
 import { ManagedDevice, UploadedSession } from "./src/protocol";
 import { DevicePreviewScreen } from "./src/screens/DevicePreviewScreen";
 import { HomeScreen } from "./src/screens/HomeScreen";
@@ -22,6 +25,8 @@ type Screen =
   | { name: "changeWifi"; device: ManagedDevice }
   | { name: "recorderSettings"; device: ManagedDevice }
   | { name: "preview" }
+  | { name: "plaud"; targetSn?: string }
+  | { name: "plaudSettings"; sn: string; deviceName: string }
   | { name: "report"; session: UploadedSession }
   | { name: "settings" };
 
@@ -69,6 +74,7 @@ function Root() {
     [settings.serverUrl, settings.token, doRefresh]
   );
   const link = useMemo(() => makeLink(), []);
+  const plaud = useMemo(() => makePlaudLink(), []);
 
   // Belt-and-suspenders: also refresh proactively just before expiry, so most
   // calls never even see a 401. Together with the 401 retry above, a signed-in
@@ -114,9 +120,21 @@ function Root() {
         <HomeScreen
           api={api}
           link={link}
+          knownPlauds={plaud.knownDevices()}
           onOpenSettings={() => setScreen({ name: "settings" })}
           onOpenPreview={() => setScreen({ name: "preview" })}
           onSetupNew={() => setScreen({ name: "provision" })}
+          onConnectPlaud={(targetSn?: string) => {
+            // Hand the Bluetooth radio to the Plaud SDK: fully tear down
+            // SATE's CBCentralManager (react-native-ble-plx), not just
+            // stopScan. Two live central managers in one process starve each
+            // other — Plaud's scan produced zero callbacks while everything
+            // else (token, RSA timing, permission) checked out. teardown()
+            // destroys the manager; it's lazily rebuilt when we return home.
+            // targetSn: reconnect to a specific paired Plaud (multi-device).
+            link.teardown();
+            setScreen({ name: "plaud", targetSn });
+          }}
           onOpenRecorderSettings={(device) =>
             setScreen({ name: "recorderSettings", device })
           }
@@ -157,6 +175,26 @@ function Root() {
       )}
       {screen.name === "preview" && (
         <DevicePreviewScreen onClose={() => setScreen({ name: "home" })} />
+      )}
+      {screen.name === "plaud" && (
+        <PlaudConnectScreen
+          api={api}
+          plaud={plaud}
+          targetSn={screen.targetSn}
+          onClose={() => setScreen({ name: "home" })}
+          onOpenSettings={(sn, deviceName) =>
+            setScreen({ name: "plaudSettings", sn, deviceName })
+          }
+        />
+      )}
+      {screen.name === "plaudSettings" && (
+        <PlaudSettingsScreen
+          plaud={plaud}
+          sn={screen.sn}
+          deviceName={screen.deviceName}
+          onClose={() => setScreen({ name: "plaud" })}
+          onUnbound={() => setScreen({ name: "home" })}
+        />
       )}
       {screen.name === "settings" && (
         <SettingsScreen onClose={() => setScreen({ name: "home" })} />

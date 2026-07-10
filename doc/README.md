@@ -17,6 +17,7 @@ These files describe what is actually built and running, not a roadmap.
 | [05-backend-supabase.md](05-backend-supabase.md) | Supabase project: tables, edge functions, storage buckets, auth |
 | [06-ai-pipeline.md](06-ai-pipeline.md) | AI `/process` call, error counting + speech analysis, manual vs device parity |
 | [07-runbook.md](07-runbook.md) | Build / flash / deploy commands, go-live checklist, troubleshooting |
+| [08-plaud.md](08-plaud.md) | Optional Plaud recorder integration: BLE sync into the same `recordings` pipeline |
 
 ## System in one paragraph
 
@@ -74,6 +75,7 @@ sate-companion/
 - `hardware.md` — deep hardware reference + the memory/RAM/core optimization playbook.
 - `hardware-supabase.md` — the original device→Supabase→AI→`recordings` integration note.
 - `doc.md` — chronological work log / change history.
+- `plaud-integration.md` — Plaud "Connect with Plaud" build steps + file map (see [08](08-plaud.md)).
 
 The `doc/` folder reorganizes the same material into topic files; the root docs remain as
 deep-dives and history.

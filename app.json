@@ -54,7 +54,8 @@
         {
           "cameraPermission": "SATE Companion uses the camera to scan the QR code shown in the SATE web app for quick sign-in."
         }
-      ]
+      ],
+      "./modules/plaud-sate/app.plugin.js"
     ]
   }
 }
