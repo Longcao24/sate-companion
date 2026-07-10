@@ -6,6 +6,9 @@ import { makeLink } from "./src/ble/SateBle";
 import { makePlaudLink } from "./src/plaud/PlaudLink";
 import { PlaudConnectScreen } from "./src/screens/PlaudConnectScreen";
 import { PlaudSettingsScreen } from "./src/screens/PlaudSettingsScreen";
+import { makePendantLink } from "./src/pendant/PendantLink";
+import { KnownPendant, loadKnownPendants, rememberPendant } from "./src/pendant/PendantStore";
+import { PendantConnectScreen } from "./src/screens/PendantConnectScreen";
 import { ManagedDevice, UploadedSession } from "./src/protocol";
 import { DevicePreviewScreen } from "./src/screens/DevicePreviewScreen";
 import { HomeScreen } from "./src/screens/HomeScreen";
@@ -27,6 +30,7 @@ type Screen =
   | { name: "preview" }
   | { name: "plaud"; targetSn?: string }
   | { name: "plaudSettings"; sn: string; deviceName: string }
+  | { name: "pendant"; targetId?: string }
   | { name: "report"; session: UploadedSession }
   | { name: "settings" };
 
@@ -75,6 +79,14 @@ function Root() {
   );
   const link = useMemo(() => makeLink(), []);
   const plaud = useMemo(() => makePlaudLink(), []);
+  const pendant = useMemo(() => makePendantLink(), []);
+
+  // Pendants the account has paired (persisted locally — no lock concern, unlike
+  // Plaud). Loaded once so Home can show them as device rows on every launch.
+  const [knownPendants, setKnownPendants] = useState<KnownPendant[]>([]);
+  useEffect(() => {
+    loadKnownPendants().then(setKnownPendants);
+  }, []);
 
   // Belt-and-suspenders: also refresh proactively just before expiry, so most
   // calls never even see a 401. Together with the 401 retry above, a signed-in
@@ -95,11 +107,19 @@ function Root() {
 
   // Background BLE bridge runs while signed in + enabled, except where a screen
   // needs exclusive use of the radio (first-time setup or a recorder restart).
+  // Auto-sync owns SATE's ble-plx manager. Disable it on any screen that needs
+  // exclusive use of the BLE radio: first-time setup / restart (provision,
+  // changeWifi, recorderSettings) AND the Plaud/Pendant connect flows. Two
+  // central managers in one process starve each other — leaving auto-sync
+  // scanning here rebuilds SATE's manager (makeLink is lazy) right after we tore
+  // it down, so the pendant/Plaud scan gets zero callbacks. Off = radio free.
   const syncEnabled =
     settings.autoSync &&
     screen.name !== "provision" &&
     screen.name !== "changeWifi" &&
-    screen.name !== "recorderSettings";
+    screen.name !== "recorderSettings" &&
+    screen.name !== "plaud" &&
+    screen.name !== "pendant";
   // Kept mounted so the background BLE bridge keeps running across screens.
   useAutoSync(syncEnabled, link, api, !!settings.token);
 
@@ -121,6 +141,7 @@ function Root() {
           api={api}
           link={link}
           knownPlauds={plaud.knownDevices()}
+          knownPendants={knownPendants}
           onOpenSettings={() => setScreen({ name: "settings" })}
           onOpenPreview={() => setScreen({ name: "preview" })}
           onSetupNew={() => setScreen({ name: "provision" })}
@@ -134,6 +155,15 @@ function Root() {
             // targetSn: reconnect to a specific paired Plaud (multi-device).
             link.teardown();
             setScreen({ name: "plaud", targetSn });
+          }}
+          onConnectPendant={(targetId?: string) => {
+            // Pendant SHARES SATE's ble-plx manager (ble/bleManager.ts). We must
+            // NOT tear it down here — destroying + recreating the manager is what
+            // made iOS return an empty scan. Just stop SATE's scan so the pendant
+            // owns the (shared) manager; auto-sync is paused on this screen too.
+            // targetId: a known pendant → connect straight to it, skip scanning.
+            link.stopScan();
+            setScreen({ name: "pendant", targetId });
           }}
           onOpenRecorderSettings={(device) =>
             setScreen({ name: "recorderSettings", device })
@@ -185,6 +215,18 @@ function Root() {
           onOpenSettings={(sn, deviceName) =>
             setScreen({ name: "plaudSettings", sn, deviceName })
           }
+        />
+      )}
+      {screen.name === "pendant" && (
+        <PendantConnectScreen
+          api={api}
+          pendant={pendant}
+          targetId={screen.targetId}
+          onConnected={(id, name) => rememberPendant(id, name).then(setKnownPendants)}
+          onClose={() => {
+            pendant.teardown(); // release the pendant radio; SATE rebuilds lazily
+            setScreen({ name: "home" });
+          }}
         />
       )}
       {screen.name === "plaudSettings" && (

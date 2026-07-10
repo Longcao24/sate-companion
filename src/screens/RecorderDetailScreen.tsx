@@ -1,0 +1,756 @@
+import React, { useEffect, useRef, useState } from "react";
+import {
+  ActivityIndicator,
+  Animated,
+  Easing,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
+import {
+  setAudioModeAsync,
+  useAudioPlayer,
+  useAudioPlayerStatus,
+} from "expo-audio";
+import { StatusBar } from "expo-status-bar";
+import { Feather } from "@expo/vector-icons";
+import { SateApi } from "../api/sateApi";
+import { FoundDevice, SateLink } from "../ble/SateBle";
+import { GlassBackground } from "../components/ui";
+import { DeviceFrame } from "../components/DeviceFrame";
+import {
+  ManagedDevice,
+  Patient,
+  RemoteCommand,
+  UploadedSession,
+} from "../protocol";
+import { D } from "../theme";
+
+// One SATE recorder, up close: live status, the big Record button, a one-tap
+// Sync, and the recorder's recent sessions with their processing state. Split
+// out of the old HomeScreen god-component — the device LIST lives in
+// DeviceListScreen, and this screen is just the detail for a single recorder.
+// It leaves the radio on 'autosync' (a SATE screen), so background BLE bridging
+// keeps running while it's open.
+
+function timeAgo(iso: string): string {
+  const secs = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+  if (secs < 60) return "just now";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins} min ago`;
+  const h = Math.round(mins / 60);
+  return h < 24 ? `${h} h ago` : `${Math.round(h / 24)} d ago`;
+}
+
+function durationLabel(bytes: number, sampleRate = 16000): string {
+  const pcm = Math.max(0, bytes - 44);
+  const secs = Math.round(pcm / (sampleRate * 2));
+  return `${secs}s`;
+}
+
+type SessionStatus = "processing" | "ready" | "failed";
+function statusOf(u: UploadedSession): SessionStatus {
+  if (u.process_error) return "failed";
+  if (u.processed && u.recording_id) return "ready";
+  return "processing";
+}
+
+export function RecorderDetailScreen({
+  api,
+  link,
+  device,
+  nearby,
+  onClose,
+  onOpenRecorderSettings,
+  onOpenReport,
+}: {
+  api: SateApi;
+  link: SateLink;
+  device: ManagedDevice;
+  /** Serials currently heard advertising over BLE (from the list screen's
+   *  passive scan) — lets us show "Bluetooth · Nearby". */
+  nearby: Set<string>;
+  onClose: () => void;
+  onOpenRecorderSettings: (d: ManagedDevice) => void;
+  onOpenReport: (session: UploadedSession) => void;
+}) {
+  const [dev, setDev] = useState<ManagedDevice>(device);
+  const [uploads, setUploads] = useState<UploadedSession[]>([]);
+  const [patients, setPatients] = useState<Patient[]>([]);
+  const [busyCmd, setBusyCmd] = useState<RemoteCommand | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [playingId, setPlayingId] = useState<string | null>(null);
+  const mounted = useRef(true);
+
+  const [formOpen, setFormOpen] = useState(false);
+  const [pId, setPId] = useState("");
+  const [pName, setPName] = useState("");
+  const [pType, setPType] = useState("");
+
+  const spin = useRef(new Animated.Value(0)).current;
+  const pulse = useRef(new Animated.Value(1)).current;
+  const spinLoop = useRef<Animated.CompositeAnimation | null>(null);
+  const pulseLoop = useRef<Animated.CompositeAnimation | null>(null);
+
+  const player = useAudioPlayer();
+  const playerStatus = useAudioPlayerStatus(player);
+
+  useEffect(() => {
+    setAudioModeAsync({ playsInSilentMode: true }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (playerStatus?.didJustFinish) setPlayingId(null);
+  }, [playerStatus?.didJustFinish]);
+
+  const liveState = dev?.state ?? "idle";
+  const recording = liveState === "recording";
+  const uploading = liveState === "uploading";
+  const busy = recording || uploading;
+  const online = !!dev?.online;
+
+  useEffect(() => {
+    if (busy) {
+      spin.setValue(0);
+      spinLoop.current = Animated.loop(
+        Animated.timing(spin, {
+          toValue: 1,
+          duration: 1100,
+          easing: Easing.linear,
+          useNativeDriver: true,
+        })
+      );
+      spinLoop.current.start();
+    } else {
+      spinLoop.current?.stop();
+      Animated.timing(spin, { toValue: 0, duration: 200, useNativeDriver: true }).start();
+    }
+  }, [busy]);
+
+  useEffect(() => {
+    if (recording) {
+      pulseLoop.current = Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulse, {
+            toValue: 1.3,
+            duration: 550,
+            easing: Easing.inOut(Easing.ease),
+            useNativeDriver: true,
+          }),
+          Animated.timing(pulse, {
+            toValue: 1,
+            duration: 550,
+            easing: Easing.inOut(Easing.ease),
+            useNativeDriver: true,
+          }),
+        ])
+      );
+      pulseLoop.current.start();
+    } else {
+      pulseLoop.current?.stop();
+      Animated.timing(pulse, { toValue: 1, duration: 200, useNativeDriver: true }).start();
+    }
+  }, [recording]);
+
+  const togglePlay = (u: UploadedSession) => {
+    if (playingId === u.id) {
+      player.pause();
+      setPlayingId(null);
+      return;
+    }
+    try {
+      player.replace(api.audioSource(u.id));
+      player.seekTo(0);
+      player.play();
+      setPlayingId(u.id);
+    } catch {
+      setNote("Could not play this session");
+    }
+  };
+
+  const refresh = async () => {
+    try {
+      const list = await api.listDevices();
+      if (!mounted.current) return;
+      const current = list.find((d) => d.id === device.id) ?? dev;
+      setDev({ ...current, kind: current.kind ?? "sate" });
+      const [ups, roster] = await Promise.all([
+        api.listUploads(current.serial),
+        api.listPatients().catch(() => patients),
+      ]);
+      if (mounted.current) {
+        setUploads(ups.slice(0, 6));
+        setPatients(roster);
+      }
+    } catch {
+      /* keep last-known; keep polling */
+    }
+  };
+
+  useEffect(() => {
+    mounted.current = true;
+    refresh();
+    const t = setInterval(refresh, 2000);
+    return () => {
+      mounted.current = false;
+      clearInterval(t);
+    };
+  }, [device.id]);
+
+  const setIf = (fn: () => void) => {
+    if (mounted.current) fn();
+  };
+
+  const command = async (
+    op: RemoteCommand,
+    okMsg: string,
+    patient?: Partial<Patient>
+  ) => {
+    setBusyCmd(op);
+    setNote(null);
+    try {
+      await api.sendCommand(dev.id, op, patient);
+      setIf(() => setNote(okMsg));
+      refresh();
+    } catch (e: any) {
+      setIf(() => setNote(e?.message ?? "Couldn't reach the recorder"));
+    } finally {
+      setIf(() => setBusyCmd(null));
+    }
+  };
+
+  const openForm = () => {
+    setPId("");
+    setPName("");
+    setPType("");
+    setFormOpen(true);
+  };
+
+  const pickPatient = (p: Patient) => {
+    setPId(p.patient_id);
+    setPName(p.name ?? "");
+    setPType(p.session_type ?? "");
+  };
+
+  const startRecording = () => {
+    const patient_id = pId.trim();
+    if (!patient_id) return;
+    setFormOpen(false);
+    command("record", `Recording a session for ${patient_id}…`, {
+      patient_id,
+      name: pName.trim() || undefined,
+      session_type: pType.trim() || undefined,
+    });
+  };
+
+  const findNearby = (serial: string) =>
+    new Promise<FoundDevice>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        link.stopScan();
+        reject(new Error("Recorder not found nearby. Make sure it's powered on."));
+      }, 12000);
+      link.startScan((d) => {
+        if (d.name === serial) {
+          clearTimeout(timer);
+          link.stopScan();
+          resolve(d);
+        }
+      });
+    });
+
+  const syncOverBle = async () => {
+    setBusyCmd("sync_now");
+    setNote("Looking for your recorder over Bluetooth…");
+    try {
+      const ok = await link.requestPermissions();
+      if (!ok) throw new Error("Bluetooth permission needed");
+      const found = await findNearby(dev.serial);
+      setIf(() => setNote("Connecting…"));
+      await link.connect(found.id);
+      setIf(() => setNote("Bring the recorder near your phone to finish syncing."));
+    } catch (e: any) {
+      setIf(() => setNote(e?.message ?? "Bluetooth sync failed"));
+    } finally {
+      await link.disconnect().catch(() => {});
+      setIf(() => setBusyCmd(null));
+    }
+  };
+
+  const onSync = () => {
+    if (online) command("sync_now", "Recorder is sending your sessions to SATE");
+    else syncOverBle();
+  };
+
+  const nearbyBle = nearby.has(dev.serial);
+  const dotColor = recording ? D.red : uploading ? D.sky : D.faint;
+  const status = recording
+    ? { text: "Recording", dot: D.red, fg: D.red }
+    : uploading
+    ? { text: "Uploading", dot: D.sky, fg: D.sky }
+    : online
+    ? { text: "Wi-Fi · Online", dot: D.green, fg: D.green }
+    : nearbyBle
+    ? { text: "Bluetooth · Nearby", dot: D.sky, fg: D.sky }
+    : { text: "Off Wi-Fi · not nearby", dot: D.amber, fg: D.amber };
+
+  const recordLabel = recording ? "Recording…" : uploading ? "Uploading…" : "Record a session";
+
+  return (
+    <View style={s.flex}>
+      <GlassBackground />
+      <ScrollView style={s.scroll} contentContainerStyle={s.content}>
+        <StatusBar style="light" />
+
+        <View style={s.header}>
+          <View style={{ flex: 1 }}>
+            <Pressable onPress={onClose} hitSlop={6} accessibilityRole="button">
+              <Text style={s.backLink}>‹ Devices</Text>
+            </Pressable>
+            <Text style={s.recName} numberOfLines={1}>{dev.name}</Text>
+            <View style={s.statusRow}>
+              <View style={[s.dot, { backgroundColor: status.dot }]} />
+              <Text style={[s.statusTxt, { color: status.fg }]}>{status.text}</Text>
+            </View>
+          </View>
+        </View>
+
+        <View style={s.hero}>
+          <DeviceFrame width={156}>
+            <Text style={s.screenBrand}>SATE</Text>
+            <Animated.View
+              style={[s.screenDot, { backgroundColor: dotColor, transform: [{ scale: pulse }] }]}
+            />
+            <Text style={[s.screenStatus, { color: status.fg }]} numberOfLines={2}>
+              {status.text}
+            </Text>
+          </DeviceFrame>
+          <Text style={s.heroCaption}>
+            {recording
+              ? "Capturing audio on the recorder…"
+              : uploading
+              ? "Sending the session to SATE…"
+              : online
+              ? "Tap record and the recorder captures a session"
+              : nearbyBle
+              ? "Nearby over Bluetooth · tap Sync to bridge its sessions"
+              : "Off Wi-Fi · bring it near your phone to sync over Bluetooth"}
+          </Text>
+
+          <Pressable
+            onPress={openForm}
+            disabled={!online || busy || busyCmd === "record"}
+            accessibilityRole="button"
+            style={({ pressed }) => [
+              s.recordBtn,
+              { opacity: !online || busy ? 0.5 : pressed ? 0.88 : 1 },
+            ]}
+          >
+            {busyCmd === "record" || recording || uploading ? (
+              <ActivityIndicator color="#FFFFFF" />
+            ) : (
+              <Text style={s.recordTxt}>
+                <Feather name="mic" size={16} color="#FFFFFF" />
+                {"  "}
+                {recordLabel}
+              </Text>
+            )}
+          </Pressable>
+        </View>
+
+        <View style={s.actionRow}>
+          <Pressable
+            onPress={onSync}
+            disabled={busyCmd === "sync_now"}
+            accessibilityRole="button"
+            style={({ pressed }) => [
+              s.action,
+              { opacity: busyCmd === "sync_now" ? 0.6 : pressed ? 0.85 : 1 },
+            ]}
+          >
+            {busyCmd === "sync_now" ? (
+              <ActivityIndicator color={D.sky} size="small" />
+            ) : (
+              <Feather name="upload" size={20} color={D.sky} />
+            )}
+            <Text style={s.actionLabel}>Sync</Text>
+            <Text style={s.actionSub}>
+              {dev.pending_sessions > 0 ? `${dev.pending_sessions} waiting` : "All sent"}
+            </Text>
+          </Pressable>
+          <Pressable
+            onPress={() => command("reload_patients", "Patient list refreshed")}
+            disabled={!online || busyCmd === "reload_patients"}
+            accessibilityRole="button"
+            style={({ pressed }) => [
+              s.action,
+              {
+                opacity:
+                  !online || busyCmd === "reload_patients" ? 0.5 : pressed ? 0.85 : 1,
+              },
+            ]}
+          >
+            {busyCmd === "reload_patients" ? (
+              <ActivityIndicator color={D.sky} size="small" />
+            ) : (
+              <Feather name="refresh-cw" size={20} color={D.sky} />
+            )}
+            <Text style={s.actionLabel}>Patients</Text>
+            <Text style={s.actionSub}>Refresh list</Text>
+          </Pressable>
+        </View>
+
+        {note && <Text style={s.note}>{note}</Text>}
+
+        <Text style={s.sectionHdr}>Recent sessions</Text>
+        <Text style={s.sectionSub}>
+          Uploaded to SATE and processed automatically — tap a ready one to open the report.
+        </Text>
+        <View style={s.panel}>
+          {uploads.length === 0 ? (
+            <Text style={s.emptyLine}>
+              No sessions yet. Tap record above to capture your first one.
+            </Text>
+          ) : (
+            uploads.map((u, i) => {
+              const st = statusOf(u);
+              const ready = st === "ready";
+              const isPlaying = playingId === u.id;
+              return (
+                <Pressable
+                  key={u.id}
+                  onPress={ready ? () => onOpenReport(u) : undefined}
+                  disabled={!ready}
+                  accessibilityRole={ready ? "button" : undefined}
+                  style={({ pressed }) => [
+                    s.recRow,
+                    i > 0 && s.recRowDivider,
+                    { opacity: ready && pressed ? 0.7 : 1 },
+                  ]}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.recName2}>
+                      Session {u.session_number} · {u.patient_id || "Standalone"}
+                    </Text>
+                    <Text style={s.recSub}>
+                      {durationLabel(u.bytes, u.sample_rate)} · {timeAgo(u.at)}
+                    </Text>
+                  </View>
+
+                  {st === "processing" && (
+                    <View style={[s.statusChip, { backgroundColor: D.amberBg }]}>
+                      <ActivityIndicator color={D.amber} size="small" />
+                      <Text style={[s.statusChipTxt, { color: D.amber }]}>Processing</Text>
+                    </View>
+                  )}
+                  {st === "failed" && (
+                    <View style={[s.statusChip, { backgroundColor: D.redBg }]}>
+                      <Text style={[s.statusChipTxt, { color: D.red }]}>Failed</Text>
+                    </View>
+                  )}
+                  {ready && (
+                    <View style={s.readyGroup}>
+                      <Pressable
+                        onPress={() => togglePlay(u)}
+                        accessibilityRole="button"
+                        style={[s.playBtn, isPlaying && s.playBtnActive]}
+                      >
+                        <Feather
+                          name={isPlaying ? "square" : "play"}
+                          size={14}
+                          color={isPlaying ? D.bg : D.sky}
+                        />
+                      </Pressable>
+                      <Text style={s.viewChevron}>›</Text>
+                    </View>
+                  )}
+                </Pressable>
+              );
+            })
+          )}
+        </View>
+
+        <Pressable
+          onPress={() => onOpenRecorderSettings(dev)}
+          accessibilityRole="button"
+          style={({ pressed }) => [s.settingsRow, { opacity: pressed ? 0.85 : 1 }]}
+        >
+          <Text style={s.settingsTxt}>Recorder settings</Text>
+          <Text style={s.settingsChevron}>›</Text>
+        </Pressable>
+      </ScrollView>
+
+      <Modal
+        visible={formOpen}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setFormOpen(false)}
+      >
+        <KeyboardAvoidingView
+          style={s.modalWrap}
+          behavior={Platform.OS === "ios" ? "padding" : undefined}
+        >
+          <Pressable style={s.modalBackdrop} onPress={() => setFormOpen(false)} />
+          <View style={s.sheet}>
+            <View style={s.sheetGrip} />
+            <Text style={s.sheetTitle}>New recording</Text>
+            <Text style={s.sheetSub}>Who is this session for?</Text>
+
+            {patients.length > 0 && (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                style={s.chipRow}
+                contentContainerStyle={{ gap: 8, paddingVertical: 2 }}
+                keyboardShouldPersistTaps="handled"
+              >
+                {patients.map((p) => {
+                  const active = p.patient_id === pId;
+                  return (
+                    <Pressable
+                      key={p.patient_id}
+                      onPress={() => pickPatient(p)}
+                      accessibilityRole="button"
+                      style={[s.chip, active && s.chipActive]}
+                    >
+                      <Text style={[s.chipTxt, active && { color: "#FFFFFF" }]}>
+                        {p.patient_id}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+            )}
+
+            <Text style={s.fieldLabel}>Patient ID *</Text>
+            <TextInput
+              style={s.input}
+              value={pId}
+              onChangeText={setPId}
+              placeholder="e.g. PT-1004"
+              placeholderTextColor={D.faint}
+              autoCapitalize="characters"
+              autoCorrect={false}
+            />
+            <Text style={s.fieldLabel}>Name</Text>
+            <TextInput
+              style={s.input}
+              value={pName}
+              onChangeText={setPName}
+              placeholder="e.g. Jordan Lee"
+              placeholderTextColor={D.faint}
+              autoCapitalize="words"
+            />
+            <Text style={s.fieldLabel}>Session type</Text>
+            <TextInput
+              style={s.input}
+              value={pType}
+              onChangeText={setPType}
+              placeholder="e.g. Articulation"
+              placeholderTextColor={D.faint}
+              autoCapitalize="sentences"
+            />
+
+            <Pressable
+              onPress={startRecording}
+              disabled={!pId.trim()}
+              accessibilityRole="button"
+              style={({ pressed }) => [
+                s.recordBtn,
+                { marginTop: 8, opacity: !pId.trim() ? 0.5 : pressed ? 0.88 : 1 },
+              ]}
+            >
+              <Text style={s.recordTxt}>
+                <Feather name="mic" size={16} color="#FFFFFF" />
+                {"  "}
+                Start recording
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={() => setFormOpen(false)}
+              accessibilityRole="button"
+              hitSlop={8}
+              style={({ pressed }) => [s.cancel, { opacity: pressed ? 0.6 : 1 }]}
+            >
+              <Text style={s.cancelTxt}>Cancel</Text>
+            </Pressable>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+    </View>
+  );
+}
+
+const s = StyleSheet.create({
+  flex: { flex: 1, backgroundColor: D.bg },
+  scroll: { flex: 1, backgroundColor: "transparent" },
+  content: { padding: 16, paddingTop: 56, paddingBottom: 48 },
+
+  header: { flexDirection: "row", alignItems: "flex-start", marginBottom: 18 },
+  backLink: { color: D.sky, fontSize: 14, fontWeight: "600", marginTop: 2 },
+  recName: { color: D.ink, fontSize: 26, fontWeight: "800", marginTop: 2, letterSpacing: 0.3 },
+  statusRow: { flexDirection: "row", alignItems: "center", marginTop: 6 },
+  dot: { width: 8, height: 8, borderRadius: 4, marginRight: 6 },
+  statusTxt: { fontSize: 13, fontWeight: "700" },
+
+  hero: {
+    backgroundColor: D.panel,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: D.line,
+    paddingVertical: 26,
+    paddingHorizontal: 16,
+    alignItems: "center",
+    marginBottom: 14,
+  },
+  screenBrand: {
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 2,
+    color: "#9CA3AF",
+    marginBottom: 8,
+  },
+  screenDot: { width: 26, height: 26, borderRadius: 13 },
+  screenStatus: { marginTop: 8, fontSize: 11, fontWeight: "700", textAlign: "center" },
+  heroCaption: {
+    color: D.sub,
+    fontSize: 13,
+    textAlign: "center",
+    marginTop: 18,
+    marginBottom: 18,
+    lineHeight: 18,
+  },
+  recordBtn: {
+    backgroundColor: D.sky,
+    borderRadius: 16,
+    paddingVertical: 16,
+    alignItems: "center",
+    justifyContent: "center",
+    alignSelf: "stretch",
+  },
+  recordTxt: { color: "#FFFFFF", fontSize: 17, fontWeight: "800" },
+
+  actionRow: { flexDirection: "row", gap: 12, marginBottom: 6 },
+  action: {
+    flex: 1,
+    backgroundColor: D.panel,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: D.line,
+    paddingVertical: 16,
+    paddingHorizontal: 14,
+    alignItems: "flex-start",
+  },
+  actionLabel: { color: D.ink, fontSize: 16, fontWeight: "700", marginTop: 10 },
+  actionSub: { color: D.sub, fontSize: 12, marginTop: 2 },
+
+  note: { color: D.sky, fontSize: 13, marginTop: 12 },
+
+  sectionHdr: { color: D.ink, fontSize: 18, fontWeight: "800", marginTop: 22, marginBottom: 4 },
+  sectionSub: { color: D.sub, fontSize: 12, lineHeight: 16, marginBottom: 12 },
+  statusChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: 10,
+    marginLeft: 10,
+  },
+  statusChipTxt: { fontSize: 12, fontWeight: "700" },
+  readyGroup: { flexDirection: "row", alignItems: "center", marginLeft: 10 },
+  viewChevron: { color: D.faint, fontSize: 22, fontWeight: "600", marginLeft: 8 },
+  panel: {
+    backgroundColor: D.panel,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: D.line,
+    padding: 14,
+    marginBottom: 18,
+  },
+  emptyLine: { color: D.sub, fontSize: 13, lineHeight: 18 },
+  recRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingVertical: 10,
+  },
+  recRowDivider: { borderTopWidth: 1, borderTopColor: D.line },
+  recName2: { color: D.ink, fontSize: 14, fontWeight: "700" },
+  recSub: { color: D.sub, fontSize: 12, marginTop: 3 },
+  playBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: D.sky,
+    marginLeft: 10,
+  },
+  playBtnActive: { backgroundColor: D.sky },
+
+  settingsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: D.panel,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: D.line,
+    paddingVertical: 15,
+    paddingHorizontal: 16,
+  },
+  settingsTxt: { color: D.ink, fontSize: 15, fontWeight: "600" },
+  settingsChevron: { color: D.faint, fontSize: 22, fontWeight: "600" },
+
+  modalWrap: { flex: 1, justifyContent: "flex-end" },
+  modalBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.55)" },
+  sheet: {
+    backgroundColor: D.hero,
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    borderWidth: 1,
+    borderColor: D.line,
+    padding: 20,
+    paddingBottom: 34,
+  },
+  sheetGrip: {
+    width: 40,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: D.line,
+    alignSelf: "center",
+    marginBottom: 14,
+  },
+  sheetTitle: { color: D.ink, fontSize: 20, fontWeight: "800" },
+  sheetSub: { color: D.sub, fontSize: 14, marginTop: 4, marginBottom: 14 },
+  chipRow: { marginBottom: 16 },
+  chip: {
+    backgroundColor: D.tile,
+    borderWidth: 1,
+    borderColor: D.line,
+    borderRadius: 11,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  chipActive: { backgroundColor: D.sky, borderColor: D.sky },
+  chipTxt: { color: D.ink, fontSize: 13, fontWeight: "700" },
+  fieldLabel: { color: D.sub, fontSize: 12, marginBottom: 5, marginTop: 4 },
+  input: {
+    borderWidth: 1,
+    borderColor: D.line,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    fontSize: 15,
+    color: D.ink,
+    backgroundColor: D.tile,
+    marginBottom: 10,
+  },
+  cancel: { paddingVertical: 12, alignItems: "center", marginTop: 4 },
+  cancelTxt: { color: D.sub, fontSize: 15, fontWeight: "600" },
+});

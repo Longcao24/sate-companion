@@ -6,6 +6,11 @@ import { Buffer } from "buffer";
 import { PermissionsAndroid, Platform } from "react-native";
 import { BleManager, Device, Subscription } from "react-native-ble-plx";
 import {
+  destroySharedBleManager,
+  getSharedBleManager,
+  hasSharedBleManager,
+} from "./bleManager";
+import {
   ADV_FLAG_NEEDS_SYNC,
   ADV_FLAG_UNPROVISIONED,
   ADV_MAGIC,
@@ -112,20 +117,11 @@ function frameChunks(payload: Buffer, mtuPayload = 180): Buffer[] {
 // --------------------------------------------------------------- real BLE
 
 export class BleLink implements SateLink {
-  // Lazy: constructing BleManager outside a dev build (e.g. Expo Go, where
-  // the native module is missing) throws - that must not crash the render.
-  private manager_: BleManager | null = null;
+  // SATE shares ONE BleManager with the Pendant (see ble/bleManager.ts): two
+  // ble-plx managers, or a destroy+recreate, break the native scan. The getter
+  // just returns the app-wide shared instance (lazily created).
   private get manager(): BleManager {
-    if (!this.manager_) {
-      try {
-        this.manager_ = new BleManager();
-      } catch {
-        throw new Error(
-          "Bluetooth needs a development build - Expo Go cannot load react-native-ble-plx. Run: npx expo run:ios (or run:android), or turn Demo mode ON."
-        );
-      }
-    }
-    return this.manager_;
+    return getSharedBleManager();
   }
   private device: Device | null = null;
   private statusSub: Subscription | null = null;
@@ -195,7 +191,7 @@ export class BleLink implements SateLink {
   stopScan(): void {
     this.scanStateSub?.remove();
     this.scanStateSub = null;
-    this.manager_?.stopDeviceScan();
+    if (hasSharedBleManager()) getSharedBleManager().stopDeviceScan();
   }
 
   async connect(id: string): Promise<void> {
@@ -433,17 +429,16 @@ export class BleLink implements SateLink {
   teardown(): void {
     this.stopScan();
     if (this.device) {
-      this.manager_?.cancelDeviceConnection(this.device.id).catch(() => {});
+      if (hasSharedBleManager())
+        getSharedBleManager().cancelDeviceConnection(this.device.id).catch(() => {});
       this.device = null;
     }
-    // destroy() releases the native CBCentralManager entirely, freeing the
-    // radio for the Plaud SDK. The lazy getter rebuilds it on next access.
-    try {
-      this.manager_?.destroy();
-    } catch {
-      /* already gone */
-    }
-    this.manager_ = null;
+    // Destroy the SHARED manager, releasing the native CBCentralManager entirely
+    // so the Plaud SDK (a separate central manager) can own the radio. Only the
+    // Plaud handoff calls teardown(); the SATE↔Pendant handoff just stopScan()s,
+    // so the shared manager survives and the pendant scan keeps working. The
+    // lazy getter rebuilds it on next SATE/Pendant use.
+    destroySharedBleManager();
   }
 }
 

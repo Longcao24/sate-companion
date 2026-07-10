@@ -10,6 +10,7 @@
 import { useEffect, useRef, useState } from "react";
 import { SateApi } from "../api/sateApi";
 import { FoundDevice, SateLink } from "../ble/SateBle";
+import { acquireRadio, autoSyncAllowed, subscribeRadio } from "../ble/radio";
 
 export interface SyncActivity {
   phase: "idle" | "scanning" | "connecting" | "pulling" | "uploading" | "done" | "error";
@@ -21,7 +22,7 @@ export interface SyncActivity {
 }
 
 export function useAutoSync(
-  enabled: boolean,
+  settingEnabled: boolean,
   link: SateLink,
   api: SateApi,
   signedIn: boolean
@@ -29,11 +30,22 @@ export function useAutoSync(
   const [activity, setActivity] = useState<SyncActivity>({ phase: "idle" });
   const busy = useRef(false);
 
+  // Radio gating is delegated to the arbiter instead of a screen-name allowlist:
+  // auto-sync may only use SATE's manager while it (or nobody) owns the radio.
+  // The moment a pendant/Plaud/setup screen acquires the radio, this flips false
+  // and the effect below tears our scan down — no per-screen bookkeeping.
+  const [radioOk, setRadioOk] = useState(autoSyncAllowed());
+  useEffect(() => subscribeRadio(() => setRadioOk(autoSyncAllowed())), []);
+  const enabled = settingEnabled && radioOk;
+
   useEffect(() => {
     if (!enabled || !signedIn) {
       setActivity({ phase: "idle" });
       return;
     }
+    // Claim the radio for background sync (tears down pendant/Plaud if somehow
+    // still up; keeps SATE's link). No-op when we already own it.
+    acquireRadio("autosync");
 
     let cancelled = false;
     setActivity({ phase: "scanning" });

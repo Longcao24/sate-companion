@@ -106,6 +106,9 @@ export interface ManagedDevice {
   state?: DeviceLiveState; // live activity, reported in the recorder's heartbeat
   slp?: string; // clinician the recorder is assigned to (set at registration)
   slp_id?: string;
+  // Which device family this is. Defaults to 'sate' (a SATE recorder from the
+  // server); 'plaud'/'pendant' are synthesized locally from paired-device stores.
+  kind?: "sate" | "plaud" | "pendant";
 }
 
 // Live activity the recorder reports in its heartbeat so the app can show what

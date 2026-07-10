@@ -24,7 +24,9 @@ import { SateApi } from "../api/sateApi";
 import { FoundDevice, SateLink } from "../ble/SateBle";
 import { GlassBackground, Logo } from "../components/ui";
 import { PlaudDeviceCard } from "../components/PlaudDeviceCard";
+import { PendantDeviceCard } from "../components/PendantDeviceCard";
 import { DeviceFrame } from "../components/DeviceFrame";
+import { KnownPendant } from "../pendant/PendantStore";
 import {
   ManagedDevice,
   Patient,
@@ -71,7 +73,9 @@ export function HomeScreen({
   onOpenPreview,
   onSetupNew,
   onConnectPlaud,
+  onConnectPendant,
   knownPlauds,
+  knownPendants,
   onOpenRecorderSettings,
   onOpenReport,
 }: {
@@ -83,14 +87,27 @@ export function HomeScreen({
   /** Open the Plaud screen; pass a serial to reconnect that specific paired
    *  Plaud (one account can pair several). */
   onConnectPlaud: (targetSn?: string) => void;
+  /** Open the SATE Pendant connect flow. Pass a known pendant's BLE id to
+   *  reconnect straight to it (skip scanning). */
+  onConnectPendant: (targetId?: string) => void;
   /** Every Plaud this account has paired (most-recent first). Home lists them
    *  so any can be opened/reconnected without hunting for Connect. */
   knownPlauds: { sn: string; name: string }[];
+  /** Pendants this account has paired (persisted locally). Shown as device rows
+   *  so a pendant owner sees "their device" on every launch. */
+  knownPendants: KnownPendant[];
   onOpenRecorderSettings: (d: ManagedDevice) => void;
   onOpenReport: (session: UploadedSession) => void;
 }) {
   const [devices, setDevices] = useState<ManagedDevice[]>([]);
   const [selId, setSelId] = useState<string | null>(null);
+  // Home is a device LIST; tapping a SATE recorder opens its detail (hero +
+  // record/sync/sessions). null = list view. Plaud rows open their own screen.
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const openRecorder = (id: string) => {
+    setDetailId(id);
+    setSelId(id); // drive status + session polling for the opened recorder
+  };
   const [uploads, setUploads] = useState<UploadedSession[]>([]);
   const [patients, setPatients] = useState<Patient[]>([]);
   const [busyCmd, setBusyCmd] = useState<RemoteCommand | null>(null);
@@ -106,6 +123,10 @@ export function HomeScreen({
   const [nearby, setNearby] = useState<Set<string>>(new Set());
   const bleSeen = useRef<Map<string, number>>(new Map());
   const mounted = useRef(true);
+
+  // Device picker: one "Add a device" button opens a sheet with the three device
+  // types (SATE recorder / Plaud / Pendant) so the user chooses what to pair.
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   // "New recording" sheet: the SLP types who the session is for before it starts.
   const [formOpen, setFormOpen] = useState(false);
@@ -369,16 +390,97 @@ export function HomeScreen({
     else syncOverBle();
   };
 
-  const cycleRecorder = () => {
-    if (devices.length < 2 || !dev) return;
-    const i = devices.findIndex((d) => d.id === dev.id);
-    setSelId(devices[(i + 1) % devices.length].id);
-  };
 
   const rotate = spin.interpolate({
     inputRange: [0, 1],
     outputRange: ["0deg", "360deg"],
   });
+
+  // Does the account have ANY device we can show (SATE recorder over the server,
+  // or a locally-remembered Plaud / pendant)? If so we never show the "set up a
+  // recorder" empty state — we show the device list, so a user who owns only a
+  // Plaud or pendant still lands on their device, not a pairing wall.
+  const hasLocal = knownPlauds.length > 0 || knownPendants.length > 0;
+  const hasAny = devices.length > 0 || hasLocal;
+
+  // Open a device type from the picker sheet.
+  const pickSate = () => { setPickerOpen(false); onSetupNew(); };
+  const pickPlaud = () => { setPickerOpen(false); onConnectPlaud(); };
+  const pickPendant = () => { setPickerOpen(false); onConnectPendant(); };
+
+  // The "add a device" sheet: three device types to choose from. Shared by the
+  // empty state and the device list, so pairing always starts the same way.
+  const renderPicker = () => (
+    <Modal
+      visible={pickerOpen}
+      transparent
+      animationType="slide"
+      onRequestClose={() => setPickerOpen(false)}
+    >
+      <View style={s.modalWrap}>
+        <Pressable style={s.modalBackdrop} onPress={() => setPickerOpen(false)} />
+        <View style={s.sheet}>
+          <View style={s.sheetGrip} />
+          <Text style={s.sheetTitle}>Add a device</Text>
+          <Text style={s.sheetSub}>Which one are you connecting?</Text>
+
+          <Pressable
+            onPress={pickSate}
+            accessibilityRole="button"
+            style={({ pressed }) => [s.pickRow, { opacity: pressed ? 0.85 : 1 }]}
+          >
+            <View style={s.pickGlyph}>
+              <Feather name="cpu" size={24} color={D.sky} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={s.pickTitle}>SATE recorder</Text>
+              <Text style={s.pickSub}>Wi-Fi recorder · pairs over Bluetooth</Text>
+            </View>
+            <Feather name="chevron-right" size={20} color={D.sub} />
+          </Pressable>
+
+          <Pressable
+            onPress={pickPlaud}
+            accessibilityRole="button"
+            style={({ pressed }) => [s.pickRow, { opacity: pressed ? 0.85 : 1 }]}
+          >
+            <View style={s.pickGlyph}>
+              <PlaudDeviceCard width={40} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={s.pickTitle}>Plaud</Text>
+              <Text style={s.pickSub}>Plaud recorder · syncs its sessions in</Text>
+            </View>
+            <Feather name="chevron-right" size={20} color={D.sub} />
+          </Pressable>
+
+          <Pressable
+            onPress={pickPendant}
+            accessibilityRole="button"
+            style={({ pressed }) => [s.pickRow, { opacity: pressed ? 0.85 : 1 }]}
+          >
+            <View style={s.pickGlyph}>
+              <PendantDeviceCard width={40} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={s.pickTitle}>Pendant</Text>
+              <Text style={s.pickSub}>Wearable · streams live audio over Bluetooth</Text>
+            </View>
+            <Feather name="chevron-right" size={20} color={D.sub} />
+          </Pressable>
+
+          <Pressable
+            onPress={() => setPickerOpen(false)}
+            accessibilityRole="button"
+            hitSlop={8}
+            style={({ pressed }) => [s.cancel, { opacity: pressed ? 0.6 : 1 }]}
+          >
+            <Text style={s.cancelTxt}>Cancel</Text>
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
+  );
 
   // ---- first load: hold a blank dark screen rather than flash fake data ----
   if (!loaded) {
@@ -393,7 +495,7 @@ export function HomeScreen({
   // ---- couldn't reach the server: don't pretend the account has no recorder.
   // The device lives on the server and is controllable over the internet; we
   // just failed to load it (expired session / offline phone). Offer a retry. ----
-  if (devices.length === 0 && fetchFailed) {
+  if (!hasAny && fetchFailed) {
     return (
       <View style={s.flex}>
         <GlassBackground />
@@ -434,8 +536,8 @@ export function HomeScreen({
     );
   }
 
-  // ---- empty state: no recorder paired yet ----
-  if (devices.length === 0) {
+  // ---- empty state: nothing paired anywhere yet → one button → device picker ----
+  if (!hasAny) {
     return (
       <View style={s.flex}>
         <GlassBackground />
@@ -459,57 +561,26 @@ export function HomeScreen({
             <View style={s.ringTrack} />
             <View style={s.recDotIdle} />
           </View>
-          <Text style={s.emptyTitle}>Let's set up your recorder</Text>
+          <Text style={s.emptyTitle}>Connect your first device</Text>
           <Text style={s.emptySub}>
-            Power on the SATE recorder and we'll pair it over Bluetooth. Once
-            it's on Wi-Fi, it records and uploads on its own - this app is your
-            window into it.
+            SATE works with a recorder, a Plaud, or a pendant. Pick one to pair —
+            it then records and uploads on its own, and this app is your window
+            into it.
           </Text>
           <Pressable
-            onPress={onSetupNew}
+            onPress={() => setPickerOpen(true)}
             accessibilityRole="button"
             style={({ pressed }) => [s.cta, { opacity: pressed ? 0.85 : 1 }]}
           >
-            <Text style={s.ctaTxt}>Pair a recorder</Text>
+            <Text style={s.ctaTxt}>Connect a device</Text>
           </Pressable>
-          {knownPlauds.length > 0 ? (
-            <View style={{ alignSelf: "stretch", marginTop: 20, gap: 10 }}>
-              {knownPlauds.map((p) => (
-                <Pressable
-                  key={p.sn}
-                  onPress={() => onConnectPlaud(p.sn)}
-                  accessibilityRole="button"
-                  style={({ pressed }) => [s.plaudRow, { opacity: pressed ? 0.9 : 1 }]}
-                >
-                  <PlaudDeviceCard width={44} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={s.plaudTitle}>{p.name}</Text>
-                    <Text style={s.plaudSub}>Paired Plaud · tap to open & sync</Text>
-                  </View>
-                  <Feather name="chevron-right" size={20} color={D.sub} />
-                </Pressable>
-              ))}
-              <Pressable onPress={() => onConnectPlaud()} accessibilityRole="button" hitSlop={8}>
-                <Text style={[s.headerLink, { marginTop: 6 }]}>+ Pair another Plaud</Text>
-              </Pressable>
-            </View>
-          ) : (
-            <Pressable
-              onPress={() => onConnectPlaud()}
-              accessibilityRole="button"
-              hitSlop={8}
-            >
-              <Text style={[s.headerLink, { marginTop: 16 }]}>
-                + Connect with Plaud
-              </Text>
-            </Pressable>
-          )}
           <Pressable onPress={onOpenPreview} hitSlop={8} accessibilityRole="button">
-            <Text style={[s.headerLink, { marginTop: 16 }]}>
-              See how the recorder works ›
+            <Text style={[s.headerLink, { marginTop: 18 }]}>
+              See how it works ›
             </Text>
           </Pressable>
         </View>
+        {renderPicker()}
       </View>
     );
   }
@@ -549,27 +620,22 @@ export function HomeScreen({
             <Logo size={32} />
             <Text style={s.brand}>SATE</Text>
           </View>
-            <Pressable
-              onPress={cycleRecorder}
-              disabled={devices.length < 2}
-              hitSlop={6}
-            >
-              <Text style={s.recName} numberOfLines={1}>
-                {dev?.name ?? "Recorder"}
-                {devices.length > 1 ? (
-                  <>
-                    {"  "}
-                    <Feather name="chevron-down" size={14} color={D.sub} />
-                  </>
-                ) : null}
-              </Text>
-            </Pressable>
-            <View style={s.statusRow}>
-              <View style={[s.dot, { backgroundColor: status.dot }]} />
-              <Text style={[s.statusTxt, { color: status.fg }]}>
-                {status.text}
-              </Text>
-            </View>
+            {detailId && dev ? (
+              <>
+                <Pressable onPress={() => setDetailId(null)} hitSlop={6} accessibilityRole="button">
+                  <Text style={s.backLink}>‹ Devices</Text>
+                </Pressable>
+                <Text style={s.recName} numberOfLines={1}>{dev.name}</Text>
+                <View style={s.statusRow}>
+                  <View style={[s.dot, { backgroundColor: status.dot }]} />
+                  <Text style={[s.statusTxt, { color: status.fg }]}>
+                    {status.text}
+                  </Text>
+                </View>
+              </>
+            ) : (
+              <Text style={s.recName}>Your devices</Text>
+            )}
           </View>
           <Pressable
             onPress={onOpenSettings}
@@ -581,23 +647,77 @@ export function HomeScreen({
           </Pressable>
         </View>
 
-        {/* ---- your paired Plaud device(s): reconnect any in one tap ---- */}
-        {knownPlauds.map((p) => (
-          <Pressable
-            key={p.sn}
-            onPress={() => onConnectPlaud(p.sn)}
-            accessibilityRole="button"
-            style={({ pressed }) => [s.plaudRow, { opacity: pressed ? 0.9 : 1 }]}
-          >
-            <PlaudDeviceCard width={44} />
-            <View style={{ flex: 1 }}>
-              <Text style={s.plaudTitle}>{p.name}</Text>
-              <Text style={s.plaudSub}>Paired Plaud · tap to open & sync</Text>
-            </View>
-            <Feather name="chevron-right" size={20} color={D.sub} />
-          </Pressable>
-        ))}
+        {/* ---- device list: SATE recorders + paired Plauds; tap → detail ---- */}
+        {!detailId && (
+          <>
+            {devices.map((d) => (
+              <Pressable
+                key={d.id}
+                onPress={() => openRecorder(d.id)}
+                accessibilityRole="button"
+                style={({ pressed }) => [s.plaudRow, { opacity: pressed ? 0.9 : 1 }]}
+              >
+                <View style={s.sateMini}>
+                  <Feather
+                    name={d.state === "recording" ? "radio" : d.online ? "wifi" : "wifi-off"}
+                    size={20}
+                    color={d.online ? D.sky : D.sub}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={s.plaudTitle}>{d.name}</Text>
+                  <Text style={s.plaudSub}>
+                    SATE recorder · {d.online ? "Online" : "Offline"}
+                    {d.pending_sessions > 0 ? ` · ${d.pending_sessions} pending` : ""}
+                  </Text>
+                </View>
+                <Feather name="chevron-right" size={20} color={D.sub} />
+              </Pressable>
+            ))}
+            {knownPlauds.map((p) => (
+              <Pressable
+                key={p.sn}
+                onPress={() => onConnectPlaud(p.sn)}
+                accessibilityRole="button"
+                style={({ pressed }) => [s.plaudRow, { opacity: pressed ? 0.9 : 1 }]}
+              >
+                <PlaudDeviceCard width={44} />
+                <View style={{ flex: 1 }}>
+                  <Text style={s.plaudTitle}>{p.name}</Text>
+                  <Text style={s.plaudSub}>Paired Plaud · tap to open & sync</Text>
+                </View>
+                <Feather name="chevron-right" size={20} color={D.sub} />
+              </Pressable>
+            ))}
+            {knownPendants.map((p) => (
+              <Pressable
+                key={p.id}
+                onPress={() => onConnectPendant(p.id)}
+                accessibilityRole="button"
+                style={({ pressed }) => [s.plaudRow, { opacity: pressed ? 0.9 : 1 }]}
+              >
+                <PendantDeviceCard width={44} />
+                <View style={{ flex: 1 }}>
+                  <Text style={s.plaudTitle}>{p.name}</Text>
+                  <Text style={s.plaudSub}>Paired pendant · tap to connect & stream</Text>
+                </View>
+                <Feather name="chevron-right" size={20} color={D.sub} />
+              </Pressable>
+            ))}
+            <Pressable
+              onPress={() => setPickerOpen(true)}
+              accessibilityRole="button"
+              style={({ pressed }) => [s.addRow, { opacity: pressed ? 0.85 : 1 }]}
+            >
+              <Feather name="plus" size={18} color={D.sky} />
+              <Text style={s.addTxt}>Add a device</Text>
+            </Pressable>
+          </>
+        )}
 
+        {/* ---- recorder detail: hero + record/sync + sessions ---- */}
+        {detailId && dev && (
+        <>
         {/* ---- hero: the recorder + the one thing you do most ---- */}
         <View style={s.hero}>
           <DeviceFrame width={156}>
@@ -782,6 +902,8 @@ export function HomeScreen({
             <Text style={s.settingsChevron}>›</Text>
           </Pressable>
         )}
+        </>
+        )}
       </ScrollView>
 
       {/* ---- type the patient, then start recording ---- */}
@@ -882,6 +1004,8 @@ export function HomeScreen({
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      {renderPicker()}
     </View>
   );
 }
@@ -921,6 +1045,59 @@ const s = StyleSheet.create({
   },
   plaudTitle: { color: D.ink, fontSize: 15, fontWeight: "700" },
   plaudSub: { color: D.sub, fontSize: 12, marginTop: 2 },
+  backLink: { color: D.sky, fontSize: 14, fontWeight: "600", marginTop: 2 },
+
+  addRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: "transparent",
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: D.line,
+    borderStyle: "dashed",
+    paddingVertical: 14,
+    marginTop: 2,
+    marginBottom: 8,
+  },
+  addTxt: { color: D.sky, fontSize: 15, fontWeight: "700" },
+
+  // device picker sheet
+  pickRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 14,
+    backgroundColor: D.tile,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: D.line,
+    padding: 12,
+    marginTop: 12,
+  },
+  pickGlyph: {
+    width: 56,
+    height: 56,
+    borderRadius: 14,
+    backgroundColor: D.panel,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: D.line,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
+  pickTitle: { color: D.ink, fontSize: 16, fontWeight: "800" },
+  pickSub: { color: D.sub, fontSize: 12, marginTop: 3 },
+  sateMini: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: D.panel,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: D.line,
+    alignItems: "center",
+    justifyContent: "center",
+  },
 
   hero: {
     backgroundColor: D.panel,
