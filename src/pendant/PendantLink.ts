@@ -159,6 +159,10 @@ class NativePendantLink implements PendantLink {
   private scanStateSub: Subscription | null = null;
   private chunks: Buffer[] = [];
   private capturedBytes = 0;
+  // True only between start() and stop(). BLE notifications keep arriving for a
+  // moment after CMD_STOP (in-flight packets), which used to bump the duration to
+  // 0:01/0:02 after the user stopped. Gating accumulation on this drops those.
+  private capturing = false;
   private batteryCbs = new Set<(b: PendantBattery) => void>();
   private audioCbs = new Set<(bytes: number) => void>();
   private seenLog = new Set<string>(); // ids already logged this scan (diagnostics)
@@ -272,6 +276,7 @@ class NativePendantLink implements PendantLink {
       AUDIO_CHAR,
       (error, ch) => {
         if (error || !ch?.value) return;
+        if (!this.capturing) return; // drop packets arriving after stop()
         const buf = Buffer.from(ch.value, "base64");
         this.chunks.push(buf);
         this.capturedBytes += buf.length;
@@ -306,9 +311,13 @@ class NativePendantLink implements PendantLink {
   }
 
   start(): Promise<void> {
+    this.capturing = true;
     return this.writeControl(CMD_START);
   }
   stop(): Promise<void> {
+    // Stop accumulating FIRST so in-flight packets during the CMD_STOP round-trip
+    // don't tack extra tenths onto the take (the 0:01/0:02-after-stop bug).
+    this.capturing = false;
     return this.writeControl(CMD_STOP);
   }
   findMe(): Promise<void> {
