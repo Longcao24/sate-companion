@@ -9,9 +9,12 @@ import { PlaudSettingsScreen } from "./src/screens/PlaudSettingsScreen";
 import { makePendantLink } from "./src/pendant/PendantLink";
 import { KnownPendant, loadKnownPendants, rememberPendant } from "./src/pendant/PendantStore";
 import { PendantConnectScreen } from "./src/screens/PendantConnectScreen";
+import { acquireRadio, registerRadio } from "./src/ble/radio";
+import { useManagedDevices } from "./src/devices/useManagedDevices";
 import { ManagedDevice, UploadedSession } from "./src/protocol";
 import { DevicePreviewScreen } from "./src/screens/DevicePreviewScreen";
-import { HomeScreen } from "./src/screens/HomeScreen";
+import { DeviceListScreen } from "./src/screens/DeviceListScreen";
+import { RecorderDetailScreen } from "./src/screens/RecorderDetailScreen";
 import { LoginScreen } from "./src/screens/LoginScreen";
 import { ProvisionScreen } from "./src/screens/ProvisionScreen";
 import { ChangeWifiScreen } from "./src/screens/ChangeWifiScreen";
@@ -24,6 +27,7 @@ import { D } from "./src/theme";
 
 type Screen =
   | { name: "home" }
+  | { name: "recorderDetail"; device: ManagedDevice }
   | { name: "provision" }
   | { name: "changeWifi"; device: ManagedDevice }
   | { name: "recorderSettings"; device: ManagedDevice }
@@ -105,23 +109,54 @@ function Root() {
     return () => clearInterval(t);
   }, [settings.token, settings.refreshToken, settings.tokenExpiresAt, doRefresh]);
 
-  // Background BLE bridge runs while signed in + enabled, except where a screen
-  // needs exclusive use of the radio (first-time setup or a recorder restart).
-  // Auto-sync owns SATE's ble-plx manager. Disable it on any screen that needs
-  // exclusive use of the BLE radio: first-time setup / restart (provision,
-  // changeWifi, recorderSettings) AND the Plaud/Pendant connect flows. Two
-  // central managers in one process starve each other — leaving auto-sync
-  // scanning here rebuilds SATE's manager (makeLink is lazy) right after we tore
-  // it down, so the pendant/Plaud scan gets zero callbacks. Off = radio free.
-  const syncEnabled =
-    settings.autoSync &&
-    screen.name !== "provision" &&
-    screen.name !== "changeWifi" &&
-    screen.name !== "recorderSettings" &&
-    screen.name !== "plaud" &&
-    screen.name !== "pendant";
-  // Kept mounted so the background BLE bridge keeps running across screens.
-  useAutoSync(syncEnabled, link, api, !!settings.token);
+  // Wire the radio arbiter to the real BLE stacks, once. It is now the ONLY place
+  // that decides who owns the radio — screens acquire, auto-sync backs off. See
+  // CLAUDE.md RULE #2: SATE and the Pendant share one ble-plx manager (stopScan
+  // between them, NEVER destroy); only the Plaud handoff destroys it.
+  useEffect(() => {
+    registerRadio({
+      stopBleScan: () => link.stopScan(),
+      destroyBle: () => link.teardown(), // -> destroySharedBleManager()
+      // Lock-safe (RULE #1): drops the BLE link, KEEPS the binding. Never depair.
+      disconnectPlaud: () => {
+        plaud.disconnect().catch(() => {});
+      },
+      disconnectPendant: () => pendant.teardown(), // stops scan + drops connection
+    });
+  }, [link, plaud, pendant]);
+
+  // Navigation helpers. The radio is acquired SYNCHRONOUSLY here, before the new
+  // screen renders — never in an effect (a parent effect runs after the child's,
+  // so it would stop the scan the new screen just started).
+  const goHome = useCallback(() => {
+    acquireRadio("autosync");
+    setScreen({ name: "home" });
+  }, []);
+  const openPlaud = useCallback((targetSn?: string) => {
+    acquireRadio("plaud"); // destroys the shared ble-plx manager; Plaud SDK gets the radio
+    setScreen({ name: "plaud", targetSn });
+  }, []);
+  const openPendant = useCallback((targetId?: string) => {
+    acquireRadio("pendant"); // shares SATE's manager — stopScan only, no destroy
+    setScreen({ name: "pendant", targetId });
+  }, []);
+  const openSateFg = useCallback((next: Screen) => {
+    acquireRadio("sate-fg"); // setup/restart needs the radio alone: pauses auto-sync
+    setScreen(next);
+  }, []);
+
+  // Kept mounted so the background BLE bridge keeps running across screens. It
+  // gates itself on the arbiter — no screen-name allowlist. It is also the ONLY
+  // BLE scanner, and publishes which recorders are `nearby` (one scan per manager).
+  const { nearby } = useAutoSync(settings.autoSync, link, api, !!settings.token);
+
+  // One registry: SATE recorders (server) + Plaud (Keychain) + pendants (storage).
+  const { devices, loaded, fetchFailed, refresh } = useManagedDevices(
+    api,
+    plaud,
+    knownPendants,
+    !!settings.token
+  );
 
   if (!ready) return <View style={{ flex: 1, backgroundColor: D.bg }} />;
   if (!settings.token) {
@@ -137,81 +172,71 @@ function Root() {
     <>
       <StatusBar style="light" />
       {screen.name === "home" && (
-        <HomeScreen
-          api={api}
-          link={link}
-          knownPlauds={plaud.knownDevices()}
-          knownPendants={knownPendants}
+        <DeviceListScreen
+          devices={devices}
+          loaded={loaded}
+          fetchFailed={fetchFailed}
+          nearby={nearby}
+          onRefresh={refresh}
+          onOpenDevice={(d) => {
+            // Route by family: a recorder has a detail screen; Plaud/pendant open
+            // their own connect flow (reconnecting straight to that serial/id).
+            const kind = d.kind ?? "sate";
+            if (kind === "plaud") openPlaud(d.serial);
+            else if (kind === "pendant") openPendant(d.serial);
+            else setScreen({ name: "recorderDetail", device: d });
+          }}
           onOpenSettings={() => setScreen({ name: "settings" })}
           onOpenPreview={() => setScreen({ name: "preview" })}
-          onSetupNew={() => setScreen({ name: "provision" })}
-          onConnectPlaud={(targetSn?: string) => {
-            // Hand the Bluetooth radio to the Plaud SDK: fully tear down
-            // SATE's CBCentralManager (react-native-ble-plx), not just
-            // stopScan. Two live central managers in one process starve each
-            // other — Plaud's scan produced zero callbacks while everything
-            // else (token, RSA timing, permission) checked out. teardown()
-            // destroys the manager; it's lazily rebuilt when we return home.
-            // targetSn: reconnect to a specific paired Plaud (multi-device).
-            link.teardown();
-            setScreen({ name: "plaud", targetSn });
-          }}
-          onConnectPendant={(targetId?: string) => {
-            // Pendant SHARES SATE's ble-plx manager (ble/bleManager.ts). We must
-            // NOT tear it down here — destroying + recreating the manager is what
-            // made iOS return an empty scan. Just stop SATE's scan so the pendant
-            // owns the (shared) manager; auto-sync is paused on this screen too.
-            // targetId: a known pendant → connect straight to it, skip scanning.
-            link.stopScan();
-            setScreen({ name: "pendant", targetId });
-          }}
+          onAddSate={() => openSateFg({ name: "provision" })}
+          onAddPlaud={() => openPlaud()}
+          onAddPendant={() => openPendant()}
+        />
+      )}
+      {screen.name === "recorderDetail" && (
+        <RecorderDetailScreen
+          api={api}
+          link={link}
+          device={screen.device}
+          nearby={nearby}
+          onClose={goHome}
           onOpenRecorderSettings={(device) =>
-            setScreen({ name: "recorderSettings", device })
+            openSateFg({ name: "recorderSettings", device })
           }
           onOpenReport={(session) => setScreen({ name: "report", session })}
         />
       )}
       {screen.name === "report" && (
-        <ReportScreen
-          api={api}
-          session={screen.session}
-          onClose={() => setScreen({ name: "home" })}
-        />
+        <ReportScreen api={api} session={screen.session} onClose={goHome} />
       )}
       {screen.name === "recorderSettings" && (
         <RecorderSettingsScreen
           api={api}
           link={link}
           device={screen.device}
-          onClose={() => setScreen({ name: "home" })}
-          onUnlinked={() => setScreen({ name: "home" })}
-          onChangeWifi={(device) => setScreen({ name: "changeWifi", device })}
+          onClose={goHome}
+          onUnlinked={goHome}
+          onChangeWifi={(device) => openSateFg({ name: "changeWifi", device })}
         />
       )}
       {screen.name === "provision" && (
-        <ProvisionScreen
-          api={api}
-          link={link}
-          onClose={() => setScreen({ name: "home" })}
-        />
+        <ProvisionScreen api={api} link={link} onClose={goHome} />
       )}
       {screen.name === "changeWifi" && (
         <ChangeWifiScreen
           api={api}
           link={link}
           device={screen.device}
-          onClose={() => setScreen({ name: "recorderSettings", device: screen.device })}
+          onClose={() => openSateFg({ name: "recorderSettings", device: screen.device })}
         />
       )}
-      {screen.name === "preview" && (
-        <DevicePreviewScreen onClose={() => setScreen({ name: "home" })} />
-      )}
+      {screen.name === "preview" && <DevicePreviewScreen onClose={goHome} />}
       {screen.name === "plaud" && (
         <PlaudConnectScreen
           api={api}
           plaud={plaud}
           targetSn={screen.targetSn}
-          onClose={() => setScreen({ name: "home" })}
+          onClose={goHome}
           onOpenSettings={(sn, deviceName) =>
             setScreen({ name: "plaudSettings", sn, deviceName })
           }
@@ -223,10 +248,9 @@ function Root() {
           pendant={pendant}
           targetId={screen.targetId}
           onConnected={(id, name) => rememberPendant(id, name).then(setKnownPendants)}
-          onClose={() => {
-            pendant.teardown(); // release the pendant radio; SATE rebuilds lazily
-            setScreen({ name: "home" });
-          }}
+          // goHome acquires 'autosync', which releases the pendant (teardown:
+          // stopScan + drop connection) WITHOUT destroying the shared manager.
+          onClose={goHome}
         />
       )}
       {screen.name === "plaudSettings" && (
@@ -234,13 +258,14 @@ function Root() {
           plaud={plaud}
           sn={screen.sn}
           deviceName={screen.deviceName}
+          // Stays inside the Plaud flow — the radio owner remains 'plaud'.
           onClose={() => setScreen({ name: "plaud" })}
-          onUnbound={() => setScreen({ name: "home" })}
+          // After a successful UNBIND, goHome hands the radio back (disconnect
+          // only — the depair already happened, user-initiated, in resetBinding).
+          onUnbound={goHome}
         />
       )}
-      {screen.name === "settings" && (
-        <SettingsScreen onClose={() => setScreen({ name: "home" })} />
-      )}
+      {screen.name === "settings" && <SettingsScreen onClose={goHome} />}
     </>
   );
 }

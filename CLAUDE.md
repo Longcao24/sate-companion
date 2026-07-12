@@ -68,9 +68,21 @@ created at app launch).
   it on rebuilds/rescans the shared manager under the screen and starves it.
 - Only one scan per manager: a screen taking over should `stopDeviceScan()` first.
 
-`src/ble/radio.ts` is a radio-arbiter scaffold (logical owners over physical
-teardowns) — partially wired, currently a no-op. Finish it rather than adding more
-ad-hoc `teardown()` calls.
+**`src/ble/radio.ts` is the arbiter and the ONLY place that hands the radio over.**
+Logical owners (`autosync` | `sate-fg` | `pendant` | `plaud`) sit over the two
+physical stacks; it encodes both rules above, including the lock-safe Plaud release
+(`disconnect()`, never `depair()`). Rules for touching it:
+
+- A screen that scans/connects MUST own the radio. `acquireRadio(...)` is called
+  **synchronously in the navigation handler in `App.tsx`** (`goHome` / `openPlaud` /
+  `openPendant` / `openSateFg`) — NEVER in an effect: a parent effect runs after the
+  child's, so it would stop the scan the screen just started.
+- Auto-sync gates itself via `autoSyncAllowed()`. There is **no screen-name
+  allowlist** any more — don't reintroduce one; give the screen an owner instead.
+- **One scan per manager.** Auto-sync is the only background scanner and publishes
+  the `nearby` set; a screen must not run its own presence scan alongside it. A
+  foreground SATE scan (e.g. sync-over-BLE in `RecorderDetailScreen`) must borrow the
+  radio with `acquireRadio('sate-fg')` and hand it back with `acquireRadio('autosync')`.
 
 ## Build / verify
 

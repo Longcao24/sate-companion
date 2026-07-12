@@ -10,7 +10,7 @@
 import { useEffect, useRef, useState } from "react";
 import { SateApi } from "../api/sateApi";
 import { FoundDevice, SateLink } from "../ble/SateBle";
-import { acquireRadio, autoSyncAllowed, subscribeRadio } from "../ble/radio";
+import { autoSyncAllowed, subscribeRadio } from "../ble/radio";
 
 export interface SyncActivity {
   phase: "idle" | "scanning" | "connecting" | "pulling" | "uploading" | "done" | "error";
@@ -30,6 +30,28 @@ export function useAutoSync(
   const [activity, setActivity] = useState<SyncActivity>({ phase: "idle" });
   const busy = useRef(false);
 
+  // Recorder serials we can currently HEAR advertising (seen in the last 10 s), so
+  // the UI can show "Bluetooth · Nearby" for a recorder that's off Wi-Fi.
+  // This piggybacks on the auto-sync scan on purpose: the shared ble-plx manager
+  // allows only ONE scan at a time (CLAUDE.md RULE #2), so a screen must never run
+  // its own presence scan alongside this one — it reads `nearby` from here instead.
+  const [nearby, setNearby] = useState<Set<string>>(new Set());
+  const bleSeen = useRef<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    const t = setInterval(() => {
+      const now = Date.now();
+      const fresh = new Set<string>();
+      for (const [serial, at] of bleSeen.current) {
+        if (now - at < 10000) fresh.add(serial);
+      }
+      setNearby((prev) =>
+        prev.size === fresh.size && [...fresh].every((s) => prev.has(s)) ? prev : fresh
+      );
+    }, 2000);
+    return () => clearInterval(t);
+  }, []);
+
   // Radio gating is delegated to the arbiter instead of a screen-name allowlist:
   // auto-sync may only use SATE's manager while it (or nobody) owns the radio.
   // The moment a pendant/Plaud/setup screen acquires the radio, this flips false
@@ -43,14 +65,12 @@ export function useAutoSync(
       setActivity({ phase: "idle" });
       return;
     }
-    // Claim the radio for background sync (tears down pendant/Plaud if somehow
-    // still up; keeps SATE's link). No-op when we already own it.
-    acquireRadio("autosync");
 
     let cancelled = false;
     setActivity({ phase: "scanning" });
 
     const onFound = async (d: FoundDevice) => {
+      bleSeen.current.set(d.name, Date.now()); // presence, regardless of sync need
       if (cancelled || busy.current || !d.needsSync || d.pending === 0) return;
       busy.current = true;
       link.stopScan();
@@ -136,5 +156,5 @@ export function useAutoSync(
     };
   }, [enabled, signedIn, link, api]);
 
-  return activity;
+  return { activity, nearby };
 }

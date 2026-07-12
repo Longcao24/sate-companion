@@ -1,45 +1,51 @@
 // Radio arbiter — the single source of truth for who owns the phone's BLE radio.
 //
-// The app drives three PHYSICAL BLE stacks, all fighting for one radio:
-//   'sate'    — react-native-ble-plx `SateLink` (`link`). Shared by the
-//               background auto-sync engine AND the foreground SATE screens
-//               (provision / change-Wi-Fi / recorder-settings).
-//   'pendant' — SATE Pendant, its own ble-plx `BleManager` (`PendantLink`).
-//   'plaud'   — Plaud proprietary SDK (its own CBCentralManager).
+// PHYSICAL stacks (there are only two):
+//   'bleplx' — the ONE shared react-native-ble-plx BleManager (ble/bleManager.ts),
+//              used by BOTH the SATE recorder (`SateLink`) and the Pendant.
+//   'plaud'  — the Plaud proprietary SDK's own CBCentralManager (alive from app
+//              launch).
 //
-// Two central managers scanning at once starve each other (this is exactly why
-// the pendant wouldn't scan while auto-sync kept SATE's manager alive).
+// LOGICAL owners (finer than the physical stack — auto-sync and a foreground SATE
+// setup both drive `bleplx`, but must not run at the same time):
+//   'autosync' — background BLE bridge (default owner)
+//   'sate-fg'  — provision / change-Wi-Fi / recorder-settings (needs the radio alone)
+//   'pendant'  — pendant connect screen
+//   'plaud'    — Plaud connect/settings screen
 //
-// But "who may use the radio" is finer than the physical stack: auto-sync and a
-// foreground SATE setup BOTH use `link`, yet must not run at the same time (a
-// restart/provision needs the radio to itself). So callers acquire a LOGICAL
-// owner; the arbiter tears down whichever physical stacks that owner doesn't
-// need, and auto-sync backs off whenever the owner isn't itself.
+// THE TWO RULES THIS ENCODES (see CLAUDE.md RULE #2):
+//  1. SATE ↔ Pendant share `bleplx`. Handing off between them = stopScan() ONLY.
+//     Destroying and recreating the manager leaves the native iOS BLE stack broken
+//     (scans return zero devices, silently). NEVER destroy on that path.
+//  2. Plaud needs the radio to itself → and ONLY there do we destroy `bleplx`.
+//     It's rebuilt lazily on the next SATE/Pendant use.
 //
-//   owner 'autosync' → keeps SATE link, tears down pendant+plaud
-//   owner 'sate-fg'  → keeps SATE link, tears down pendant+plaud, pauses autosync
-//   owner 'pendant'  → tears down SATE link + plaud
-//   owner 'plaud'    → tears down SATE link + pendant
-//
-// LOCK SAFETY (RULE #1): the 'plaud' physical teardown MUST be
-// `plaud.disconnect()` only — it drops the BLE link and KEEPS the binding.
-// depair()/resetBinding (the user UNBIND) is never wired here. Anything else
-// risks desyncing the binding and permanently locking the device.
+// LOCK SAFETY (RULE #1): leaving Plaud calls `disconnectPlaud` — which MUST be
+// `plaud.disconnect()` (drops the BLE link, KEEPS the binding). depair()/
+// resetBinding (the user UNBIND) is never wired here. Anything else risks
+// desyncing the binding and permanently locking the device.
 
-export type RadioStack = "sate" | "pendant" | "plaud";
 export type RadioOwner = "autosync" | "sate-fg" | "pendant" | "plaud";
 
-// Which physical stacks each logical owner needs kept alive.
-const KEEP: Record<RadioOwner, RadioStack[]> = {
-  autosync: ["sate"],
-  "sate-fg": ["sate"],
-  pendant: ["pendant"],
-  plaud: ["plaud"],
+export interface RadioHooks {
+  /** Stop any scan running on the shared ble-plx manager (never destroys it). */
+  stopBleScan(): void;
+  /** Destroy the shared ble-plx manager. ONLY used when handing off to Plaud. */
+  destroyBle(): void;
+  /** Drop the Plaud BLE link. MUST be disconnect() — never depair(). */
+  disconnectPlaud(): void;
+  /** Drop the pendant's connection/scan (does NOT destroy the shared manager). */
+  disconnectPendant(): void;
+}
+
+const noop = () => {};
+let hooks: RadioHooks = {
+  stopBleScan: noop,
+  destroyBle: noop,
+  disconnectPlaud: noop,
+  disconnectPendant: noop,
 };
 
-const ALL: RadioStack[] = ["sate", "pendant", "plaud"];
-
-const teardowns: Partial<Record<RadioStack, () => void>> = {};
 let active: RadioOwner | null = null;
 const subs = new Set<() => void>();
 
@@ -47,37 +53,39 @@ function emit() {
   subs.forEach((f) => f());
 }
 
-/** Register how to tear a physical stack down. Called once per stack at startup. */
-export function registerRadio(stack: RadioStack, teardown: () => void): void {
-  teardowns[stack] = teardown;
+/** Wire the arbiter to the real BLE stacks. Called once at app startup. */
+export function registerRadio(h: RadioHooks): void {
+  hooks = h;
 }
 
 /**
- * Take ownership of the radio as `owner`, tearing down every physical stack this
- * owner doesn't need. Idempotent when `owner` already holds it.
+ * Take ownership of the radio. Hands off the previous owner's stack according to
+ * the two rules above. Idempotent when `owner` already holds it.
+ *
+ * Call this SYNCHRONOUSLY in the navigation handler, BEFORE rendering the screen —
+ * not in an effect. A parent effect runs after the child's, so acquiring there
+ * would stop the scan the new screen just started.
  */
 export function acquireRadio(owner: RadioOwner): void {
   if (active === owner) return;
-  const keep = KEEP[owner];
-  for (const stack of ALL) {
-    if (!keep.includes(stack)) {
-      try {
-        teardowns[stack]?.();
-      } catch {
-        /* a teardown must never block the handoff */
-      }
-    }
+  const prev = active;
+
+  // Release what the previous owner held.
+  if (prev === "plaud" && owner !== "plaud") hooks.disconnectPlaud();
+  if (prev === "pendant" && owner !== "pendant") hooks.disconnectPendant();
+
+  if (owner === "plaud") {
+    // Plaud SDK needs the radio to itself: this is the ONLY destroy path.
+    hooks.stopBleScan();
+    hooks.destroyBle();
+  } else {
+    // autosync / sate-fg / pendant all drive the SHARED ble-plx manager. Only one
+    // scan per manager, so clear whatever was scanning — but never destroy it.
+    hooks.stopBleScan();
   }
+
   active = owner;
   emit();
-}
-
-/** Release ownership if `owner` currently holds it (no-op otherwise). */
-export function releaseRadio(owner: RadioOwner): void {
-  if (active === owner) {
-    active = null;
-    emit();
-  }
 }
 
 /** Who owns the radio right now, or null if free. */

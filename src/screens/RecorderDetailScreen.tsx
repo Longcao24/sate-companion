@@ -22,6 +22,7 @@ import { StatusBar } from "expo-status-bar";
 import { Feather } from "@expo/vector-icons";
 import { SateApi } from "../api/sateApi";
 import { FoundDevice, SateLink } from "../ble/SateBle";
+import { acquireRadio } from "../ble/radio";
 import { GlassBackground } from "../components/ui";
 import { DeviceFrame } from "../components/DeviceFrame";
 import {
@@ -267,6 +268,10 @@ export function RecorderDetailScreen({
   const syncOverBle = async () => {
     setBusyCmd("sync_now");
     setNote("Looking for your recorder over Bluetooth…");
+    // Borrow the radio: this screen normally leaves it on 'autosync', but the
+    // shared ble-plx manager allows only ONE scan at a time (CLAUDE.md RULE #2),
+    // so auto-sync must pause while we scan + connect here. Handed back below.
+    acquireRadio("sate-fg");
     try {
       const ok = await link.requestPermissions();
       if (!ok) throw new Error("Bluetooth permission needed");
@@ -278,6 +283,7 @@ export function RecorderDetailScreen({
       setIf(() => setNote(e?.message ?? "Bluetooth sync failed"));
     } finally {
       await link.disconnect().catch(() => {});
+      acquireRadio("autosync"); // give the radio back to the background bridge
       setIf(() => setBusyCmd(null));
     }
   };

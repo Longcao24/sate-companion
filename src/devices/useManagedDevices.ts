@@ -41,7 +41,9 @@ export interface DeviceRegistry {
 export function useManagedDevices(
   api: SateApi,
   plaud: PlaudLink,
-  knownPendants: KnownPendant[]
+  knownPendants: KnownPendant[],
+  /** Only poll while signed in — otherwise every tick 401s on the login screen. */
+  enabled: boolean
 ): DeviceRegistry {
   const [devices, setDevices] = useState<ManagedDevice[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -79,6 +81,7 @@ export function useManagedDevices(
   }, [api, externals]);
 
   useEffect(() => {
+    if (!enabled) return;
     mounted.current = true;
     refresh();
     const t = setInterval(refresh, 2000);
@@ -86,7 +89,7 @@ export function useManagedDevices(
       mounted.current = false;
       clearInterval(t);
     };
-  }, [refresh]);
+  }, [refresh, enabled]);
 
   return { devices, loaded, fetchFailed, refresh };
 }
