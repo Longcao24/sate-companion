@@ -44,14 +44,50 @@ Where the logic lives: `src/plaud/PlaudLink.ts` (identity, bindings, resetBindin
 `src/screens/PlaudConnectScreen.tsx` (connect guard), `src/screens/PlaudSettingsScreen.tsx`
 (UNBIND), `modules/plaud-sate/ios/PlaudSateModule.swift` (native connect/depair + ACK).
 
+## ⚠️ RULE #2 — ONE shared BleManager (SATE + Pendant)
+
+Three BLE stacks fight for one radio: **SATE** (`SateLink`, react-native-ble-plx),
+**Pendant** (also ble-plx), **Plaud** (proprietary SDK, its own `CBCentralManager`,
+created at app launch).
+
+**SATE and Pendant SHARE a single `BleManager`** — `src/ble/bleManager.ts`
+(`getSharedBleManager()`). This is not a style choice:
+
+- Two ble-plx `BleManager` instances, **or destroying one and immediately creating
+  another**, leaves the native iOS BLE stack broken — scans return **zero devices**
+  with no error. This is exactly what stopped the pendant being found for days
+  (the SATE→Pendant handoff used to `link.teardown()` → destroy → pendant built its
+  own manager → empty scan).
+- **SATE ↔ Pendant handoff: `stopScan()` only. NEVER destroy.**
+- **Plaud handoff: DO destroy** (`link.teardown()` → `destroySharedBleManager()`) —
+  the Plaud SDK needs the radio to itself. Rebuilt lazily afterwards. This is a
+  radio handoff only; it never touches Plaud's binding (see RULE #1).
+- Auto-sync (`useAutoSync`) owns SATE's manager in the background. It **must be
+  paused** on any screen that needs the radio: `provision`, `changeWifi`,
+  `recorderSettings`, `plaud`, `pendant` (see `syncEnabled` in `App.tsx`). Leaving
+  it on rebuilds/rescans the shared manager under the screen and starves it.
+- Only one scan per manager: a screen taking over should `stopDeviceScan()` first.
+
+`src/ble/radio.ts` is a radio-arbiter scaffold (logical owners over physical
+teardowns) — partially wired, currently a no-op. Finish it rather than adding more
+ad-hoc `teardown()` calls.
+
 ## Build / verify
 
 - **Mobile (Expo, iOS-only for Plaud — arm64 device SDK, no simulator):** the user builds
   via Xcode. Compile-check the native module without a device/signing:
   `xcodebuild -workspace ios/SATECompanion.xcworkspace -scheme SATECompanion -sdk iphoneos \
    -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build`
-- **Typecheck:** mobile `npx tsc --noEmit` (repo root); web `npx tsc --noEmit` in
-  `react_app_sate-ui_update/`.
+- **Typecheck:** mobile `npx tsc --noEmit` (repo root — it also pulls in
+  `react_app_sate-ui_update/`, whose `@/…` path-alias errors are noise; filter them
+  out); web `npx tsc --noEmit` in `react_app_sate-ui_update/`.
+- **ALWAYS `npm run build` in `react_app_sate-ui_update/` before pushing the web
+  subtree.** The web build is `tsc -b && vite build` with `noUnusedLocals`, so a
+  merely-unused variable (TS6133) fails the build — typecheck alone won't catch what
+  Vercel will. This has broken the deploy before.
+- **Web deploy is a git subtree** to a separate repo:
+  `git subtree push --prefix=react_app_sate-ui_update webapp <branch>`
+  (`webapp` remote = `Longcao24/SATE_hardwave`, which Vercel builds).
 - Proprietary Plaud frameworks are git-ignored (`modules/plaud-sate/ios/Frameworks/`) —
   never commit them. Deploy `mint-plaud-token` with `--no-verify-jwt`.
 
@@ -83,6 +119,29 @@ Durable lessons — check the ones relevant to what you're touching. Version num
 - **Wi-Fi change without factory reset**: BOOT-hold re-provisions Wi-Fi and KEEPS the
   account; a full reset is only for when the server removed the device (heartbeat
   `unclaimed:true`). Don't wipe the account binding for a Wi-Fi change.
+
+**SATE Pendant (XIAO nRF52840 wearable)**
+- Streams raw PCM (16 kHz mono S16LE, 244 B/notify) over standard BLE → app wraps it
+  in a WAV → same `uploadSession` pipeline, `device_serial` `pendant-<bleId>`.
+  Pure ble-plx: **no native rebuild, no binding/lock concern** (unlike Plaud).
+- **Advertising**: the audio service UUID `19b10000-…` is in the ADV packet, but the
+  NAME (`SATE Pendant`) is only in the SCAN RESPONSE → iOS surfaces it as
+  `localName`, not `name`, and `name` may be a STALE cached GAP name from an earlier
+  firmware. So: **scan with NO service filter**, and match on `name` OR `localName`
+  OR the advertised audio service. Verify what the device really broadcasts by
+  scanning from the Mac (`bleak`) before blaming the app.
+- **Mic is very quiet.** The app peak-normalizes + applies a loudness drive with a
+  tanh soft-clip (`applyGain` in `PendantLink.ts`; tune `LOUDNESS`/`MAX_GAIN`). The
+  firmware has its own `MIC_GAIN`/`DIGITAL_GAIN` — don't stack both to the point of
+  clipping.
+- **Stop must gate accumulation.** BLE notifications keep arriving after `CMD_STOP`;
+  without the `capturing` flag they tack extra seconds onto the take (duration crept
+  to 0:01/0:02 after Stop).
+- Paired pendants persist in AsyncStorage (`PendantStore.ts`) — a known pendant
+  reconnects straight by BLE id, no rescan. **Nap mode**: a notification gap while
+  connected is NORMAL (the pendant sleeps in silence), not a disconnect.
+- Recordings upload as **Standalone** by default — assigning a patient is optional
+  and can be done later on the web report. Don't force patient assignment at capture.
 
 **Dev environment**
 - **The dev Mac's LAN IP is dynamic** — a stale IP breaks both app launch and provisioning.
