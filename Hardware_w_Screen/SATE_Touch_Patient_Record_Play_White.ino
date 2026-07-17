@@ -110,7 +110,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.8";
+static const char    *FIRMWARE_VERSION  = "1.5.10";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -1159,21 +1159,6 @@ static bool sessionExists(const char *dir, uint32_t n)
   return SD_MMC.exists(pp) || SD_MMC.exists(wav) || SD_MMC.exists(mark);
 }
 
-// Delete a session's local audio (segments + any legacy wav), keeping the tiny
-// .json/.synced markers. Called once a session is safely on the server so the
-// SD card doesn't fill up with audio that's already uploaded.
-static void freeSessionAudio(const char *dir, uint32_t n)
-{
-  char wav[160], pp[200];
-  sessionWavPath(wav, sizeof(wav), dir, n);
-  SD_MMC.remove(wav);
-  for (int k = 0;; k++) {
-    sessionPartPath(pp, sizeof(pp), wav, k);
-    if (!SD_MMC.exists(pp)) break;
-    SD_MMC.remove(pp);
-  }
-}
-
 // Remove ALL files of session n (segments, legacy wav, json, .synced marker).
 static void deleteSessionFiles(const char *dir, uint32_t n)
 {
@@ -1224,63 +1209,17 @@ static void deleteSession(const char *dir, uint32_t n)
   for (uint32_t m = n + 1; m <= total; m++) renameSessionFiles(dir, m, m - 1);
 }
 
-// True if session n already has its .synced marker (audio is on the server, so
-// the local copy is safe to drop).
-static bool sessionSynced(const char *dir, uint32_t n)
-{
-  char mk[160];
-  sessionSyncMarkPath(mk, sizeof(mk), dir, n);
-  return SD_MMC.exists(mk);
-}
-
-// Keep only the newest MAX_SESSIONS_ON_DEVICE sessions, deleting older ones.
-// Called after every new recording so the SD card stays light and the Sessions
-// screen stays fast. Oldest session is always #1 (contiguous numbering).
+// NOTE (1.5.9): nothing deletes a recording automatically any more. The device
+// holds the only copy of a take until the SLP explicitly deletes it from the
+// Sessions screen, so the three old reclaim paths were removed:
+//   - freeSessionAudio()/purgeSyncedAudio(): dropped a .synced session's audio at
+//     boot. A ".synced marker" only proves a POST returned 2xx - not that the
+//     audio is intact and usable on the server.
+//   - trimSessionsToMax(): capped the card at 5 sessions per patient.
+// A 32 GB card holds ~278 h at 16 kHz mono, so keeping everything is cheap; the
+// take itself now stops cleanly if the card ever does fill (see
+// recordWavStreamToSd). The .synced marker still drives the pending count.
 //
-// SAFETY (1.5.1): only ever delete a session that is already .synced. Deleting
-// the raw oldest (as 1.5.0 did) could wipe a recording still queued/uploading
-// AND rename files out from under the uploader's open handle -> FATFS FR_LOCKED,
-// which froze this on-save path ("stuck at Saving"). We stop trimming as soon as
-// the oldest isn't synced yet; it gets trimmed on the next save after it uploads.
-// The net task closes its upload file when the UI takes the SD bus, so the
-// deletes/renames below never hit a locked handle. lv_timer_handler() between
-// deletes keeps the screen alive so the save never appears to hang.
-static const int MAX_SESSIONS_ON_DEVICE = 5;
-static void trimSessionsToMax(const char *dir)
-{
-  uint32_t total = sessionCount(dir);
-  while (total > (uint32_t)MAX_SESSIONS_ON_DEVICE) {
-    if (!sessionSynced(dir, 1)) break;   // oldest not on server yet -> keep it
-    deleteSession(dir, 1);               // remove oldest; renumbers remaining
-    lv_timer_handler();                  // pump GUI so "Saving..." never freezes
-    total--;
-  }
-}
-
-// On boot, reclaim space: any session already marked .synced has its audio on
-// the server, so drop the local copy.
-static void purgeSyncedAudio()
-{
-  File root = SD_MMC.open("/sate/patients");
-  if (!root) return;
-  File entry;
-  char dir[120], mark[160];
-  while ((entry = root.openNextFile())) {
-    if (!entry.isDirectory()) { entry.close(); continue; }
-    const char *full = entry.name();
-    const char *pid = strrchr(full, '/');
-    pid = pid ? pid + 1 : full;
-    snprintf(dir, sizeof(dir), "/sate/patients/%s", pid);
-    entry.close();
-    for (uint32_t i = 1; i <= 9999; i++) {
-      if (!sessionExists(dir, i)) break;
-      sessionSyncMarkPath(mark, sizeof(mark), dir, i);
-      if (SD_MMC.exists(mark)) freeSessionAudio(dir, i);
-    }
-  }
-  root.close();
-}
-
 // Sessions are numbered contiguously from 1; first missing = next free.
 static uint32_t findNextSessionIndex(const char *dir)
 {
@@ -1335,8 +1274,11 @@ static uint64_t sdFreeBytes()
   return (g_sdTotal > g_sdUsedCache) ? (g_sdTotal - g_sdUsedCache) : 0;
 }
 
-// Refuse to start a take with less than one full segment (+ slack) free, so a
-// recording is never half-written. The SLP frees space by deleting sessions.
+// Refuse to START a take without room for at least one full segment (+ slack).
+// This is not the whole story: a take can run to RECORD_MAX_SECONDS, far past
+// this reserve, so recordWavStreamToSd() also watches the remaining space and
+// ends the take cleanly if the card fills mid-recording (keeping the audio).
+// The SLP frees space by deleting sessions from the Sessions screen.
 static const uint64_t SD_MIN_FREE_BYTES = (uint64_t)PCM_SEGMENT_BYTES + 256 * 1024;
 
 // --- Battery (1S LiPo on GPIO34 behind the board's 0.5 divider) ------------
@@ -1770,6 +1712,13 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
   uint32_t partWritten = 0;  // PCM in the current segment
   uint32_t lastUiMs = 0;
   bool ok = true;
+  // Running out of card mid-take is NOT a failure - it must never throw away the
+  // minutes already captured (nothing deletes recordings automatically any more,
+  // so a full card is a normal end-of-life state, not a bug). We stop the take
+  // cleanly and keep every finished segment; the caller saves + uploads it as a
+  // normal, shorter session.
+  bool diskFull = false;
+  const uint64_t freeAtStart = sdFreeBytes();
 
   // Read the mic in SMALL slices (~32 ms each) rather than one 4 KB block
   // (~128 ms). A short read means we return to service the GUI ~30x/sec, so the
@@ -1786,9 +1735,15 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
     if (got == 0) { ok = false; break; }
 
     size_t put = file.write(audioChunk, got);
-    if (put != got) { ok = false; break; }
+    // A short write means the card just filled. Keep what's already on disk.
+    if (put != got) { written += put; partWritten += put; diskFull = true; break; }
     written += put;
     partWritten += put;
+
+    // Stop BEFORE the card is truly full, while there's still room to close the
+    // current segment cleanly. freeAtStart is cached at take start and `written`
+    // is what we've added since, so this needs no f_getfree during the capture.
+    if (freeAtStart < (uint64_t)written + PCM_SEGMENT_BYTES) { diskFull = true; break; }
 
     // Roll to the next 1-minute segment.
     if (partWritten >= PCM_SEGMENT_BYTES) {
@@ -1799,7 +1754,7 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
       partWritten = 0;
       sessionPartPath(partPath, sizeof(partPath), wavPath, part);
       file = SD_MMC.open(partPath, FILE_WRITE);
-      if (!file) { ok = false; break; }
+      if (!file) { diskFull = true; part--; break; } // no room for another segment
       writeWavHeader(file, PCM_SEGMENT_BYTES);
     }
 
@@ -1845,10 +1800,14 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
   }
   logHeap("record end");
 
-  if (!ok || written == 0) {
+  // Only a take with NOTHING usable is discarded. A real read/write error that
+  // still produced audio keeps that audio: the segments on the card may be the
+  // only copy of what the patient said, so they are saved and uploaded as a
+  // (shorter) session rather than deleted to keep the error path tidy.
+  if (written == 0) {
     hideProgressOverlay();
-    showStatus("Record failed", "I2S read or SD write error");
-    for (int k = 0; k <= part; k++) { // clean up partial segments
+    showStatus("Record failed", ok ? "No audio captured" : "I2S read or SD write error");
+    for (int k = 0; k <= part; k++) { // clean up empty segments
       sessionPartPath(partPath, sizeof(partPath), wavPath, k);
       SD_MMC.remove(partPath);
     }
@@ -1859,6 +1818,17 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
   // server stitches them as they upload (chunked). Recording ends instantly -
   // no "Saving..." wait.
   hideProgressOverlay();
+
+  // Tell the SLP the take ended on its own, so a short recording is never a
+  // silent surprise. The audio is already safe either way.
+  if (diskFull) {
+    showStatus("SD card full", "Recording stopped and saved - free space soon");
+    pumpGuiMs(1800);
+  } else if (!ok) {
+    showStatus("Recording stopped early", "Audio up to this point was saved");
+    pumpGuiMs(1800);
+  }
+
   *outPcmBytes = written;
   Serial.printf("Recording complete. %d segment(s), %lu PCM bytes (no merge)\n",
                 part + 1, (unsigned long)written);
@@ -2813,8 +2783,7 @@ static void runRecordSavePlaySession(bool review = true,
 
   uint32_t durationSec = pcmBytes / PCM_BYTES_PER_SEC;
   saveMetadataToSd(jsonPath, wavPath, pcmBytes, durationSec, sessionNum);
-  bumpTotalRecordings();    // lifetime count for the admin dashboard (survives trim)
-  trimSessionsToMax(dir);   // keep only 5 newest; older sessions deleted here
+  bumpTotalRecordings();    // lifetime count for the admin dashboard
   // Update the cached usage by what we just wrote, so the Home storage chip is
   // right without a fresh f_getfree scan.
   g_sdUsedCache += pcmBytes;
@@ -2949,7 +2918,6 @@ void setup()
   }
   loadPatientsFromSd();                   // server/app-pushed list, if any
   loadTotalRecordings();                   // lifetime recording count (NVS) for telemetry
-  purgeSyncedAudio();                      // reclaim SD: drop audio already synced
   sdRefreshUsage(true);                    // prime the usage cache so the first
                                            // record-begin / Home never pays f_getfree
   // No merge to recover: segments left by a crash are just an unsynced session
@@ -3161,8 +3129,25 @@ void loop()
       if (currentState == SESSIONS) {
         char dir[96];
         patientDirPath(dir, sizeof(dir));
+        // Take the SD bus and WAIT for the net task to actually drop its upload
+        // before touching the numbering. deleteSession() renames every later
+        // session down one slot, so session 6 becomes session 5 while the uploader
+        // still believes it is streaming session 5: its next segment open would
+        // read session 6's audio into session 5's upload and the server would
+        // assemble one WAV out of two different recordings. Setting uiSdBusy is
+        // asynchronous - the net task only reacts on its next pass - so poll until
+        // the upload is really down (connUploadProgress() is false once it is).
+        connSetUiSdBusy(true);
+        uint32_t sent, total, guard = millis() + 3000;
+        while (connUploadProgress(&sent, &total) && (int32_t)(millis() - guard) < 0) {
+          lv_timer_handler();
+          delay(5);
+        }
         deleteSession(dir, (uint32_t)arg);
-        showSessionsScreen();   // rebuild the list from disk
+        connNotifySessionsRenumbered();  // resume point + strikes now point at
+                                         // the wrong session numbers - drop them
+        connSetUiSdBusy(false);   // uploads resume; the aborted one restarts later
+        showSessionsScreen();     // rebuild the list from disk
       }
       break;
 

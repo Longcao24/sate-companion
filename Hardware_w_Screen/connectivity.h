@@ -51,6 +51,9 @@ bool        connUploadingSession(char *pidOut, size_t pidLen, uint32_t *numOut);
 // Percent (0-100) of the in-flight upload, or -1 when idle.
 int         connUploadPercent();
 void        connNotifyNewSession();  // a recording was just saved
+// Sessions were deleted/renumbered on the SD card. Everything the uploader
+// remembers is keyed by session number, so it is all invalid now.
+void        connNotifySessionsRenumbered();
 
 // Live status for the on-device Connection screen.
 const char *connStatusText();        // e.g. "Connecting to Wi-Fi \"Clinic\"..."

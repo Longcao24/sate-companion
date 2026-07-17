@@ -353,6 +353,61 @@ static void writeSyncMarker(const char *pid, uint32_t num)
   pendDirty = true; // a session just synced - pending count changed
 }
 
+// Defined with the uploader further down; needed here to reset its memory.
+static void upResumeClear();
+static void strikeClearAll();
+
+// Re-upload everything the card still holds: drop the .synced marker of every
+// session that STILL HAS AUDIO, so the sweep picks it up again.
+//
+// Only sessions with audio. A session whose audio an older firmware purged after
+// upload is left alone: its .synced marker is the ONLY thing keeping its slot
+// occupied, and scanPendingLocked() stops at the first slot with no wav, no
+// parts and no marker. Clearing those markers would punch a hole in the
+// numbering and hide every session after it - the exact failure the comment in
+// scanPendingLocked() warns about.
+//
+// Re-uploading a session the server already has is safe: /sessions/chunk answers
+// the final slice from the existing row (after confirming its object is really
+// there), so it costs bandwidth, not correctness.
+static int resyncAll()
+{
+  int cleared = 0;
+  File root = SD_MMC.open("/sate/patients");
+  if (!root) return 0;
+  File entry;
+  while ((entry = root.openNextFile())) {
+    if (!entry.isDirectory()) { entry.close(); continue; }
+    const char *full = entry.name();
+    const char *p = strrchr(full, '/');
+    char pid[24];
+    snprintf(pid, sizeof(pid), "%s", p ? p + 1 : full); // copy: name() dies with entry
+    entry.close();
+
+    char wav[160], part0[200], mark[160];
+    for (uint32_t i = 1; i <= 9999; i++) {
+      sessionPath(wav, sizeof(wav), pid, i, "wav");
+      sessionPartFile(part0, sizeof(part0), pid, i, 0);
+      sessionPath(mark, sizeof(mark), pid, i, "synced");
+      bool hasWav   = SD_MMC.exists(wav);
+      bool hasParts = SD_MMC.exists(part0);
+      bool hasMark  = SD_MMC.exists(mark);
+      if (!hasWav && !hasParts && !hasMark) break;   // end of this patient
+      if (hasMark && (hasWav || hasParts)) {         // audio still here - resend it
+        SD_MMC.remove(mark);
+        cleared++;
+      }
+    }
+  }
+  root.close();
+  pendDirty = true;
+  upResumeClear();
+  strikeClearAll();
+  uploadSweepDue = true;
+  Serial.printf("[CONN] resync_all: cleared %d marker(s)\n", cleared);
+  return cleared;
+}
+
 // =============================================================================
 // BLE
 // =============================================================================
@@ -581,14 +636,18 @@ static bool httpJson(const char *method, const char *path, const char *body,
 }
 
 // POST one ~1 MB slice of the WAV at byte `offset` to /api/sessions/chunk. The
-// GUI is serviced between writes so the screen stays smooth; returns true on a
-// 2xx. The server appends in order (and is idempotent if a slice is re-sent), so
-// a dropped connection only costs this slice - retried at the same offset.
-static bool sendSessionChunk(const char *host, int port, const char *metaQuery,
-                             size_t serverOffset, size_t fileSeek, size_t len,
-                             bool isFinal, File &wf)
+// server appends in order (and is idempotent if a slice is re-sent), so a dropped
+// connection only costs this slice - retried at the same offset.
+//
+// Returns the HTTP status, or 0 if the request never got a response. The CODE
+// matters, not just success: a 409 means the server's temp blob disagrees with our
+// resume offset, which is the one case where restarting the session from byte 0 is
+// correct. Every other failure keeps the offset so we resume instead of restart.
+static int sendSessionChunk(const char *host, int port, const char *metaQuery,
+                            size_t serverOffset, size_t fileSeek, size_t len,
+                            bool isFinal, size_t total, File &wf)
 {
-  if (WiFi.status() != WL_CONNECTED) return false;
+  if (WiFi.status() != WL_CONNECTED) return 0;
 
   // Reuse the SAME warm HTTPS client the command poll uses (keep-alive), instead
   // of opening a fresh TLS connection per chunk. A fresh handshake under WiFi+BLE
@@ -602,17 +661,25 @@ static bool sendSessionChunk(const char *host, int port, const char *metaQuery,
   if (defaultPort) snprintf(hostport, sizeof(hostport), "%s", host);
   else             snprintf(hostport, sizeof(hostport), "%s:%d", host, port);
   // metaQuery is "<prefix>/api/sessions/chunk?...query..." (path + query, no host).
-  snprintf(url, sizeof(url), "%s://%s%s&offset=%u&final=%d",
+  // `total` lets the server verify the finished blob is exactly the session we
+  // streamed. Without it a resume that mis-maps an offset could assemble a short
+  // or padded WAV and still return 2xx.
+  snprintf(url, sizeof(url), "%s://%s%s&offset=%u&final=%d&total=%u",
            tls ? "https" : "http", hostport, metaQuery,
-           (unsigned)serverOffset, isFinal ? 1 : 0);
+           (unsigned)serverOffset, isFinal ? 1 : 0, (unsigned)total);
 
-  if (!wf.seek(fileSeek)) return false;
+  if (!wf.seek(fileSeek)) return 0;
 
   s_http.setReuse(true);
   s_http.setConnectTimeout(6000);   // cap a flaky connect so a bad attempt fails fast
-  s_http.setTimeout(12000);
+  // The final slice is not like the others: the server assembles the WHOLE session
+  // on it (download every part, stitch, store, kick the AI pipeline). On a long
+  // recording that is far more than the 12 s a normal slice needs, and timing out
+  // here means retrying the whole assembly forever - the stall we are fixing. Give
+  // the final request room; ordinary slices keep the tight timeout.
+  s_http.setTimeout(isFinal ? 60000 : 12000);
   bool began = tls ? s_http.begin(s_httpsClient, url) : s_http.begin(s_httpClient, url);
-  if (!began) return false;
+  if (!began) return 0;
   s_http.addHeader("Content-Type", "audio/wav");
   if (cfgDeviceKey[0]) {
     char auth[80];
@@ -625,7 +692,7 @@ static bool sendSessionChunk(const char *host, int port, const char *metaQuery,
   // Stream, so HTTPClient reads it directly - no big RAM buffer of our own.
   int code = s_http.sendRequest("POST", static_cast<Stream *>(&wf), len);
   s_http.end();   // reuse(true): returns the socket to the pool, not a hard close
-  return code >= 200 && code < 300;
+  return code;
 }
 
 // Upload one pending session in ~1 MB resumable chunks. A big single POST means
@@ -649,6 +716,115 @@ static bool     upLegacy = false;  // single .wav vs segment files
 static int      upSrcIdx = 0, upLastSrc = 0;
 static size_t   upSrcBase = 0, upSrcLen = 0, upSrcPos = 0;
 static size_t   upServerOffset = 0, upTotal = 0;
+static size_t   upOpenAtPos = 0;   // where to seek when the next source opens (resume)
+// Set only when the server 2xx'd the final=1 slice - i.e. it assembled and STORED
+// the session. The .synced marker is written off this and nothing else: it is the
+// one fact that means "the server has this recording", and it must never be
+// inferred from having walked to the end of the segment list.
+static bool     upFinalAcked = false;
+
+// ---- resume point ------------------------------------------------------------
+// A stalled session used to restart from byte 0: beginUpload() reset
+// upServerOffset, the server saw offset=0 and TRUNCATED its temp blob back to the
+// first slice, so a multi-MB session could retry forever without ever advancing -
+// the "uploading, no progress" backlog. Remember how far the server actually got
+// and hand the same session back at that offset. Cleared once it lands, or when
+// the server reports an offset gap (then we legitimately start over).
+static char     upResumePid[24] = "";
+static uint32_t upResumeNum = 0;
+static size_t   upResumeOffset = 0;
+
+static void upResumeSave(const char *pid, uint32_t num, size_t offset)
+{
+  snprintf(upResumePid, sizeof(upResumePid), "%s", pid);
+  upResumeNum = num;
+  upResumeOffset = offset;
+}
+
+static void upResumeClear()
+{
+  upResumePid[0] = '\0';
+  upResumeNum = 0;
+  upResumeOffset = 0;
+}
+
+static bool upResumeMatches(const char *pid, uint32_t num)
+{
+  return upResumeOffset > 0 && upResumeNum == num && !strcmp(upResumePid, pid);
+}
+
+// ---- per-session strikes -----------------------------------------------------
+// The sweep used to always take pendTable[0]. One session that could not upload
+// (missing/zero-length source, or a server that keeps failing it) blocked every
+// other pending session forever - 8 recordings queued, none moving. Each session
+// now carries its own strike count; at UPLOAD_MAX_STRIKES it is PARKED and the
+// sweep moves on to the next one. Parking is temporary: a parked session is tried
+// again after UPLOAD_PARK_RETRY_MS, and go-online / sync_now clears all parks, so
+// a transient failure still drains - it just stops holding the queue hostage.
+struct UploadStrike {
+  char     pid[20];
+  uint32_t num;
+  int      strikes;
+  uint32_t retryAt;
+};
+static UploadStrike upStrikes[32];
+static int          upStrikeCount = 0;
+static const int      UPLOAD_MAX_STRIKES   = 3;
+static const uint32_t UPLOAD_PARK_RETRY_MS = 300000; // 5 min
+
+static UploadStrike *strikeFind(const char *pid, uint32_t num)
+{
+  for (int i = 0; i < upStrikeCount; i++)
+    if (upStrikes[i].num == num && !strcmp(upStrikes[i].pid, pid)) return &upStrikes[i];
+  return nullptr;
+}
+
+// Count one failure against a session. Returns true once it is parked.
+static bool strikeAdd(const char *pid, uint32_t num)
+{
+  UploadStrike *s = strikeFind(pid, num);
+  if (!s) {
+    if (upStrikeCount >= (int)(sizeof(upStrikes) / sizeof(upStrikes[0]))) {
+      // Table full: drop the oldest entry rather than stop tracking new failures.
+      memmove(&upStrikes[0], &upStrikes[1], sizeof(upStrikes[0]) * (upStrikeCount - 1));
+      upStrikeCount--;
+    }
+    s = &upStrikes[upStrikeCount++];
+    snprintf(s->pid, sizeof(s->pid), "%s", pid);
+    s->num = num;
+    s->strikes = 0;
+  }
+  s->strikes++;
+  s->retryAt = millis() + UPLOAD_PARK_RETRY_MS;
+  return s->strikes >= UPLOAD_MAX_STRIKES;
+}
+
+static void strikeClear(const char *pid, uint32_t num)
+{
+  for (int i = 0; i < upStrikeCount; i++) {
+    if (upStrikes[i].num == num && !strcmp(upStrikes[i].pid, pid)) {
+      memmove(&upStrikes[i], &upStrikes[i + 1], sizeof(upStrikes[0]) * (upStrikeCount - i - 1));
+      upStrikeCount--;
+      return;
+    }
+  }
+}
+
+// Wipe every park. Called when the situation genuinely changed (just came online,
+// user pressed sync) so a backlog parked by an old outage retries immediately.
+static void strikeClearAll() { upStrikeCount = 0; }
+
+// A session is skippable only while parked AND inside its retry cooldown.
+static bool strikeParked(const char *pid, uint32_t num, uint32_t now)
+{
+  UploadStrike *s = strikeFind(pid, num);
+  if (!s || s->strikes < UPLOAD_MAX_STRIKES) return false;
+  if ((int32_t)(now - s->retryAt) >= 0) {   // cooldown elapsed - give it another go
+    s->strikes = 0;
+    return false;
+  }
+  return true;
+}
 
 static bool beginUpload(const PendingEntry &pe)
 {
@@ -695,17 +871,26 @@ static bool beginUpload(const PendingEntry &pe)
   } else {
     upLegacy = false;
     int cnt = 0;
+    int lastData = -1;   // last segment that actually carries audio
     for (int k = 0;; k++) {
       sessionPartFile(pp, sizeof(pp), pe.patientId, pe.num, k);
       if (!SD_MMC.exists(pp)) break;
       File f = SD_MMC.open(pp, FILE_READ);
       size_t sz = f ? f.size() : 0;
       if (f) f.close();
-      upTotal += (k == 0) ? sz : ((sz > 44) ? sz - 44 : 0); // part0 keeps header
+      size_t logical = (k == 0) ? sz : ((sz > 44) ? sz - 44 : 0); // part0 keeps header
+      upTotal += logical;
+      if (logical > 0) lastData = k;
       cnt++;
     }
-    if (cnt == 0) return false;
-    upLastSrc = cnt - 1;
+    // upLastSrc MUST be the last segment with data, not simply the last file on
+    // disk. Stopping a take exactly on a minute boundary leaves a trailing 44-byte
+    // header-only segment; when that was upLastSrc, its slice had len==0, so the
+    // final=1 request was never sent - yet uploadStep still reached the "done"
+    // branch and wrote the .synced marker. The session was marked synced while the
+    // server had only unassembled parts and no session row at all.
+    if (cnt == 0 || lastData < 0) return false;
+    upLastSrc = lastData;
   }
   if (upTotal == 0) return false;
 
@@ -741,7 +926,51 @@ static bool beginUpload(const PendingEntry &pe)
   upSrcIdx = 0;
   upHasFile = false;
   upServerOffset = 0;
+  upOpenAtPos = 0;
   upRetries = 0;
+  upFinalAcked = false;
+
+  // Resume: the server already holds upResumeOffset bytes of THIS session, so map
+  // that logical offset back onto (segment index, position inside it) and carry on
+  // from there. Legacy single-wav sessions map 1:1; segment sessions must account
+  // for the 44-byte header that every part>0 contributes to the file but NOT to the
+  // logical stream. Anything inconsistent (offset past the end) falls back to 0.
+  if (upResumeMatches(pe.patientId, pe.num) && upResumeOffset < upTotal) {
+    size_t want = upResumeOffset, seen = 0;
+    int k = 0;
+    bool mapped = false;
+    for (;; k++) {
+      size_t logical;
+      if (upLegacy) {
+        logical = upTotal;
+      } else {
+        sessionPartFile(pp, sizeof(pp), pe.patientId, pe.num, k);
+        if (!SD_MMC.exists(pp)) break;
+        File f = SD_MMC.open(pp, FILE_READ);
+        size_t sz = f ? f.size() : 0;
+        if (f) f.close();
+        logical = (k == 0) ? sz : ((sz > 44) ? sz - 44 : 0);
+      }
+      if (want < seen + logical) {          // the offset lands inside this source
+        upSrcIdx    = k;
+        upOpenAtPos = want - seen;
+        upServerOffset = upResumeOffset;
+        mapped = true;
+        break;
+      }
+      seen += logical;
+      if (upLegacy) break;
+    }
+    if (mapped) {
+      Serial.printf("[CONN] resume %s session %lu at %u/%u\n", pe.patientId,
+                    (unsigned long)pe.num, (unsigned)upServerOffset, (unsigned)upTotal);
+    } else {
+      upSrcIdx = 0;
+      upOpenAtPos = 0;
+      upServerOffset = 0;
+    }
+  }
+
   upActive = true;
   upStartMs = millis();
   setStatus("Uploading session to SATE...");
@@ -760,15 +989,22 @@ static void uploadStep()
     else          sessionPartFile(path, sizeof(path), upPid, upNum, upSrcIdx);
     upFile = SD_MMC.open(path, FILE_READ);
     if (!upFile) {
+      // Source vanished mid-session. Strike it so the sweep moves on to the other
+      // pending sessions instead of retrying this one forever.
       upActive = false;
+      strikeAdd(upPid, upNum);
+      upResumeClear();
       sateHookUploadEnd();
+      setStatus("Online (Wi-Fi) - %s", ipText);
       Serial.printf("[CONN] upload: cannot open %s\n", path);
       return;
     }
     size_t fsz = upFile.size();
     upSrcBase = (upLegacy || upSrcIdx == 0) ? 0 : 44; // part>0: skip its WAV header
     upSrcLen  = (fsz > upSrcBase) ? fsz - upSrcBase : 0;
-    upSrcPos  = 0;
+    upSrcPos  = upOpenAtPos;     // 0 normally; >0 when resuming into this segment
+    if (upSrcPos > upSrcLen) upSrcPos = upSrcLen;
+    upOpenAtPos = 0;
     upHasFile = true;
   }
 
@@ -778,16 +1014,45 @@ static void uploadStep()
   bool isFinal   = (upSrcIdx == upLastSrc && lastOfSrc);
   size_t fileSeek = upSrcBase + upSrcPos;
 
-  if (len > 0 &&
-      !sendSessionChunk(upHost, upPort, upMetaQuery, upServerOffset, fileSeek, len, isFinal, upFile)) {
-    if (++upRetries >= 4) {
-      if (upHasFile) { upFile.close(); upHasFile = false; }
-      upActive = false; // sweep retries the whole session later (from offset 0)
-      sateHookUploadEnd();
-      Serial.printf("[CONN] upload stalled at %u/%u, will retry\n",
-                    (unsigned)upServerOffset, (unsigned)upTotal);
+  if (len > 0) {
+    int code = sendSessionChunk(upHost, upPort, upMetaQuery, upServerOffset,
+                                fileSeek, len, isFinal, upTotal, upFile);
+    bool ok = code >= 200 && code < 300;
+    if (!ok) {
+      // 409 = the server's temp blob doesn't line up with our offset (e.g. it was
+      // truncated by an older firmware's restart). That is the ONLY case where
+      // starting over is right; drop the resume point so the next pass sends from 0.
+      if (code == 409) {
+        if (upHasFile) { upFile.close(); upHasFile = false; }
+        upActive = false;
+        upResumeClear();
+        // Strike it too: a restart-from-0 should succeed, so a session that keeps
+        // 409ing is broken and must not spin here while others wait.
+        strikeAdd(upPid, upNum);
+        sateHookUploadEnd();
+        setStatus("Online (Wi-Fi) - %s", ipText);
+        Serial.printf("[CONN] upload %s session %lu: offset gap at %u, restarting\n",
+                      upPid, (unsigned long)upNum, (unsigned)upServerOffset);
+        return;
+      }
+      if (++upRetries >= 4) {
+        if (upHasFile) { upFile.close(); upHasFile = false; }
+        upActive = false;
+        // Keep the resume point: the next attempt continues from here instead of
+        // re-sending the whole session (which also made the server truncate).
+        upResumeSave(upPid, upNum, upServerOffset);
+        bool parked = strikeAdd(upPid, upNum);
+        sateHookUploadEnd();
+        // Status used to stay "Uploading session to SATE..." forever after a stall,
+        // so the screen claimed progress that wasn't happening.
+        setStatus("Online (Wi-Fi) - %s", ipText);
+        Serial.printf("[CONN] upload stalled at %u/%u (http %d)%s\n",
+                      (unsigned)upServerOffset, (unsigned)upTotal, code,
+                      parked ? ", parked - other sessions first" : ", will retry");
+      }
+      return;
     }
-    return;
+    if (isFinal) upFinalAcked = true;   // server assembled + stored the session
   }
 
   // Slice sent (or empty source) - advance.
@@ -801,18 +1066,24 @@ static void uploadStep()
     upHasFile = false;
     if (upSrcIdx >= upLastSrc) {
       upActive = false;
-      writeSyncMarker(upPid, upNum);
-      // Free the local audio now that it's on the server - the .synced marker
-      // keeps the session counted so the SD card doesn't fill with synced audio.
-      char ap[200];
-      if (upLegacy) { sessionPath(ap, sizeof(ap), upPid, upNum, "wav"); SD_MMC.remove(ap); }
-      else {
-        for (int k = 0;; k++) {
-          sessionPartFile(ap, sizeof(ap), upPid, upNum, k);
-          if (!SD_MMC.exists(ap)) break;
-          SD_MMC.remove(ap);
-        }
+      if (!upFinalAcked) {
+        // Walked off the end without the server ever acking final=1. Do NOT mark
+        // this synced - the server has no session row for it. Retry it later.
+        upResumeSave(upPid, upNum, upServerOffset);
+        strikeAdd(upPid, upNum);
+        sateHookUploadEnd();
+        setStatus("Online (Wi-Fi) - %s", ipText);
+        Serial.printf("[CONN] %s session %lu ended without a final ack - not synced\n",
+                      upPid, (unsigned long)upNum);
+        return;
       }
+      writeSyncMarker(upPid, upNum);
+      // The local audio is deliberately KEPT. The device is the only copy of a
+      // take until the user says otherwise, so nothing here (and nothing on the UI
+      // core) deletes it automatically - a .synced session can be re-uploaded and
+      // played back on-device. Sessions are removed only by an explicit user delete.
+      strikeClear(upPid, upNum);
+      upResumeClear();
       sateHookUploadEnd();
       Serial.printf("[CONN] uploaded %s session %lu (%u bytes) in %lu ms\n",
                     upPid, (unsigned long)upNum, (unsigned)upServerOffset,
@@ -883,6 +1154,7 @@ static void enterWifiOnline()
   nextHeartbeat = 0;       // scan pending immediately
   nextCmdPoll = 0;         // and poll commands immediately
   uploadSweepDue = true;   // push pending sessions right away
+  strikeClearAll();        // fresh link: retry anything parked by the last outage
   patientsFetchDue = true; // pull the latest patient list
   snprintf(ipText, sizeof(ipText), "%s", WiFi.localIP().toString().c_str());
   setStatus("Online (Wi-Fi) - %s", ipText);
@@ -1282,6 +1554,12 @@ static void runRemoteCommand(const char *op)
   Serial.printf("[CONN] remote command: %s\n", op);
   if (!strcmp(op, "sync_now")) {
     uploadSweepDue = true;
+    strikeClearAll();   // an explicit sync means "try everything again, now"
+  } else if (!strcmp(op, "resync_all")) {
+    // Full re-backup: re-send every session whose audio is still on the card,
+    // including ones already marked synced. Recovers sessions the server
+    // acknowledged but never actually stored.
+    resyncAll();
   } else if (!strcmp(op, "reload_patients")) {
     fetchPatients();
   } else if (!strcmp(op, "record")) {
@@ -1611,11 +1889,22 @@ void connLoop()
           uploadStep();
         } else if (uploadSweepDue) {
           scanPending();
-          if (pendCount > 0) {
-            if (!beginUpload(pendTable[0])) uploadSweepDue = false; // can't open; stop
-          } else {
-            uploadSweepDue = false; // nothing left to send
+          // Take the first pending session that isn't parked. This used to be a
+          // hard pendTable[0]: one unsendable session sat at the head and the whole
+          // backlog behind it never moved. A failed beginUpload() now strikes that
+          // session and the sweep tries the NEXT one on the following pass, so the
+          // queue always drains around a bad entry instead of stopping dead.
+          bool started = false;
+          for (int i = 0; i < pendCount; i++) {
+            if (strikeParked(pendTable[i].patientId, pendTable[i].num, now)) continue;
+            if (beginUpload(pendTable[i])) { started = true; break; }
+            strikeAdd(pendTable[i].patientId, pendTable[i].num);
+            Serial.printf("[CONN] cannot begin %s session %lu, skipping\n",
+                          pendTable[i].patientId, (unsigned long)pendTable[i].num);
           }
+          // Nothing startable right now (all sent, all parked, or all unopenable).
+          // The heartbeat re-arms the sweep, and parks expire, so this retries later.
+          if (!started) uploadSweepDue = false;
         }
       }
       else if (upActive) {
@@ -1627,6 +1916,9 @@ void connLoop()
         // offset once the UI releases the bus (same path as an upload stall).
         if (upHasFile) { upFile.close(); upHasFile = false; }
         upActive = false;
+        // Not a failure - the UI just needs the card. Keep the resume point (so we
+        // continue where we left off) and do NOT strike the session.
+        upResumeSave(upPid, upNum, upServerOffset);
         sateHookUploadEnd();
       }
       break;
@@ -1772,6 +2064,20 @@ void connSetTelemetry(int batteryPct, uint32_t totalRecordings, int batteryMv)
 void connSetUiSdBusy(bool busy)
 {
   uiSdBusy = busy;
+}
+
+// A delete renumbers every later session (session 6 becomes session 5). The
+// uploader's resume point and strike table are both keyed by session number, so
+// after a renumber they silently refer to DIFFERENT audio - a resume would stream
+// the wrong recording into a half-finished upload. Throw both away; the sweep just
+// starts the affected session again from the beginning.
+// Safe to call from the UI core: callers hold the SD bus (connSetUiSdBusy(true)),
+// which keeps the net task out of the upload/sweep block entirely.
+void connNotifySessionsRenumbered()
+{
+  pendDirty = true;
+  upResumeClear();
+  strikeClearAll();
 }
 
 void connNotifyNewSession()
