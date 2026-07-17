@@ -46,6 +46,72 @@ arduino-cli upload -p /dev/cu.usbmodem101 \
 | 1.0.0 | Direct device → Supabase upload + AI → `recordings` |
 | 1.0.2 | Supabase apikey header, TLS for HTTPS, chunk-path fix, register logging |
 | 1.0.3 | **Touch-lag fix**: poll 3 s→12 s, `setInsecure()` once, GUI pump around poll ([02](02-firmware.md#touch-lag-fix-fw-103)) |
+| 1.5.9 | **Offline-backlog fix + no auto-delete** (see below) |
+| 1.5.10 | Adds the `resync_all` command |
+
+### Publishing an OTA release
+
+Publishing only marks a build as "latest" (a row in `sate_firmware` + the `.bin` in the public
+`firmware` bucket). **It does not flash anything** — a recorder only updates when an `ota` command
+is queued for that specific device. So publishing is safe; flashing is per-device and deliberate.
+
+```bash
+# 1. build, 2. upload the bin, 3. verify it byte-for-byte, 4. insert the release row
+npx supabase storage cp ota_build/sate-fw-<v>.bin ss:///firmware/sate_<v>.bin \
+  --linked --experimental --content-type application/octet-stream
+curl -s https://<ref>.supabase.co/storage/v1/object/public/firmware/sate_<v>.bin -o /tmp/check.bin
+cmp ota_build/sate-fw-<v>.bin /tmp/check.bin   # must match before you insert the row
+```
+
+The file must be named `sate_<version>.bin` (what `publishFirmware` writes and what the web card's
+version regex expects).
+
+### ⚠️ OTA fails with `err-get-1` on a device with a backlog — reboot it first
+
+A recorder that has been grinding through uploads for a while **cannot start an OTA**:
+
+```
+ota_state = "err-get-1"     # http.GET() → -1 = HTTPC_ERROR_CONNECTION_REFUSED
+```
+
+The web banner says *"Update didn't start"*, which is misleading — the device received the command
+and tried. `runOtaUpdate()` opens a **second** `WiFiClientSecure` while the command poller's client
+still holds a keep-alive session, and the mbedtls handshake needs a ~40 KB contiguous block. On a
+heap fragmented by hours of 1 MB chunk uploads that allocation fails. A freshly-booted device with
+the same URL works — which is why a spare board OTAs fine and the stuck one doesn't.
+
+**Diagnosis tell:** the heartbeat reporting `err-get-1` reaches the server over the *same host* that
+just failed. Same host, same second, one client up and one down ⇒ resources, not network.
+
+**Fix — queue the reboot and the OTA separately:**
+
+```sql
+insert into sate_device_commands (device_id, op) values ('dev-sate-xxxx', 'reboot');
+-- wait for it to reboot (ota_state resets to 'idle', last_seen goes fresh), THEN:
+insert into sate_device_commands (device_id, op, patient) values ('dev-sate-xxxx', 'ota',
+  '{"url":"https://<ref>.supabase.co/storage/v1/object/public/firmware/sate_<v>.bin","version":"<v>"}'::jsonb);
+```
+
+`pollCommands()` runs **before** the upload block in `connLoop`'s `CONN_WIFI_ONLINE` pass and
+`runOtaUpdate()` is called synchronously inside it, so the first poll after boot flashes with a
+clean heap before the uploader ever starts. Do **not** queue both at once — they'd arrive in the
+same poll. Verified working twice on `SATE-D0FDD4`.
+
+### Re-uploading everything (`resync_all`, fw ≥1.5.10)
+
+Drops the `.synced` marker of every session **whose audio is still on the card**, so the whole
+backlog re-uploads. Use it to recover sessions the server acknowledged but never actually stored.
+
+```sql
+insert into sate_device_commands (device_id, op) values ('dev-sate-xxxx', 'resync_all');
+```
+
+Sessions whose audio an older firmware already purged keep their marker on purpose: that marker is
+the only thing holding their slot, and `scanPendingLocked()` stops at the first slot with no wav,
+no parts and no marker — clearing it would hide every later session.
+
+Re-uploading a session the server already has is safe: `/sessions/chunk` answers the final slice
+from the existing row (after confirming its object really exists), so it costs bandwidth only.
 
 ## Backend (Supabase edge functions)
 

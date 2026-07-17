@@ -57,13 +57,31 @@ SLP user-JWT routes:
 | `/sessions` | GET | List uploaded sessions |
 | `/sessions/:id/audio` | GET | Stream session audio |
 
-### Chunk upload assembly
+### Chunk upload assembly (v12+)
 
-`/sessions/chunk?...&offset=&final=` appends ~1 MB slices into one object; on `final=1` the
-function **patches the WAV header** (RIFF/data sizes) so the stitched file is a valid WAV. Slices
-are idempotent (re-sending the same offset is safe). On completion the function inserts
-`sate_device_sessions` and fires `process-device-session` fire-and-forget
-(`EdgeRuntime.waitUntil(triggerProcessor(session_id))`).
+`/sessions/chunk?...&offset=&final=&total=` stores each ~1 MB slice as its **own object** under
+`<device>/_tmp/<patient>/s<n>/<zero-padded-offset>.part`. On `final=1` the function lists the parts,
+verifies they form one gap-free stream (from the listed sizes, before downloading a byte), pulls
+them in parallel batches into a single pre-allocated buffer, **patches the WAV header** (RIFF/data
+sizes), stores the WAV, inserts `sate_device_sessions`, fires `process-device-session`, and only
+then deletes the parts. Re-sending a slice is idempotent (`upsert`).
+
+Rules that are load-bearing — an earlier version broke each one and cost a 62-minute recording:
+
+- **Never rewrite a whole temp blob per slice.** v11 downloaded + re-uploaded the entire blob on
+  every slice: quadratic, so a 30-min session pushed ~1.5 GB through the function and the late
+  slices blew past the firmware's timeout. Each timeout restarted at offset 0, which truncated the
+  blob back to the first slice — a backlog that could never drain.
+- **`offset=0` purges the part dir first.** Session numbers are reused after a delete renumbers
+  sessions, so stale parts from an abandoned attempt must not be stitched onto new audio.
+- **Part dir is scoped by patient.** Session numbers restart at 1 per patient; `s1` alone collides.
+- **A failed storage upload MUST throw** (see `storeSessionRecord`). It used to `console.error` and
+  insert the row anyway, returning 2xx — the recorder marked the session synced while the server
+  held a row pointing at nothing.
+- **`total=` is verified** against the assembled length (firmware ≥1.5.9) before storing; a mismatch
+  is a 409 and the device restarts the session.
+- **The idempotency probe checks the object, not just the row.** A row is not proof the audio
+  landed; answering "already stored" for a ghost row strands the recording on the device forever.
 
 ### `process-device-session`
 
@@ -85,9 +103,36 @@ double-processing.
 
 | Bucket | Visibility | Holds |
 |--------|------------|-------|
-| `device-sessions` | private | Raw device-uploaded WAVs (pre-processing) |
+| `device-sessions` | private | Raw device-uploaded WAVs (pre-processing) + `_tmp/` chunk parts |
 | `recordings` | private | Final WAVs backing `recordings` rows (manual + device) |
+| `firmware` | public | OTA `.bin` releases (`sate_<version>.bin`) |
 | `mobile` | public | Mobile uploads |
+
+### ⚠️ The project-wide file size limit overrides the bucket's
+
+**A bucket's `file_size_limit` is not the real ceiling.** The project's *global* file size limit
+(Dashboard → Storage → Settings) takes precedence, and it is **50 MB by default**. `device-sessions`
+was set to 200 MB, yet a 118 MB WAV was rejected with:
+
+```
+413 Payload too large — "The object exceeded the maximum allowed size"
+```
+
+A full-length take is ~118 MB (`RECORD_MAX_SECONDS` 3700 s × 32 KB/s), so the global limit **must**
+stay well above that — it is currently **500 MB**. On the Free plan 50 MB is a hard cap; raising it
+needs Pro or above.
+
+This cost a real 62-minute recording: the 413 was swallowed by `storeSessionRecord`, the row was
+inserted anyway, the device got a 2xx and marked the session synced. Two independent bugs — a
+silent limit and a swallowed error — had to line up. Both are fixed, but check this limit first if
+large sessions land as rows with `process_error: "download failed: Object not found"`.
+
+Probe the real ceiling empirically rather than reading settings:
+
+```bash
+dd if=/dev/zero of=/tmp/p.bin bs=1m count=120
+npx supabase storage cp /tmp/p.bin ss:///device-sessions/_probe/p.bin --linked --experimental
+```
 
 ## Migration
 

@@ -31,3 +31,6 @@ scripts/.publish.env
 
 # Plaud SDK binaries — proprietary, copied in per-machine (see plaud-integration.md)
 modules/plaud-sate/ios/Frameworks/
+
+# Supabase CLI link state (per-machine, written by `supabase link`)
+supabase/.temp/

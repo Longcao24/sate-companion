@@ -118,6 +118,23 @@ Durable lessons — check the ones relevant to what you're touching. Version num
 - **Admin page** `/admin` manages ALL devices + firmware system-wide, gated by the
   `sate_admins` table (by email). Don't expose admin routes without that gate.
 
+**⚠️ Recorder audio is never auto-deleted (fw ≥1.5.9)**
+- The device holds the ONLY copy of a take until the user deletes it by hand. The three old reclaim
+  paths (post-upload purge, boot-time `purgeSyncedAudio`, 5-session `trimSessionsToMax`) are GONE.
+  The uploader deletes NOTHING; the only `SD_MMC.remove` in `connectivity.cpp` drops a `.synced`
+  marker in `resyncAll()`. Audio is removed in exactly one place, `deleteSessionFiles()` in the
+  `.ino`, reached only from the user tapping Delete. Don't add a second one.
+- A `.synced` marker only means "a POST returned 2xx", NOT "the audio is safe on the server". It is
+  written only when the server ACKs `final=1` (`upFinalAcked`). Never infer it from anything else.
+- **Storage's project-wide file size limit overrides the bucket's** and defaults to 50 MB. A
+  full-length take is ~118 MB. It's set to 500 MB now; if big sessions land as rows with
+  `process_error: "download failed: Object not found"`, check that first. A swallowed 413 plus a
+  `.synced` written on a false 2xx destroyed a 62-minute recording once — `storeSessionRecord` now
+  throws on upload failure. See `doc/05-backend-supabase.md`.
+- **OTA on a device with a backlog fails `err-get-1`** (fragmented heap ⇒ the 2nd TLS handshake
+  can't get its ~40 KB). Queue `reboot`, wait for it to come back, THEN queue `ota` — the first poll
+  after boot flashes with a clean heap. Recipe in `doc/07-runbook.md`.
+
 **Firmware / hardware (ESP32-S3, `Hardware_w_Screen/`)**
 - **GPIO34 cannot be used for battery ADC on the S3** — it bootloops the board. Battery
   sensing was disabled; a real ADC1 pin or a fuel-gauge IC is required.

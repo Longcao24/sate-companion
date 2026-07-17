@@ -103,7 +103,47 @@ BLE mode.
 `scanPending()` walks the SD card for un-synced sessions and caches the count (advertised in BLE
 manufacturer data so the app sees pending without connecting). A session is "done" only when its
 wav + parts + `.synced` marker state agree — the fix in fw 0.9.3 stopped a purged-audio session
-from hiding all later ones. Synced audio is purged on boot (self-cleaning SD).
+from hiding all later ones.
+
+### ⚠️ Nothing deletes a recording automatically (fw ≥1.5.9)
+
+**The device holds the only copy of a take until the user explicitly deletes it** from the Sessions
+screen. All three reclaim paths were removed in 1.5.9:
+
+| Removed | Did |
+|---------|-----|
+| post-upload purge (`uploadStep`) | dropped the audio the moment a session uploaded |
+| `purgeSyncedAudio()` | dropped every `.synced` session's audio at boot |
+| `trimSessionsToMax()` | capped the card at 5 sessions per patient |
+
+A `.synced` marker only ever proved that a POST returned 2xx — **not** that the audio is intact and
+usable on the server. That gap destroyed a recording (see [05](05-backend-supabase.md)). A 32 GB
+card holds ~278 h at 16 kHz mono, so keeping everything is cheap.
+
+The uploader deletes nothing — the only `SD_MMC.remove` left in `connectivity.cpp` drops a
+`.synced` marker in `resyncAll()`. **Audio is deleted in exactly one place**:
+`deleteSessionFiles()` in the `.ino`, reached only from `ACT_DELETE_SESSION` (the user tapping
+Delete). If you are adding a second, stop and reconsider.
+
+The take itself stops cleanly if the card ever does fill (`recordWavStreamToSd` watches the
+remaining space and finalises what it captured) — a full card is a normal end state, not an error,
+and it must never discard the minutes already recorded.
+
+### Uploader invariants
+
+- **`.synced` is written only when the server ACKs `final=1`** (`upFinalAcked`). Never infer success
+  from having walked to the end of the segment list: a take stopped exactly on a minute boundary
+  leaves a trailing 44-byte header-only segment, whose slice is `len == 0`, so the `final=1` request
+  is never sent. `upLastSrc` is therefore the last segment **with data**, not the last file on disk.
+- **The sweep rotates.** It takes the first *unparked* pending session, not `pendTable[0]`. One
+  unsendable session used to block the entire backlog forever. Each session gets its own strike
+  count; at 3 strikes it parks for 5 min, and go-online / `sync_now` clears all parks.
+- **A stall keeps its resume offset** and continues from there; restarting at 0 made the server
+  truncate its temp blob (pre-v12) and the session could never converge.
+- **Deleting a session renumbers every later one**, so the UI takes the SD bus, waits for the
+  uploader to release its file, and calls `connNotifySessionsRenumbered()` to drop the resume point
+  and strike table — both are keyed by session number and would otherwise point at *different audio*.
+- **`resync_all`** clears `.synced` for sessions that still have audio, forcing a full re-backup.
 
 ## Optimization summary
 
