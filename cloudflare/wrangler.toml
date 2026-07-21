@@ -1,0 +1,66 @@
+name = "sate-cf"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+compatibility_flags = ["nodejs_compat"]
+
+# D1 replaces Supabase Postgres. Create it, then paste the id printed by:
+#   npx wrangler d1 create sate
+[[d1_databases]]
+binding = "DB"
+database_name = "sate"
+database_id = "932209b4-068e-4e40-89fd-38583567f6c4"
+
+# R2 replaces Supabase Storage. One bucket; the Supabase bucket name is the key prefix
+# (recordings/, device-sessions/, firmware/, mobile/) — see src/storage.ts.
+#   npx wrangler r2 bucket create sate-storage
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "sate-storage"
+
+# Cloudflare Email Service — closes the password-reset gap (GoTrue mailed those for free;
+# nothing on Cloudflare did until Email Sending shipped, public beta Apr 2026).
+#
+# ⚠️ EMAIL_FROM's domain must be onboarded FIRST, in the dashboard — there is no wrangler
+# command for it: Compute > Email Service > Email Sending > Onboard Domain. Onboarding adds
+# MX/SPF/DKIM/DMARC records under the cf-bounce subdomain.
+#
+# An un-onboarded sender fails at send() time, NOT at deploy time. A green deploy proves
+# nothing about whether mail actually leaves; send a real reset to check.
+#
+# allowed_destination_addresses is deliberately unset: password resets go to whichever
+# address a user registered with, so the recipient set cannot be enumerated in advance.
+[[send_email]]
+name = "EMAIL"
+
+[vars]
+# Public, non-secret configuration only. Anything sensitive goes through
+# `wrangler secret put` — see README.
+SITE_URL = "http://localhost:5173"
+
+# Sender for transactional mail. A dedicated `mail.` subdomain rather than the apex:
+# Email Service treats a subdomain as its own sending domain, so anything that happens to
+# this sender's reputation stays off long-cao.dev's own mail.
+EMAIL_FROM = "noreply@mail.long-cao.dev"
+EMAIL_FROM_NAME = "SATE"
+
+# Device-lock safety gate, NOT a feature flag. '1' allows Plaud token minting.
+# Off because this stack's user ids differ from Supabase's, which changes the Plaud
+# identity sate_<uid> and can PERMANENTLY LOCK a device.
+# Read src/functions/mintPlaudToken.ts and CLAUDE.md RULE #1 before ever setting this.
+PLAUD_ALLOW_MINT = "0"
+
+# ---------------------------------------------------------------------------
+# SECRETS — set with `npx wrangler secret put <NAME>`, never as [vars].
+# [vars] are plain text in the dashboard and in this file, which is committed.
+#
+#   JWT_SECRET       signs access tokens. Anyone holding it can mint a token for any
+#                    user, which is every patient record in the system. 32+ random bytes.
+#   SERVICE_KEY      bypasses every access policy (src/policy.ts, rule 5). Server-side only;
+#                    never ship it to a browser.
+#   AI_PROCESS_URL   the ngrok tunnel. Unchanged from Supabase.
+#   PROCESSOR_SECRET shared secret for the AI processor callback.
+#   PLAUD_APP_ID / PLAUD_APP_SECRET   Plaud OAuth credentials.
+# ---------------------------------------------------------------------------
+
+[observability]
+enabled = true

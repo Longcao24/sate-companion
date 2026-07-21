@@ -1,0 +1,22 @@
+{
+  "name": "sate-cf",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:create": "wrangler d1 create sate",
+    "db:migrate": "wrangler d1 execute sate --remote --file=./schema.sql",
+    "db:migrate:local": "wrangler d1 execute sate --local --file=./schema.sql",
+    "r2:create": "wrangler r2 bucket create sate-storage"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.8.19",
+    "@cloudflare/workers-types": "^4.20260701.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8",
+    "wrangler": "^3.90.0"
+  }
+}

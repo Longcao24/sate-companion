@@ -1,0 +1,12 @@
+node_modules/
+dist/
+web/dist/
+.wrangler/
+
+# ⚠️ SECRETS — never commit.
+# JWT_SECRET mints a session for ANY user; SERVICE_KEY bypasses every access policy in
+# src/policy.ts. Either one in git history is a full compromise of every patient record,
+# and rotating them means re-deploying and signing every user out.
+.dev.vars
+.dev.vars.*
+*.local
