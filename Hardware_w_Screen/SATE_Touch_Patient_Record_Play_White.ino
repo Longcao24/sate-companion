@@ -110,7 +110,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.10";
+static const char    *FIRMWARE_VERSION  = "1.5.12";
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -631,6 +631,31 @@ static void bumpTotalRecordings()
   g_totalRecordings++;
   g_prefs.begin("sate-stats", false);
   g_prefs.putUInt("recs", g_totalRecordings);
+  g_prefs.end();
+}
+
+// --- Crash-safe recording resume (NVS) -------------------------------------
+// A local take marks itself "active" in NVS with its patient + session number
+// while it captures, and clears the mark when it ends cleanly. If the board
+// reboots mid-take (brownout, freeze, power loss) the mark survives, so the
+// next boot knows a session was interrupted and resumes appending to it. The
+// captured 1-minute segments are already on the SD card either way; this just
+// continues the SAME session instead of leaving it for the sync uploader.
+// "tries" is a boot-loop guard: if resuming keeps crashing, we give up after a
+// couple of attempts and let the segments upload as a normal unsynced session.
+static void recCrashMark(const char *patientId, uint32_t sessionNum)
+{
+  g_prefs.begin("sate-rec", false);
+  g_prefs.putUChar("active", 1);
+  g_prefs.putString("pid", patientId);
+  g_prefs.putUInt("sess", sessionNum);
+  g_prefs.end();
+}
+
+static void recCrashClear()
+{
+  g_prefs.begin("sate-rec", false);
+  g_prefs.clear();   // drops active/pid/sess/tries in one shot
   g_prefs.end();
 }
 
@@ -1681,20 +1706,26 @@ static bool initAudio()
 
 // Records until the SLP taps Stop (or the safety cap pcmTotal is hit). The WAV
 // header is sized for the cap up front, then patched down to the real length.
+// startPart/startWritten drive crash-resume: a fresh take passes 0/0 and begins
+// at segment part00; a resumed take passes the next free part index and the PCM
+// bytes already on the card, so new minutes append to the interrupted session
+// and every offset (flags, progress, duration) stays absolute.
 static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
-                                uint32_t pcmTotal = PCM_MAX_BYTES)
+                                uint32_t pcmTotal = PCM_MAX_BYTES,
+                                int startPart = 0, uint32_t startWritten = 0)
 {
   *outPcmBytes = 0;
   currentState = RECORDING;
   recordStopReq = false;
   g_flagCount = 0;                         // fresh flag list for this take
+                                           // (pre-crash flags lived in RAM and are lost)
   setStatePill("REC", COL_REC_BG, COL_REC);
   logHeap("record start");
 
   // Write into 1-minute segment files; each finished minute is flushed to SD so
-  // a crash only loses the current minute (the rest is recovered on next boot).
+  // a crash only loses the current minute (the rest is resumed on next boot).
   char partPath[200];
-  int  part = 0;
+  int  part = startPart;
   sessionPartPath(partPath, sizeof(partPath), wavPath, part);
   File file = SD_MMC.open(partPath, FILE_WRITE);
   if (!file) {
@@ -1708,8 +1739,8 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
   // Drain stale I2S DMA samples so the recording starts clean.
   es8311_i2s.readBytes((char *)audioChunk, sizeof(audioChunk));
 
-  uint32_t written = 0;      // total PCM across all segments
-  uint32_t partWritten = 0;  // PCM in the current segment
+  uint32_t written = startWritten;  // total PCM across all segments (seeded on resume)
+  uint32_t partWritten = 0;         // PCM in the current segment
   uint32_t lastUiMs = 0;
   bool ok = true;
   // Running out of card mid-take is NOT a failure - it must never throw away the
@@ -1741,9 +1772,10 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
     partWritten += put;
 
     // Stop BEFORE the card is truly full, while there's still room to close the
-    // current segment cleanly. freeAtStart is cached at take start and `written`
-    // is what we've added since, so this needs no f_getfree during the capture.
-    if (freeAtStart < (uint64_t)written + PCM_SEGMENT_BYTES) { diskFull = true; break; }
+    // current segment cleanly. freeAtStart is cached at take start; only the bytes
+    // added THIS run (written - startWritten) consume it, so a resumed take doesn't
+    // count its already-on-card minutes as needing free space.
+    if (freeAtStart < (uint64_t)(written - startWritten) + PCM_SEGMENT_BYTES) { diskFull = true; break; }
 
     // Roll to the next 1-minute segment.
     if (partWritten >= PCM_SEGMENT_BYTES) {
@@ -2725,6 +2757,41 @@ static void showResultsScreen()
 // Record session flow
 // -----------------------------------------------------------------------------
 
+// Write the session metadata, bump counters, kick the uploader, and return to
+// Home. Shared by a normal take and a crash-resumed one so both land identically.
+static void finalizeSavedSession(const char *wavPath, const char *jsonPath,
+                                 uint32_t sessionNum, uint32_t pcmBytes)
+{
+  currentState = SAVING_TO_SD;
+  setStatePill("SAVE", COL_WARN_BG, COL_WARN);
+
+  // Spinner while the metadata is written, so the stop press has clear feedback.
+  showSavingOverlay();
+  pumpGuiMs(80);           // paint the spinner before the (fast) SD write
+
+  uint32_t durationSec = pcmBytes / PCM_BYTES_PER_SEC;
+  saveMetadataToSd(jsonPath, wavPath, pcmBytes, durationSec, sessionNum);
+  bumpTotalRecordings();    // lifetime count for the admin dashboard
+  // Update the cached usage by what we just wrote, so the Home storage chip is
+  // right without a fresh f_getfree scan.
+  g_sdUsedCache += pcmBytes;
+  if (g_sdUsedCache > g_sdTotal) g_sdUsedCache = g_sdTotal;
+  connNotifyNewSession(); // Wi-Fi mode uploads it; BLE mode updates the advert
+
+  // Release the SD bus so uploads can resume immediately.
+  connSetUiSdBusy(false);
+  // No artificial hold: the spinner already showed during the real save (the
+  // pumpGuiMs(80) above + the write). Double-tap is blocked by the settle window
+  // below, not the spinner, so go straight to Home for a snappy stop.
+  hideSavingOverlay();
+  showHomeScreen();
+  // Drop any RECORD press queued during the take/save and start a brief settle
+  // window, so a double-tap meant for "stop" doesn't immediately start a new take.
+  g_recHit = false;
+  g_recSettleUntil = millis() + 700;
+  logHeap("session done");
+}
+
 // review  = play the sample back so the SLP can confirm it (on-device tap).
 // pcmTotal = capture size; remote (app/server) captures are shorter and skip
 //            the review playback since nobody is holding the unit.
@@ -2763,8 +2830,16 @@ static void runRecordSavePlaySession(bool review = true,
   sessionWavPath(wavPath, sizeof(wavPath), dir, sessionNum);
   sessionJsonPath(jsonPath, sizeof(jsonPath), dir, sessionNum);
 
+  // Mark this take crash-resumable BEFORE the first sample lands. Only on-device
+  // (review) takes auto-resume: a remote/server capture has nobody holding the
+  // unit and the server re-issues it, so its orphan segments upload via sync
+  // instead. Cleared the instant capture returns (clean stop / disk-full / cap).
+  const bool localTake = review;
+  if (localTake) recCrashMark(g_patients[currentPatientIndex].patientId, sessionNum);
+
   uint32_t pcmBytes = 0;
   bool ok = recordWavStreamToSd(wavPath, &pcmBytes, pcmTotal);
+  if (localTake) recCrashClear();
 
   if (!ok) {
     SD_MMC.remove(wavPath);
@@ -2774,38 +2849,109 @@ static void runRecordSavePlaySession(bool review = true,
     return;
   }
 
-  currentState = SAVING_TO_SD;
-  setStatePill("SAVE", COL_WARN_BG, COL_WARN);
+  finalizeSavedSession(wavPath, jsonPath, sessionNum, pcmBytes);
+}
 
-  // Spinner while the metadata is written, so the stop press has clear feedback.
-  showSavingOverlay();
-  pumpGuiMs(80);           // paint the spinner before the (fast) SD write
+// Walk the existing part00.. segments of an interrupted session, summing their
+// real PCM bytes and patching each header to that size (the last one was left
+// cap-sized when the board died). Returns the next free part index; *outBytes =
+// total PCM already captured, used to seed the resumed take's absolute offsets.
+static int prepareResumeSegments(const char *wavPath, uint32_t *outBytes)
+{
+  char pp[200];
+  uint32_t bytes = 0;
+  int part = 0;
+  for (;; part++) {
+    sessionPartPath(pp, sizeof(pp), wavPath, part);
+    if (!SD_MMC.exists(pp)) break;
+    File f = SD_MMC.open(pp, FILE_READ);
+    if (!f) break;
+    uint32_t sz = f.size();
+    f.close();
+    uint32_t pcm = (sz > 44) ? (sz - 44) : 0;   // strip the 44-byte WAV header
+    File pf = SD_MMC.open(pp, "r+");             // clean up the header in place
+    if (pf) { patchWavHeader(pf, pcm); pf.flush(); pf.close(); }
+    bytes += pcm;
+  }
+  *outBytes = bytes;
+  return part;                                   // == count of existing segments
+}
 
-  uint32_t durationSec = pcmBytes / PCM_BYTES_PER_SEC;
-  saveMetadataToSd(jsonPath, wavPath, pcmBytes, durationSec, sessionNum);
-  bumpTotalRecordings();    // lifetime count for the admin dashboard
-  // Update the cached usage by what we just wrote, so the Home storage chip is
-  // right without a fresh f_getfree scan.
-  g_sdUsedCache += pcmBytes;
-  if (g_sdUsedCache > g_sdTotal) g_sdUsedCache = g_sdTotal;
-  connNotifyNewSession(); // Wi-Fi mode uploads it; BLE mode updates the advert
+// Called once at boot: if a local take was interrupted mid-capture (NVS mark
+// survived the reboot), continue recording into the SAME session instead of
+// leaving it for the sync uploader. Audio is never lost either way - this just
+// stitches the resumed minutes onto the interrupted ones as one recording.
+static void maybeResumeRecording()
+{
+  g_prefs.begin("sate-rec", true);
+  bool     active = g_prefs.getUChar("active", 0) == 1;
+  uint8_t  tries  = g_prefs.getUChar("tries", 0);
+  uint32_t sess   = g_prefs.getUInt("sess", 0);
+  char pid[40] = {0};
+  g_prefs.getString("pid", pid, sizeof(pid));
+  g_prefs.end();
 
-  // No auto-playback after recording - it was intrusive. The SLP plays a
-  // session on demand from the Sessions screen (where playback has a Stop).
-  (void)review;
+  if (!active || sess == 0) return;
 
-  // Release the SD bus so uploads can resume immediately.
-  connSetUiSdBusy(false);
-  // No artificial hold: the spinner already showed during the real save (the
-  // pumpGuiMs(80) above + the write). Double-tap is blocked by the settle window
-  // below, not the spinner, so go straight to Home for a snappy stop.
-  hideSavingOverlay();
-  showHomeScreen();
-  // Drop any RECORD press queued during the take/save and start a brief settle
-  // window, so a double-tap meant for "stop" doesn't immediately start a new take.
-  g_recHit = false;
-  g_recSettleUntil = millis() + 700;
-  logHeap("session done");
+  // Boot-loop guard: if resuming has itself crashed the board a couple of times,
+  // stop trying. The captured segments still upload as a normal unsynced session.
+  if (tries >= 2) { recCrashClear(); return; }
+  g_prefs.begin("sate-rec", false);
+  g_prefs.putUChar("tries", tries + 1);
+  g_prefs.end();
+
+  // Map the stored patient id back to a slot (patientDirPath keys off it).
+  int idx = -1;
+  for (int i = 0; i < g_patientCount; i++)
+    if (!strcmp(g_patients[i].patientId, pid)) { idx = i; break; }
+  if (idx < 0) { recCrashClear(); return; }      // patient gone -> sync handles it
+  currentPatientIndex = idx;
+
+  char dir[96], wavPath[160], jsonPath[160], part0[200];
+  patientDirPath(dir, sizeof(dir));
+  sessionWavPath(wavPath, sizeof(wavPath), dir, sess);
+  sessionJsonPath(jsonPath, sizeof(jsonPath), dir, sess);
+  sessionPartPath(part0, sizeof(part0), wavPath, 0);
+  if (!SD_MMC.exists(part0)) { recCrashClear(); return; }   // nothing on the card
+
+  uint32_t existingBytes = 0;
+  int startPart = prepareResumeSegments(wavPath, &existingBytes);
+  if (existingBytes == 0) {
+    // Board died before the first minute flushed: part00 is empty / header-only.
+    // Left alone it sits forever as a phantom "pending" session that shows
+    // "syncing" but has no real audio to upload. Delete it and rescan pending.
+    deleteSessionFiles(dir, sess);
+    recCrashClear();
+    connNotifyNewSession();   // pendDirty -> Home stops showing the ghost sync
+    return;
+  }
+
+  // Refuse to resume onto a (nearly) full card - same rule as starting a take.
+  if (sdFreeBytes() < SD_MIN_FREE_BYTES) {
+    recCrashClear();
+    showStatus("Recording recovered", "Interrupted take saved - card is full");
+    pumpGuiMs(1600);
+    showHomeScreen();
+    return;
+  }
+
+  // Tell the SLP the take is continuing and give them a beat to hit Stop.
+  showStatus("Resuming recording", "Interrupted take - press RECORD to stop");
+  pumpGuiMs(1500);
+
+  connSetUiSdBusy(true);
+  uint32_t pcmBytes = 0;
+  bool ok = recordWavStreamToSd(wavPath, &pcmBytes, PCM_MAX_BYTES, startPart, existingBytes);
+  recCrashClear();
+
+  if (!ok || pcmBytes == 0) {
+    // Never delete captured audio: the segments stay and upload via sync.
+    connSetUiSdBusy(false);
+    showHomeScreen();
+    return;
+  }
+
+  finalizeSavedSession(wavPath, jsonPath, sess, pcmBytes);
 }
 
 static void playSessionFromList(int sessionNum)
@@ -2920,8 +3066,8 @@ void setup()
   loadTotalRecordings();                   // lifetime recording count (NVS) for telemetry
   sdRefreshUsage(true);                    // prime the usage cache so the first
                                            // record-begin / Home never pays f_getfree
-  // No merge to recover: segments left by a crash are just an unsynced session
-  // and upload normally on the next sync.
+  // A take interrupted by a reboot is resumed below (maybeResumeRecording, after
+  // audio init). Any segments we can't resume still upload as an unsynced session.
 
   bootStepBegin(2);                       // audio codec (real init)
   bool audioOk = initAudio();
@@ -2943,8 +3089,14 @@ void setup()
   bootScreenFinish();
   // Gate: until the recorder is claimed to an account and has a real patient
   // roster, the user only sees the onboarding screen.
-  if (deviceReady()) showHomeScreen();
-  else               showOnboardingScreen();
+  if (deviceReady()) {
+    showHomeScreen();
+    // If a take was interrupted by a reboot mid-capture, pick it back up now
+    // (audio init + SD + patients are all up at this point).
+    maybeResumeRecording();
+  } else {
+    showOnboardingScreen();
+  }
   logHeap("ready");
 }
 

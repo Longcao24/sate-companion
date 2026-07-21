@@ -172,6 +172,38 @@ Durable lessons — check the ones relevant to what you're touching. Version num
 - **OTA**: firmware pulls a `.bin` from Supabase Storage via the command channel; the web
   "Publish firmware" card uploads a release. Bump `FIRMWARE_VERSION` per release so the
   device reports it and the update banner works.
+- **Building + publishing a firmware release (the exact recipe):**
+  1. Bump `FIRMWARE_VERSION` in the `.ino`, then compile
+     (`arduino-cli compile --fqbn "esp32:esp32:esp32s3:PSRAM=opi,FlashSize=8M,PartitionScheme=huge_app" <sketch>`).
+     ⚠️ **Compile gotcha:** `~/Documents/Arduino/libraries` is under **iCloud Drive** — lvgl gets
+     evicted to 0-block placeholders and `cc1plus` then blocks forever in `read()` on the lvgl
+     preprocess (looks like a hang; it is iCloud on-demand download stalling). Fix: `arduino-cli lib
+     uninstall lvgl && arduino-cli lib install lvgl@8.4.0` to re-materialise it, and make sure
+     `libraries/lv_conf.h` exists (montserrat 12/14/20 enabled). Long-term: turn off "Optimize Mac
+     Storage" / move the Arduino sketchbook out of iCloud. Also `arduino-cli config delete
+     board_manager.additional_urls` if `init` hangs on the board-index fetch.
+  2. The **OTA image is the APP bin** (`<sketch>.ino.bin`, ~1.7 MB) — NOT `.ino.merged.bin` (8 MB,
+     that's only for a first USB flash).
+  3. **Publish** = upload that `.bin` to the public `firmware` Storage bucket at path
+     `sate_<version>.bin` (`upsert`, `application/octet-stream`) + insert a `sate_firmware` row
+     `{version, url, notes}` where `url` is the bucket's public URL
+     (`<SUPABASE_URL>/storage/v1/object/public/firmware/sate_<version>.bin`). `getLatestFirmware`
+     orders by `created_at`, so the newest row wins; re-publishing a version overwrites its `.bin`.
+     Two ways to do it:
+     - **Web card** (`/admin` → "Publish firmware"): easiest for a human — uses the admin's browser
+       session, no keys. But it needs a browser + admin login, so an agent can't drive it.
+     - **Direct upload + row insert (easiest programmatic path — this is what to use):** two calls,
+       no temp function, no browser.
+       1. `curl -X POST "$SUPABASE_URL/storage/v1/object/firmware/sate_<v>.bin" -H "Authorization: Bearer $KEY" -H "apikey: $KEY" -H "Content-Type: application/octet-stream" -H "x-upsert: true" --data-binary @<bin>`
+       2. `insert into sate_firmware (version, url, notes) values ('<v>', '$SUPABASE_URL/storage/v1/object/public/firmware/sate_<v>.bin', '<notes>');` — run it with the **Supabase MCP** `execute_sql`.
+       Then verify: the public URL returns 200 and its SHA-256 matches the local `.bin`.
+       `$KEY` = the Supabase **`sb_secret_…`** key (a new-style secret key works on Storage; the repo's
+       `SERVICE_KEY` is a custom `svc-…` app key and is NOT it, and the MCP only exposes the anon key —
+       so the secret has to be supplied). Project ref `zlgdpivcbmaodgokkdvz`. **Do NOT** deploy a
+       throwaway edge function to do this — the two calls above are simpler. Treat a pasted `sb_secret`
+       as compromised and tell the user to rotate it afterward.
+  4. Queueing OTA to a device with a backlog fails `err-get-1` — `reboot` first, wait, then `ota`
+     (see the runbook note above).
 - **Wi-Fi change without factory reset**: BOOT-hold re-provisions Wi-Fi and KEEPS the
   account; a full reset is only for when the server removed the device (heartbeat
   `unclaimed:true`). Don't wipe the account binding for a Wi-Fi change.

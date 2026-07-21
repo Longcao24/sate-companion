@@ -353,6 +353,73 @@ static void writeSyncMarker(const char *pid, uint32_t num)
   pendDirty = true; // a session just synced - pending count changed
 }
 
+// --- Reclaim SD: keep only the newest N takes' AUDIO per patient -------------
+// Once a take is .synced, its on-device audio is redundant: the server only ACKs
+// final=1 AFTER the assembled WAV is durably in Storage (awaited upload that
+// THROWS on failure, re-checked with objectExists on retry - it is NOT a bare
+// 2xx). So a synced take beyond the newest N can have its audio freed to stop the
+// SD filling. We keep the .synced marker as a TOMBSTONE: the slot stays numbered
+// (contiguous), the pending scan still skips it (see scanPendingLocked), and it
+// can be re-downloaded/played from the server. UNSYNCED takes are NEVER touched -
+// the device is still their only copy. Full deletion stays user-only
+// (deleteSessionFiles in the .ino, reached only from the Delete button).
+static const uint32_t KEEP_AUDIO_SESSIONS = 5;
+
+static bool sessionHasAudioLocal(const char *pid, uint32_t n)
+{
+  char p[200];
+  sessionPartFile(p, sizeof(p), pid, n, 0);          // new: 1-minute segments
+  if (SD_MMC.exists(p)) return true;
+  sessionPath(p, sizeof(p), pid, n, "wav");          // legacy: one merged file
+  return SD_MMC.exists(p);
+}
+
+static bool sessionOccupiedLocal(const char *pid, uint32_t n)
+{
+  char p[200];
+  sessionPath(p, sizeof(p), pid, n, "synced");       // tombstone counts as occupied
+  if (SD_MMC.exists(p)) return true;
+  return sessionHasAudioLocal(pid, n);
+}
+
+// Free a session's AUDIO (every segment part + legacy wav + json) but KEEP its
+// .synced marker so the slot stays numbered and the pending scan is unchanged.
+static void freeSessionAudioKeepMarker(const char *pid, uint32_t n)
+{
+  char p[200];
+  for (int k = 0; ; k++) {
+    sessionPartFile(p, sizeof(p), pid, n, k);
+    if (!SD_MMC.exists(p)) break;
+    SD_MMC.remove(p);
+  }
+  sessionPath(p, sizeof(p), pid, n, "wav");  SD_MMC.remove(p);
+  sessionPath(p, sizeof(p), pid, n, "json"); SD_MMC.remove(p);
+  pendDirty = true;
+}
+
+// After a session in `pid` syncs, free the audio of any SYNCED session older than
+// the newest KEEP_AUDIO_SESSIONS in that patient dir. Numbering is contiguous
+// (tombstones keep it so), so the highest occupied slot is the newest take.
+static void trimPatientSyncedAudio(const char *pid)
+{
+  uint32_t maxN = 0;
+  for (uint32_t i = 1; i <= 9999; i++) {
+    if (!sessionOccupiedLocal(pid, i)) break;         // first empty slot = end
+    maxN = i;
+  }
+  if (maxN <= KEEP_AUDIO_SESSIONS) return;            // nothing beyond the newest N
+  const uint32_t keepFrom = maxN - KEEP_AUDIO_SESSIONS + 1;
+  char mark[200];
+  for (uint32_t n = 1; n < keepFrom; n++) {
+    sessionPath(mark, sizeof(mark), pid, n, "synced");
+    if (!SD_MMC.exists(mark)) continue;               // not synced -> only copy, keep
+    if (!sessionHasAudioLocal(pid, n)) continue;      // already freed
+    freeSessionAudioKeepMarker(pid, n);
+    Serial.printf("[CONN] freed synced audio %s session %lu (keep newest %u)\n",
+                  pid, (unsigned long)n, (unsigned)KEEP_AUDIO_SESSIONS);
+  }
+}
+
 // Defined with the uploader further down; needed here to reset its memory.
 static void upResumeClear();
 static void strikeClearAll();
@@ -1078,10 +1145,11 @@ static void uploadStep()
         return;
       }
       writeSyncMarker(upPid, upNum);
-      // The local audio is deliberately KEPT. The device is the only copy of a
-      // take until the user says otherwise, so nothing here (and nothing on the UI
-      // core) deletes it automatically - a .synced session can be re-uploaded and
-      // played back on-device. Sessions are removed only by an explicit user delete.
+      // Reclaim SD: this take is now durably on the server, so free the audio of
+      // SYNCED takes older than the newest KEEP_AUDIO_SESSIONS (the marker stays as
+      // a tombstone; unsynced takes are never touched). The just-synced take is the
+      // newest, so it is always kept. Full deletion remains user-only.
+      trimPatientSyncedAudio(upPid);
       strikeClear(upPid, upNum);
       upResumeClear();
       sateHookUploadEnd();
