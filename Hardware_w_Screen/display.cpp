@@ -122,15 +122,20 @@ void Display::init(void)
     tft.begin();
     tft.setRotation(TFT_DIRECTION);
 
-    // Allocate LVGL draw buffers from internal DMA-capable RAM.
+    // Allocate LVGL draw buffers from PSRAM, NOT internal RAM. my_disp_flush()
+    // pushes with a blocking CPU copy (tft.pushColors swap=true, no DMA), so the
+    // buffers do not need to be DMA/internal-capable. Keeping them out of internal
+    // RAM leaves the ~40 KB contiguous block the Supabase register TLS handshake
+    // needs while BLE + Wi-Fi are both up (else register fails "code -1"; the old
+    // internal-DMA buffers ate ~23 KB and starved the handshake).
     draw_buf_1 = (lv_color_t *)heap_caps_malloc(
-        DRAW_BUF_PIXELS * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+        DRAW_BUF_PIXELS * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
     draw_buf_2 = (lv_color_t *)heap_caps_malloc(
-        DRAW_BUF_PIXELS * sizeof(lv_color_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+        DRAW_BUF_PIXELS * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
 
     if (draw_buf_1 && draw_buf_2) {
         lv_disp_draw_buf_init(&draw_buf, draw_buf_1, draw_buf_2, DRAW_BUF_PIXELS);
-        Serial.println("[DISPLAY] Double-buffered LVGL draw buffers (DMA RAM).");
+        Serial.println("[DISPLAY] Double-buffered LVGL draw buffers (PSRAM).");
     } else {
         // Free whichever half succeeded and use the static fallback.
         if (draw_buf_1) { heap_caps_free(draw_buf_1); draw_buf_1 = nullptr; }

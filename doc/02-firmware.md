@@ -39,6 +39,59 @@ handoff from networking to GUI is **flag-based**: `connLoop()` sets flags (`conn
 GUI side. This matters for the lag fix below and for the possible future move of networking to
 core 0.
 
+## Display, LVGL & the internal-RAM budget (⚠️ hard-won, read before touching `display.cpp` or `lv_conf.h`)
+
+The LVGL config that actually compiles is **`~/Documents/Arduino/libraries/lv_conf.h`** — it is
+**NOT in this repo**, it lives in the Arduino sketchbook libraries dir (under iCloud Drive). It is
+overwritten every time lvgl is reinstalled (see the iCloud-eviction fix in
+[07-runbook.md](07-runbook.md)). Three settings in it are load-bearing; a fresh lvgl install
+resets all three and each has bitten us:
+
+| `lv_conf.h` setting | Must be | If wrong |
+|---|---|---|
+| `LV_TICK_CUSTOM` | **`1`** (millis() source) | **Silent boot brick.** The firmware calls `lv_tick_inc()` **nowhere**, so with `0` LVGL's clock is frozen at 0 → the boot spinner sticks at frame 1 and **no screen ever repaints again**, while `setup()` still finishes on wall-clock time (serial reaches `[MEM] ready`). Looks exactly like a boot hang / bad flash — it is neither. |
+| `LV_MEM_CUSTOM` + alloc | **`1`**, `LV_MEM_CUSTOM_ALLOC=ps_malloc`, `LV_MEM_CUSTOM_REALLOC=ps_realloc`, include `"Arduino.h"` | LVGL's heap (default a **48 KB static internal pool**, `LV_MEM_SIZE`) sits in internal RAM and every LVGL object alloc fragments the internal heap → the register TLS handshake can't get its buffers (see below). |
+| `LV_FONT_MONTSERRAT_12/14/20` | `1` | Missing glyphs / build errors. |
+
+**Draw buffers → PSRAM too** (`display.cpp`, `Display::init`): the two double-buffered LVGL draw
+buffers are allocated with `MALLOC_CAP_SPIRAM`, **not** `MALLOC_CAP_INTERNAL|MALLOC_CAP_DMA`.
+`my_disp_flush()` pushes with a **blocking CPU copy** (`tft.pushColors(..., swap=true)`, no DMA), so
+the buffers do **not** need to be DMA/internal-capable. Keeping them (and the whole LVGL heap) out
+of internal RAM is what leaves room for TLS.
+
+### Why the internal-RAM budget matters: register `code -1`
+
+Device registration (`connectivity.cpp`, `PROV_REGISTER`) does an **HTTPS POST** to
+`<server>/api/devices/register` via `WiFiClientSecure` (`setInsecure()`) **while BLE is still
+connected to the app** and Wi-Fi is up. The mbedTLS handshake needs **two ~16 KB contiguous
+buffers** (IN + OUT content, `MBEDTLS_SSL_*_CONTENT_LEN=16384`, not tunable from Arduino). If the
+largest free internal block (`ESP.getMaxAllocHeap()`) can't hold **both**, the second alloc fails →
+`client.connect()` returns false → `HTTPClient` returns **`-1`** → on-screen *"Server registration
+failed (code -1)"*. It fails **fast** (not a timeout) and **nothing reaches the server** (no POST in
+the `device-api` edge logs). The register loop logs the smoking gun each attempt:
+
+```
+[CONN] register attempt N code=-1 freeHeap=48672 maxAlloc=31732   <- maxAlloc < ~34 KB => TLS can't fit 2×16 KB
+```
+
+`maxAlloc` after freeing internal RAM (measured at `[MEM] ready`, unprovisioned, BLE advertising):
+
+| draw buffers | LVGL heap | `maxAlloc` | register |
+|---|---|---|---|
+| internal DMA | internal 48 KB pool | 22.5 KB | ❌ `code -1` |
+| **PSRAM** | internal 48 KB pool | 31.7 KB | ❌ `code -1` (still short of 2×16 KB) |
+| **PSRAM** | **PSRAM (`ps_malloc`)** | **63.5 KB** | ✅ `code 200`, claimed |
+
+Coexistence is already handled (`esp_coex_preference_set(ESP_COEX_PREFER_WIFI)` during provisioning,
+`WiFi.setSleep(false)`); the failure was purely contiguous-heap starvation, so **do not** chase coex
+or the handshake timeout for a `code -1` — check `maxAlloc` first. A one-off `reason=8` Wi-Fi
+disconnect mid-provision is a normal coexistence flake (the state machine re-`begin()`s).
+
+> Note: `LV_MEM_CUSTOM=1` must be a **clean** compile (`arduino-cli compile --clean`). A stale build
+> cache can link lvgl objects compiled with the old `LV_MEM_CUSTOM=0` (static pool) against the new
+> ones → LVGL frees a static-pool pointer with `free()` → `assert failed: heap_caps_free ... "free()
+> target pointer is outside heap areas"` at runtime. `--clean` fixes it.
+
 ## Connectivity state machine (`connLoop`)
 
 ```

@@ -163,6 +163,13 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   after boot flashes with a clean heap. Recipe in `doc/07-runbook.md`.
 
 **Firmware / hardware (ESP32-S3, `Hardware_w_Screen/`)**
+- 🛑🛑 **#1 BOOT-HANG TRAP — screen bright but frozen at the boot spinner is NOT a bad flash and NOT
+  the code. It is `lv_conf.h` `LV_TICK_CUSTOM 0`.** The firmware never calls `lv_tick_inc()`, so if
+  `LV_TICK_CUSTOM` isn't `1` (millis()) LVGL's clock is frozen → spinner sticks at frame 1, nothing
+  ever repaints, yet `setup()` finishes (serial shows `[MEM] ready`). **Reinstalling lvgl resets
+  this to 0.** Before wasting hours on flash params: check `~/Documents/Arduino/libraries/lv_conf.h`
+  → `#define LV_TICK_CUSTOM 1` (+ montserrat 12/14/20). Real board = **16MB flash, DIO mode, opi
+  PSRAM** (`FlashSize=16M`; qio = dead black screen). Full recipe in the release section below.
 - **GPIO34 cannot be used for battery ADC on the S3** — it bootloops the board. Battery
   sensing was disabled; a real ADC1 pin or a fuel-gauge IC is required.
 - **Two-button pinout**: record = GPIO2, flag = GPIO14 (interrupt-latched). Flag markers
@@ -174,15 +181,34 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   device reports it and the update banner works.
 - **Building + publishing a firmware release (the exact recipe):**
   1. Bump `FIRMWARE_VERSION` in the `.ino`, then compile
-     (`arduino-cli compile --fqbn "esp32:esp32:esp32s3:PSRAM=opi,FlashSize=8M,PartitionScheme=huge_app" <sketch>`).
+     (`arduino-cli compile --fqbn "esp32:esp32:esp32s3:PSRAM=opi,FlashSize=16M,PartitionScheme=huge_app" <sketch>`).
+     ⚠️ **Real board specs (verified on hardware, esptool):** the S3 module is **16MB flash + 8MB
+     octal PSRAM** → `FlashSize=16M`, `PSRAM=opi`. Flash mode is **DIO**, NOT qio — flashing qio
+     boots to a dead black screen (bootloader can't read flash). USB flash: full erase + write the
+     **merged** bin at `0x0` with `--flash_mode dio --flash_freq 80m --flash_size 16MB`.
+     ⚠️ **`arduino-cli` sketch-name rule:** the folder must contain an `.ino` matching the folder
+     name. `Hardware_w_Screen/` holds `SATE_Touch_...ino`, so it won't compile in place — copy the
+     `.ino`/`.cpp`/`.h` into a temp dir named `SATE_Touch_Patient_Record_Play_White/` and build that.
+     ⚠️ **`lv_conf.h` — `LV_TICK_CUSTOM` MUST be `1` (SILENT BRICK if 0).** The firmware calls
+     `lv_tick_inc()` NOWHERE; it relies entirely on `LV_TICK_CUSTOM=millis()`. With it `0`, LVGL's
+     clock is stuck at 0 → the boot spinner freezes at frame 1 and NO screen ever repaints after,
+     while `setup()` still completes on wall-clock (serial reaches `[MEM] ready`). Looks exactly like
+     a boot hang / bad flash — it is neither. **Reinstalling lvgl (the iCloud fix below) resets
+     `lv_conf.h` and drops `LV_TICK_CUSTOM` back to 0** (it re-enables fonts but not the tick) — so
+     after ANY `lib install lvgl`, re-check `~/Documents/Arduino/libraries/lv_conf.h`: line ~88
+     `#define LV_TICK_CUSTOM 1` AND montserrat 12/14/20 enabled.
+     ⚠️ **Reading serial to debug boot:** `Serial` output only appears when built with
+     `CDCOnBoot=cdc,USBMode=hwcdc`; the board is `/dev/cu.usbmodem101` (USB-Serial-JTAG). Plain
+     `cat` won't reset it and racing esptool for the port fails — use a pyserial script that opens
+     the port, pulses `RTS`(EN)/`DTR`(GPIO0) to reset-to-run, then reads.
      ⚠️ **Compile gotcha:** `~/Documents/Arduino/libraries` is under **iCloud Drive** — lvgl gets
      evicted to 0-block placeholders and `cc1plus` then blocks forever in `read()` on the lvgl
      preprocess (looks like a hang; it is iCloud on-demand download stalling). Fix: `arduino-cli lib
-     uninstall lvgl && arduino-cli lib install lvgl@8.4.0` to re-materialise it, and make sure
-     `libraries/lv_conf.h` exists (montserrat 12/14/20 enabled). Long-term: turn off "Optimize Mac
-     Storage" / move the Arduino sketchbook out of iCloud. Also `arduino-cli config delete
-     board_manager.additional_urls` if `init` hangs on the board-index fetch.
-  2. The **OTA image is the APP bin** (`<sketch>.ino.bin`, ~1.7 MB) — NOT `.ino.merged.bin` (8 MB,
+     uninstall lvgl && arduino-cli lib install lvgl@8.4.0` to re-materialise it, then **re-fix
+     `lv_conf.h`** (LV_TICK_CUSTOM 1 + montserrat 12/14/20 — see the tick warning above). Long-term:
+     turn off "Optimize Mac Storage" / move the Arduino sketchbook out of iCloud. Also `arduino-cli
+     config delete board_manager.additional_urls` if `init` hangs on the board-index fetch.
+  2. The **OTA image is the APP bin** (`<sketch>.ino.bin`, ~1.7 MB) — NOT `.ino.merged.bin` (16 MB,
      that's only for a first USB flash).
   3. **Publish** = upload that `.bin` to the public `firmware` Storage bucket at path
      `sate_<version>.bin` (`upsert`, `application/octet-stream`) + insert a `sate_firmware` row
