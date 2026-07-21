@@ -1,43 +1,37 @@
 # 02 — Recorder firmware
 
 ESP32-S3 touchscreen recorder. Arduino framework, NimBLE for BLE, `WiFiClientSecure` +
-`HTTPClient` for HTTPS. Source: `SATE_Touch_Patient_Record_Play_White/`.
+`HTTPClient` for HTTPS. Source: `SATE_Recorder/` (sketch `SATE_Recorder.ino`).
 
-Current version: **fw 1.0.3** (see [07-runbook.md](07-runbook.md#firmware-version-history)).
-Deep hardware reference (pin map, audio pipeline, optimization playbook): root `hardware.md`.
+Current version: **fw 1.5.12** (see [07-runbook.md](07-runbook.md#firmware-version-history)).
+Deep hardware reference (pin map, board + build/flash, audio pipeline, optimization playbook,
+LVGL/PSRAM memory budget): root `hardware.md`.
 
 ## File map
 
 | File | Responsibility |
 |------|----------------|
-| `SATE_Touch_Patient_Record_Play_White.ino` | `setup()` / `loop()`, UI state machine, screen flows, record/play, hook handlers |
+| `SATE_Recorder.ino` | `setup()` / `loop()`, UI state machine, screen flows, record/play, hook handlers |
 | `connectivity.cpp` / `.h` | BLE provisioning, Wi-Fi, HTTPS upload, command polling, device config, SD session scan |
 | `display.cpp` / `.h` | LVGL screen driver + touch |
 | `es8311.cpp` / `.h` / `es8311_reg.h` | ES8311 audio codec (I2S capture/playback) |
 | `sate_logo_white.h` | Logo bitmap |
 
-## Single-core execution model
+## Dual-core execution model (fw 1.2.5+)
 
-`loop()` runs sequentially on one core:
+**Networking runs on a dedicated core-0 task; GUI + buttons own core 1.** Once the device is
+online, `connStartNetTask()` hands `connLoop()` (BLE ops, Wi-Fi, command poll, upload) to a
+core-0 task so a physical button or a screen repaint never waits on an HTTP call. `loop()` on
+core 1 does `runGui()` (LVGL + touch), services the ISR-latched buttons, and consumes
+connectivity flags. The handoff is **flag-based** (`connStateReq`, `connPatientsReq`,
+`connActivePatientReq`, `connRecordReq`) — the net task never touches LVGL.
 
-```c
-void loop() {
-  runGui();                 // LVGL + touch
-  serviceFactoryResetButton();
-  if (currentState != ERROR_STATE) {
-    connLoop();             // BLE ops, Wi-Fi state, command poll, upload step
-    // consume connectivity flags (connStateReq, connPatientsReq, connRecordReq, …)
-    screen.routine();       // immediate repaint after any network/SD work
-  }
-  // pending UI action …
-}
-```
+> **During provisioning only**, `connLoop()` runs on the **main loop** (the net task isn't
+> started until the device goes online) so the register TLS handshake has the heap it needs
+> while BLE is up. See `hardware.md` §8.15 (dual-core) and §8.23 / §8.8 (register heap).
 
-There is **no separate network task** — GUI and networking interleave on the same core. The
-handoff from networking to GUI is **flag-based**: `connLoop()` sets flags (`connStateReq`,
-`connPatientsReq`, `connActivePatientReq`, `connRecordReq`), and `loop()` consumes them on the
-GUI side. This matters for the lag fix below and for the possible future move of networking to
-core 0.
+Earlier firmware (≤1.2.4) was single-core (GUI + networking interleaved on one core); the move
+to core-0 networking fixed a 4–5 s button lag and stuck uploads.
 
 ## Display, LVGL & the internal-RAM budget (⚠️ hard-won, read before touching `display.cpp` or `lv_conf.h`)
 

@@ -162,14 +162,24 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   can't get its ~40 KB). Queue `reboot`, wait for it to come back, THEN queue `ota` — the first poll
   after boot flashes with a clean heap. Recipe in `doc/07-runbook.md`.
 
-**Firmware / hardware (ESP32-S3, `Hardware_w_Screen/`)**
+**Firmware / hardware (ESP32-S3, `SATE_Recorder/`)** — recorder sketch is
+`SATE_Recorder/SATE_Recorder.ino` (folder name matches the `.ino`, so `arduino-cli` builds it
+directly, no temp-copy). Pendant firmware is `SATE_Pendant/` (see the pendant section).
 - 🛑🛑 **#1 BOOT-HANG TRAP — screen bright but frozen at the boot spinner is NOT a bad flash and NOT
   the code. It is `lv_conf.h` `LV_TICK_CUSTOM 0`.** The firmware never calls `lv_tick_inc()`, so if
   `LV_TICK_CUSTOM` isn't `1` (millis()) LVGL's clock is frozen → spinner sticks at frame 1, nothing
   ever repaints, yet `setup()` finishes (serial shows `[MEM] ready`). **Reinstalling lvgl resets
   this to 0.** Before wasting hours on flash params: check `~/Documents/Arduino/libraries/lv_conf.h`
-  → `#define LV_TICK_CUSTOM 1` (+ montserrat 12/14/20). Real board = **16MB flash, DIO mode, opi
-  PSRAM** (`FlashSize=16M`; qio = dead black screen). Full recipe in the release section below.
+  → `#define LV_TICK_CUSTOM 1` (+ montserrat 12/14/20).
+- 🛑 **FLASH CONFIG (verified fw 1.5.12):** `esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi`.
+  Board = **16MB flash + 8MB octal (opi) PSRAM**. **`PartitionScheme=default_8MB` is mandatory — it
+  has TWO app slots (`ota_0`+`ota_1`) so OTA works. NEVER `huge_app`** (it's literally "3MB **No
+  OTA**", a single slot — flashing it silently kills OTA; the device records/registers but can't
+  self-update). `PSRAM=opi` mandatory. Manual `esptool` merged-bin flashing needs flash mode
+  **DIO** (qio = dead black screen); `arduino-cli upload` sets the mode itself. LVGL draw buffers +
+  heap live in **PSRAM** (`lv_conf.h` `LV_MEM_CUSTOM 1`/`ps_malloc`, and `display.cpp`
+  `MALLOC_CAP_SPIRAM`) so the register TLS handshake has contiguous internal RAM — don't move them
+  back to internal DMA RAM (that caused "Server registration failed code -1"). See `hardware.md` §3.
 - **GPIO34 cannot be used for battery ADC on the S3** — it bootloops the board. Battery
   sensing was disabled; a real ADC1 pin or a fuel-gauge IC is required.
 - **Two-button pinout**: record = GPIO2, flag = GPIO14 (interrupt-latched). Flag markers
@@ -180,15 +190,13 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   "Publish firmware" card uploads a release. Bump `FIRMWARE_VERSION` per release so the
   device reports it and the update banner works.
 - **Building + publishing a firmware release (the exact recipe):**
-  1. Bump `FIRMWARE_VERSION` in the `.ino`, then compile
-     (`arduino-cli compile --fqbn "esp32:esp32:esp32s3:PSRAM=opi,FlashSize=16M,PartitionScheme=huge_app" <sketch>`).
-     ⚠️ **Real board specs (verified on hardware, esptool):** the S3 module is **16MB flash + 8MB
-     octal PSRAM** → `FlashSize=16M`, `PSRAM=opi`. Flash mode is **DIO**, NOT qio — flashing qio
-     boots to a dead black screen (bootloader can't read flash). USB flash: full erase + write the
-     **merged** bin at `0x0` with `--flash_mode dio --flash_freq 80m --flash_size 16MB`.
-     ⚠️ **`arduino-cli` sketch-name rule:** the folder must contain an `.ino` matching the folder
-     name. `Hardware_w_Screen/` holds `SATE_Touch_...ino`, so it won't compile in place — copy the
-     `.ino`/`.cpp`/`.h` into a temp dir named `SATE_Touch_Patient_Record_Play_White/` and build that.
+  1. Bump `FIRMWARE_VERSION` in `SATE_Recorder/SATE_Recorder.ino`, then compile
+     (`arduino-cli compile --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi" SATE_Recorder`).
+     The folder name matches the `.ino`, so it builds in place — no temp-copy. **Partition MUST be
+     `default_8MB` (dual OTA), never `huge_app`** (see the FLASH CONFIG trap above). Flash the fleet
+     with `arduino-cli upload -p <port> --fqbn "…" SATE_Recorder` (handles flash mode). Manual
+     `esptool` merged-bin flashing (for a stuck board) needs `--flash_mode dio --flash_freq 80m
+     --flash_size 16MB` at `0x0`.
      ⚠️ **`lv_conf.h` — `LV_TICK_CUSTOM` MUST be `1` (SILENT BRICK if 0).** The firmware calls
      `lv_tick_inc()` NOWHERE; it relies entirely on `LV_TICK_CUSTOM=millis()`. With it `0`, LVGL's
      clock is stuck at 0 → the boot spinner freezes at frame 1 and NO screen ever repaints after,
@@ -208,8 +216,8 @@ Durable lessons — check the ones relevant to what you're touching. Version num
      `lv_conf.h`** (LV_TICK_CUSTOM 1 + montserrat 12/14/20 — see the tick warning above). Long-term:
      turn off "Optimize Mac Storage" / move the Arduino sketchbook out of iCloud. Also `arduino-cli
      config delete board_manager.additional_urls` if `init` hangs on the board-index fetch.
-  2. The **OTA image is the APP bin** (`<sketch>.ino.bin`, ~1.7 MB) — NOT `.ino.merged.bin` (16 MB,
-     that's only for a first USB flash).
+  2. The **OTA image is the APP bin** (`SATE_Recorder.ino.bin`, ~1.7 MB) — NOT `.ino.merged.bin`
+     (the full 8MB image, first USB flash only).
   3. **Publish** = upload that `.bin` to the public `firmware` Storage bucket at path
      `sate_<version>.bin` (`upsert`, `application/octet-stream`) + insert a `sate_firmware` row
      `{version, url, notes}` where `url` is the bucket's public URL
@@ -235,6 +243,10 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   `unclaimed:true`). Don't wipe the account binding for a Wi-Fi change.
 
 **SATE Pendant (XIAO nRF52840 wearable)**
+- Firmware is in the repo at `SATE_Pendant/` (`SATE_Pendant.ino` + `HARDWARE.md` +
+  `INTEGRATION.md` + `flash_xiao.sh`). Build/flash from repo root: `./SATE_Pendant/flash_xiao.sh
+  SATE_Pendant` — it compiles with the **Seeed** core and aborts on the `0x26000` SoftDevice trap
+  (see below + `doc/09-pendant.md`). Needs the Seeed nRF52 board package installed.
 - Streams raw PCM (16 kHz mono S16LE, 244 B/notify) over standard BLE → app wraps it
   in a WAV → same `uploadSession` pipeline, `device_serial` `pendant-<bleId>`.
   Pure ble-plx: **no native rebuild, no binding/lock concern** (unlike Plaud).

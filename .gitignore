@@ -34,3 +34,6 @@ modules/plaud-sate/ios/Frameworks/
 
 # Supabase CLI link state (per-machine, written by `supabase link`)
 supabase/.temp/
+
+# Arduino build outputs
+SATE_Recorder/build*/

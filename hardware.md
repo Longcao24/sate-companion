@@ -5,23 +5,21 @@ board, pin map, build/flash, the audio + storage + connectivity pipeline, and �
 the part most worth reading — **how the firmware is optimized for memory, RAM,
 and the two CPU cores** so long recordings run smooth and never reboot.
 
-Firmware lives in `SATE_Touch_Patient_Record_Play_White/`. Current good version:
-**fw 1.5.8** (`Hardware_w_Screen/`, the two-button + screen variant). Rollback
-tag: `fw-0.9.1-working`.
+Firmware lives in `SATE_Recorder/` (sketch `SATE_Recorder.ino` — folder matches the
+`.ino`, so `arduino-cli` builds it in place). Current good version: **fw 1.5.12**
+(dual-core, two external buttons, screen). Rollback tag: `fw-0.9.1-working`.
 
-> **Two firmware variants in the repo — don't confuse them:**
-> - `Hardware_w_Screen/` — **the shipping build** (dual-core, two external
->   buttons, screen). This is what gets flashed + OTA'd. Currently **fw 1.5.8**.
-> - `1_core/` — a **single-core fallback** build (`FIRMWARE_VERSION` ends `-1c`)
->   kept for debugging core-interaction bugs. Not the default.
-> Edit + bump the variant you actually flash.
+The **pendant** firmware (XIAO nRF52840, a separate wearable) lives in `SATE_Pendant/`
+with its own `HARDWARE.md` + `flash_xiao.sh` — see that folder and `doc/09-pendant.md`.
+(The old `1_core/` single-core fallback and duplicate sketch copies were removed;
+`git log` has them if ever needed.)
 
 > ### ⭐ Versioning rule (always)
 > **Bump `FIRMWARE_VERSION` on EVERY change you flash — including a fix to the
 > version you just shipped.** Never reuse a version number for different binaries.
 > A bug fix on top of `1.2.5` is `1.2.6`, not "still 1.2.5": the dashboard reports
 > the running version, OTA compares it, and "which build is on the board?" must
-> have one answer. Bump in `SATE_Touch_Patient_Record_Play_White.ino`
+> have one answer. Bump in `SATE_Recorder.ino`
 > (`FIRMWARE_VERSION`) and update the "Current good version" line above in the
 > same change.
 
@@ -33,8 +31,8 @@ tag: `fw-0.9.1-working`.
 |------|--------|
 | Board | Freenove ESP32-S3 Display **FNK0104AB**, 2.8" |
 | MCU | ESP32-S3, dual-core Xtensa LX7 @ 240 MHz |
-| Flash | 8 MB (QIO) |
-| PSRAM | 8 MB **OPI** PSRAM |
+| Flash | **16 MB** (mode **DIO** — qio = dead black screen on manual esptool flashing) |
+| PSRAM | 8 MB **OPI** (octal) PSRAM |
 | Screen | 2.8" **240×320 ILI9341** TFT (via TFT_eSPI) |
 | Touch | **FT6336U** capacitive, I2C |
 | Audio codec | **ES8311** (I2S): onboard analog mic in + speaker amp out |
@@ -47,7 +45,7 @@ Everything is on one board, zero external wiring for the demo.
 
 ## 2. Pin map
 
-All pins are defined at the top of `SATE_Touch_Patient_Record_Play_White.ino`.
+All pins are defined at the top of `SATE_Recorder.ino`.
 
 ### SD card — SD_MMC 4-bit
 | Signal | GPIO |
@@ -92,7 +90,7 @@ register interface. Begun once, before display init.
 | **LCD backlight** | **45** | active HIGH; driven by **LEDC PWM** for auto-dim (fw 1.4.0, §8.25). Defined in the TFT_eSPI `FNK0104AB` setup, not the `.ino`. |
 | **Battery sense** | **9** | ADC1, behind the board's on-board **0.5 divider** (read ×2). `batteryPercent()` → Home chip + heartbeat telemetry (§8.27). *Not* GPIO34 — that's a classic-ESP32 pin, wrong on the S3. |
 
-**Demo buttons (fw 1.2.0+):** two external push buttons in `Hardware_w_Screen/`.
+**Demo buttons (fw 1.2.0+):** two external push buttons in `SATE_Recorder/`.
 - **RECORD (GPIO2):** on Home a press starts a take, press again stops it; from
   any other screen a press jumps back to Home. (BOOT/GPIO0 is factory-reset only.)
 - **FLAG (GPIO14):** while recording, each press marks the current moment as an
@@ -128,26 +126,30 @@ instead (see §3 for the same caveat on the record-and-upload path).
 
 Toolchain: `arduino-cli` 1.5.x, ESP32 core 3.3.x.
 
-**FQBN (exact):**
+**FQBN (exact, verified fw 1.5.12):**
 ```
-esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB,PSRAM=opi
+esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi
 ```
 
 Key options and why:
-- `PSRAM=opi` — the board has OPI (octal) PSRAM; QSPI setting won't init it.
-- ⚠️ `PartitionScheme=default_8MB` — **"8M with spiffs (3MB APP/1.5MB SPIFFS)",
-  which has TWO app slots (`ota_0` + `ota_1`).** OTA is a shipped feature, and OTA
-  **requires dual app slots** — do **NOT** use `huge_app` ("3MB No OTA"): it gives
-  one big slot and **silently breaks OTA** (the device can't flash a spare slot).
-  The 1.5.0 sketch is ~1.74 MB = 51% of the 3 MB slot, fits with room for the spare.
-- `PSRAM=opi`, `FlashSize=8M` are mandatory. (USBMode/CDCOnBoot left default; the
-  native USB-CDC port still enumerates as `/dev/cu.usbmodemNNNN`.)
+- `PSRAM=opi` — the board has OPI (octal) PSRAM; QSPI setting won't init it. **Mandatory.**
+- `FlashSize=16M` — the module is 16 MB (esptool: *Detected flash size: 16MB*). Flash
+  mode is **DIO** (a manual esptool qio write boots to a dead black screen; `arduino-cli
+  upload` sets the mode for you).
+- ⚠️ `PartitionScheme=default_8MB` — **"8M with spiffs (3MB APP/1.5MB SPIFFS)", which has
+  TWO app slots (`ota_0` + `ota_1`).** OTA is a shipped feature and **requires dual app
+  slots** — do **NOT** use `huge_app` ("3MB **No OTA**"): it gives one slot and **silently
+  breaks OTA** (the device records/registers but can't flash a spare slot to self-update).
+  The 1.5.12 sketch is ~1.72 MB = 51% of the 3 MB slot, fits with room for the spare. (The
+  8MB partition table sits in the lower half of the 16MB flash; the upper half is unused —
+  the base `esp32s3` FQBN has no stock 16MB dual-OTA scheme, and `default_8MB` is the
+  proven OTA-safe choice.)
 
-**Compile + flash** (arduino-cli requires the sketch folder name to match the
-`.ino`, so build a temp copy if your dir differs):
+**Compile + flash** — the sketch folder `SATE_Recorder/` matches its `.ino`
+(`SATE_Recorder.ino`), so `arduino-cli` builds it in place (no temp copy):
 ```bash
-arduino-cli compile --fqbn "esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB,PSRAM=opi" Hardware_w_Screen
-arduino-cli upload  -p /dev/cu.usbmodemNNNN --fqbn "esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB,PSRAM=opi" Hardware_w_Screen
+arduino-cli compile --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi" SATE_Recorder
+arduino-cli upload  -p /dev/cu.usbmodemNNNN --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi" SATE_Recorder
 ```
 
 > **First USB upload after a stuck board:** if `esptool` reports *"Failed to
@@ -179,7 +181,7 @@ on-screen UI to watch; only attach serial when idle or for boot logs.
 
 | File | Role |
 |------|------|
-| `SATE_Touch_Patient_Record_Play_White.ino` | main: UI (LVGL), record/play, SD, setup/loop |
+| `SATE_Recorder.ino` | main: UI (LVGL), record/play, SD, setup/loop |
 | `display.cpp` / `.h` | ILI9341 + LVGL init, DMA draw buffers |
 | `es8311.cpp` / `.h` / `_reg.h` | ES8311 codec driver |
 | `connectivity.cpp` / `.h` | Wi-Fi upload + command poll, BLE provisioning, sync logic |
@@ -296,11 +298,29 @@ so a 64 MB upload doesn't freeze the screen or drop the device offline. HTTP
 contiguous file, no merge pass (merge was ~30 s for 6.4 MB and overflowed the
 loop stack via deep `lv_timer_handler` re-entry — eliminated).
 
-### 8.8 Double-buffered DMA draw buffers
-`display.cpp` allocates **two** LVGL draw buffers of `240 × 24` pixels from
-**DMA-capable internal RAM** (`MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA`), with an
-automatic single-buffer fallback. 24-line strips (not a full framebuffer) keep
-internal RAM free; DMA lets the LCD flush one strip while LVGL renders the next.
+### 8.8 Double-buffered LVGL draw buffers — in PSRAM (fw 1.5.x), NOT internal RAM ⚠️
+`display.cpp` allocates **two** LVGL draw buffers of `240 × 24` pixels from **PSRAM**
+(`MALLOC_CAP_SPIRAM`), with a single-buffer fallback. They used to be DMA-capable
+**internal** RAM — that was wrong: `my_disp_flush()` pushes with a **blocking CPU copy**
+(`tft.pushColors(..., swap=true)`, no DMA), so the buffers never needed to be DMA/internal.
+Keeping them (and the whole LVGL heap, see below) OUT of internal RAM is what leaves the
+~40 KB contiguous internal block the **Supabase register TLS handshake** needs while BLE +
+Wi-Fi are up — internal draw buffers starved it and provisioning failed *"Server
+registration failed (code -1)"* (mbedTLS couldn't get its two ~16 KB buffers). This was the
+fw 1.5.12 register fix; a `code -1` at register = check internal `maxAlloc` first, not coex.
+
+> **`lv_conf.h` (external — `~/Documents/Arduino/libraries/lv_conf.h`, NOT in the repo, reset
+> by any lvgl reinstall) carries two load-bearing settings:**
+> - `LV_TICK_CUSTOM 1` — the firmware calls `lv_tick_inc()` **nowhere**; with `0`, LVGL's
+>   clock freezes at 0 and the **boot spinner sticks at frame 1, nothing ever repaints**
+>   (yet `setup()` finishes — looks like a boot hang, is not). Silent brick.
+> - `LV_MEM_CUSTOM 1` + `LV_MEM_CUSTOM_ALLOC=ps_malloc`/`ps_realloc` — puts LVGL's whole heap
+>   (else a 48 KB static **internal** pool) in PSRAM, freeing internal RAM for TLS. Needs a
+>   `--clean` compile (stale lvgl cache → runtime `heap_caps_free ... "outside heap areas"`).
+>
+> **A known-good copy is committed at `SATE_Recorder/lv_conf.reference.h`.** After installing or
+> reinstalling lvgl (8.4.0), copy it over the library's config:
+> `cp SATE_Recorder/lv_conf.reference.h ~/Documents/Arduino/libraries/lv_conf.h`.
 
 ### 8.9 Cache the pending-session scan
 `scanPending()` walks the whole `/sate/patients` tree (slow, ~15 s hitch on a
@@ -312,9 +332,13 @@ reads the cached count instantly.
 > "all synced". Fix (fw 0.9.3): check the `.synced` marker before deciding a
 > slot is empty; stop only when wav+parts+marker are all absent.
 
-### 8.10 Self-cleaning SD
-On boot, `purgeSyncedAudio()` frees the audio of any already-`.synced` session
-(server has it; the marker stays for numbering). Keeps a small card from filling.
+### 8.10 SD audio retention — NOT auto-deleted (fw 1.5.9+) ⚠️
+The old boot-time `purgeSyncedAudio()` and post-upload purge are **gone**. The device holds
+the ONLY copy of a take until the user deletes it by hand (`deleteSessionFiles()`, the sole
+`SD_MMC.remove` for audio). fw 1.5.12 re-adds a *bounded* reclaim, `trimPatientSyncedAudio`:
+keep the newest 5 sessions, free audio only of older **durably-synced** ones (`.synced` =
+server ACKed `final=1`), keep the tombstone marker (numbering), never touch unsynced audio.
+A `.synced` marker means "durably in Storage", never inferred from anything else.
 
 ### 8.11 Touch sets a flag; heavy work runs in `loop()`
 Touch callbacks only set `pendingAction`; record/upload/screen-rebuild run from
@@ -323,9 +347,11 @@ stack/heap corruption). Same rule lets long blocking work call
 `sateHookGuiPump()` to service one GUI tick at a safe depth.
 
 ### 8.12 PSRAM vs internal RAM split
-8 MB OPI PSRAM holds big/cold allocations; the hot, latency-sensitive buffers
-(DMA draw buffers, audio chunk) stay in internal SRAM. `[MEM]` telemetry tracks
-both: internal `free`/`largest`/`min` and `psram free`.
+8 MB OPI PSRAM holds big/cold allocations **plus the LVGL draw buffers and LVGL heap**
+(moved there in fw 1.5.x, §8.8) so internal RAM stays free for the register TLS handshake
+and Wi-Fi. Only the audio chunk and the small hot buffers stay in internal SRAM. `[MEM]`
+telemetry tracks both: internal `free`/`largest`/`min` and `psram free`. Watch internal
+`largest` (`maxAlloc`) — it must stay above ~34 KB during provisioning or register `code -1`.
 
 ### 8.13 Small audio slices = responsive UI (fw 1.2.3+)
 The record/playback loops move audio in **1 KB slices (~32 ms)**, not one 4 KB
@@ -740,7 +766,7 @@ The whole "cut a new firmware and push it to every device" flow is scripted in
 **`scripts/publish_firmware.sh`** — the CLI equivalent of the web Admin
 **"Publish firmware"** card. It:
 1. Bumps `FIRMWARE_VERSION` (auto patch-bump, or pass an explicit version),
-2. Compiles `Hardware_w_Screen/` with the **OTA partition** (`default_8MB`),
+2. Compiles `SATE_Recorder/` with the **OTA partition** (`default_8MB`),
 3. Admin-logs-in to Supabase → JWT,
 4. `POST`s the `.bin` to `device-api /firmware?version=…&notes=…` → uploads to the
    `firmware` Storage bucket + inserts a `sate_firmware` row,

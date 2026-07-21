@@ -36,20 +36,21 @@ The S3 module is **16 MB flash + 8 MB octal PSRAM**, flash mode **DIO**:
 esp32:esp32:esp32s3:PSRAM=opi,FlashSize=16M,PartitionScheme=huge_app
 ```
 
-### `arduino-cli` sketch-name rule
+### Build the recorder
 
-`arduino-cli` requires the sketch **folder name to match the `.ino`**. The repo folder
-`Hardware_w_Screen/` (or `SATE_Touch_Patient_Record_Play_White/`) — if the folder holding the
-`.ino` isn't named `SATE_Touch_Patient_Record_Play_White`, copy the `.ino`/`.cpp`/`.h` into a temp
-dir of that name and build there. Always compile `--clean` after a `lv_conf.h` change (stale lvgl
-cache → runtime `heap_caps_free` assert; see [02-firmware.md](02-firmware.md#display-lvgl--the-internal-ram-budget)).
+The sketch is `SATE_Recorder/SATE_Recorder.ino` — the folder name matches the `.ino`, so
+`arduino-cli` builds it in place (no temp-copy). Compile `--clean` after any `lv_conf.h` change
+(stale lvgl cache → runtime `heap_caps_free` assert; see
+[02-firmware.md](02-firmware.md#display-lvgl--the-internal-ram-budget)).
 
 ```bash
-DIR=SATE_Touch_Patient_Record_Play_White
 arduino-cli compile --clean \
-  --fqbn "esp32:esp32:esp32s3:PSRAM=opi,FlashSize=16M,PartitionScheme=huge_app" \
-  --output-dir "$DIR/build" "$DIR"
+  --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi" \
+  --output-dir SATE_Recorder/build SATE_Recorder
 ```
+
+⚠️ **`PartitionScheme=default_8MB` (dual OTA slots), NEVER `huge_app`** — `huge_app` is single-slot
+("3MB No OTA") and silently disables OTA. `PSRAM=opi` mandatory (16MB flash + 8MB octal PSRAM).
 
 ### Flashing over USB (full, lock-safe)
 
@@ -62,7 +63,7 @@ P=/dev/cu.usbmodem101
 "$ET" --chip esp32s3 --port $P --baud 921600 erase_flash        # ⚠️ ALSO WIPES NVS (see below)
 "$ET" --chip esp32s3 --port $P --baud 921600 --before default_reset --after hard_reset \
   write_flash --flash_mode dio --flash_freq 80m --flash_size 16MB \
-  0x0 "$DIR/build/SATE_Touch_Patient_Record_Play_White.ino.merged.bin"
+  0x0 "SATE_Recorder/build/SATE_Recorder.ino.merged.bin"
 ```
 
 - **⚠️ `erase_flash` wipes NVS** — the device's Wi-Fi creds + account claim live there. After a full
