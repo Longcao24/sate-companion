@@ -244,6 +244,15 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   firmware. So: **scan with NO service filter**, and match on `name` OR `localName`
   OR the advertised audio service. Verify what the device really broadcasts by
   scanning from the Mac (`bleak`) before blaming the app.
+- 🛑 **Flash with the SEEED core, NOT the Adafruit Feather core.** FQBN
+  `Seeeduino:nrf52:xiaonRF52840SensePlus`. The Adafruit `feather52840sense` links the app
+  at `0x26000` → overwrites the last page of the S140 7.3.0 SoftDevice → BLE stack
+  corrupted: **app runs but NEVER advertises, no CDC port** (hardfaults in
+  `Bluefruit.begin()`). Correct core links at `0x27000` (the UF2 conversion prints it —
+  `0x26000` = STOP). Recover a corrupted (or factory-fresh) board by DFU-restoring Seeed's
+  SoftDevice+bootloader (`adafruit-nrfutil dfu serial … Seeed_…_s140_7.3.0.zip`), then
+  reflash. `flash_xiao.sh` now uses the Seeed core + aborts on `0x26000`. Full recipe:
+  `doc/09-pendant.md` + `~/Desktop/necklace-insole/firmware/HARDWARE.md`.
 - **Mic is very quiet.** The app peak-normalizes + applies a loudness drive with a
   tanh soft-clip (`applyGain` in `PendantLink.ts`; tune `LOUDNESS`/`MAX_GAIN`). The
   firmware has its own `MIC_GAIN`/`DIGITAL_GAIN` — don't stack both to the point of

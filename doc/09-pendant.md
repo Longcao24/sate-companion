@@ -57,6 +57,41 @@ MTU / PHY        247 / 2M preferred
 **Flow:** connect → request MTU 247 → subscribe `19b10001` → write `0x01` → PCM notifications
 accumulate → write `0x00` → wrap the PCM in a 44-byte WAV header → `uploadSession`.
 
+## Flashing the pendant firmware (⚠️ SoftDevice-corruption trap)
+
+Firmware lives at `~/Desktop/necklace-insole/firmware/` (`xiao_audio_ble/`,
+`flash_xiao.sh`, `HARDWARE.md` — the full hard-won recipe). Board = **Seeed XIAO
+nRF52840 Sense Plus**, flashed by UF2 (double-tap reset → `XIAO-SENSE` drive mounts →
+raw-write the `.uf2`).
+
+🛑 **Build with the SEEED core, never the Adafruit Feather core.**
+`FQBN = Seeeduino:nrf52:xiaonRF52840SensePlus`.
+
+- Building with `adafruit:nrf52:feather52840sense` links the app at **`0x26000`**, which
+  overwrites the last flash page of the **S140 7.3.0 SoftDevice** → BLE stack corrupted.
+  **Symptom: the app runs but NEVER advertises, and no CDC serial port appears** (it
+  hardfaults in `Bluefruit.begin()`). Non-BLE sketches still run — that's the giveaway
+  it's the SoftDevice, not the code.
+- The **correct** core links at **`0x27000`**. The UF2 conversion prints the start
+  address — `0x27000` = good, `0x26000` = STOP, wrong core. `flash_xiao.sh` now aborts
+  on `0x26000`.
+- Recovering a corrupted board (no J-Link needed): DFU-restore Seeed's SoftDevice+bootloader,
+  then reflash the correct-core app UF2.
+  ```bash
+  # 1. double-tap into bootloader, note the /dev/cu.usbmodem* port, then:
+  ZIP=~/Library/Arduino15/packages/Seeeduino/hardware/nrf52/1.1.13/bootloader/Seeed_XIAO_nRF52840_Sense_Plus/Seeed_XIAO_nRF52840_Sense_Plus_bootloader-0.6.2_s140_7.3.0.zip
+  adafruit-nrfutil --verbose dfu serial -pkg "$ZIP" -p /dev/cu.usbmodemXXXX -b 115200   # ~20s, do NOT unplug
+  # 2. double-tap again, then flash the correct-core app:
+  ./flash_xiao.sh ~/Desktop/necklace-insole/firmware/xiao_audio_ble
+  ```
+  A **factory-fresh** board needs this DFU restore too — its SoftDevice state isn't
+  Bluefruit-compatible until you flash Seeed's own bootloader+SoftDevice.
+
+**Verify from the Mac** (macOS is flaky at surfacing scan-response *names* — match on the
+audio service UUID): a `bleak` scan should show `SATE Pendant` advertising service
+`19b10000-…`. Blue LED blink = advertising, solid = connected. If a LiPo battery is
+attached, unplug it while debugging (USB won't power-cycle it → unreliable resets).
+
 ## Nap mode — a gap is NOT a disconnect
 
 To save battery the pendant **naps during silence**: after ~30 s quiet it stops sending
