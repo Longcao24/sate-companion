@@ -118,6 +118,33 @@ Durable lessons — check the ones relevant to what you're touching. Version num
 - **Admin page** `/admin` manages ALL devices + firmware system-wide, gated by the
   `sate_admins` table (by email). Don't expose admin routes without that gate.
 
+**⚠️ Device AI processing is ASYNC — never call the AI from an edge function**
+- **The bug:** the old `process-device-session` edge ran `fetch(AI_PROCESS_URL)` (ngrok, self-hosted
+  CUDA) and *awaited* the whole transcription. Supabase edge has a hard ~150s wall-clock limit
+  (NOT configurable, NOT a timeout we set) — on a long take it **kills the worker mid-fetch, before
+  the `try/catch`**, so `process_error` is never written and the session hangs in `processing`
+  forever. A 32-min take showed 70 min stuck (edge kill → cron retry → kill …) before a retry
+  happened to land. The AI is not slow; the edge just can't hold the call.
+- **The fix (in prod):** processing is a state machine on `sate_device_sessions.status`
+  (`queued → processing → done | error`, cols `processing_started_at` / `attempts` / added by the
+  `async_processor_state_machine` migration). New sessions auto-`queued` (column default). A
+  **Cloudflare Container** (`cf-processor/`, Python, `sate-processor.longcao.workers.dev`) is a
+  long-lived process with NO wall-clock: it `claim_next_session()` (atomic, SKIP LOCKED) → downloads
+  the WAV → HOLDS the ngrok `/process` call → copies audio to the recordings bucket → calls the
+  `finalize-session` edge (analysis + insert `recordings` + set done; the light half, fits the edge
+  limit). `pg_cron` pings the Worker `/tick` every minute to keep the container warm; the container's
+  own loop drains the queue.
+- **`process-device-session` is now a 200 no-op** — `device-api` still fire-and-forgets to it, but it
+  must NOT process, or it races the container and duplicates recordings. Don't revive it.
+- **Retry:** watchdog (`requeue_stale_sessions`) auto-requeues stalled `processing` jobs up to
+  `MAX_ATTEMPTS` then → `error`; transient failures (network/`5xx`/`408`/`429`) requeue with backoff
+  (`requeue_session`); permanent (`4xx`, no segments) → `error` immediately; the user Retry button
+  (`POST /sessions/:id/retry`, device-api ≥v14) re-queues an `error` session.
+- **Never move the AI call back into an edge/Worker fetch.** Any serverless request (Supabase edge OR
+  a plain CF Worker — the ~100s 524 origin timeout) will kill a long synchronous transcription. The
+  long call MUST live in a real long-running process (the container). `finalize-session` and
+  `device-api` MUST stay `verify_jwt:false`. See `doc/05-backend-supabase.md`.
+
 **⚠️ Recorder audio is never auto-deleted (fw ≥1.5.9)**
 - The device holds the ONLY copy of a take until the user deletes it by hand. The three old reclaim
   paths (post-upload purge, boot-time `purgeSyncedAudio`, 5-session `trimSessionsToMax`) are GONE.

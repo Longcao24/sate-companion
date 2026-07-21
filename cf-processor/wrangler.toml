@@ -1,0 +1,42 @@
+# SATE async device-session processor — Cloudflare Worker + Container.
+#
+# The Worker is a thin trigger. The Container is a long-lived Python process that
+# polls Supabase, claims a queued session, HOLDS the long AI (ngrok) call outside
+# any serverless wall-clock, copies the audio into the recordings bucket, then calls
+# the `finalize-session` edge to write the recording. This is the piece that fixes
+# "stuck in processing" for long takes — a container has no 150s limit like an edge
+# function does.
+
+name = "sate-processor"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# The container image (Python). One instance is enough — GPU concurrency is 1 anyway,
+# and the poll loop drains the queue serially.
+[[containers]]
+class_name = "ProcessorContainer"
+image = "./Dockerfile"
+max_instances = 1
+instance_type = "standard-1"
+
+[[durable_objects.bindings]]
+name = "PROCESSOR"
+class_name = "ProcessorContainer"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ProcessorContainer"]
+
+# Non-secret config. Secrets (SUPABASE_SERVICE_KEY, AI_PROCESS_URL, TICK_SECRET) are
+# set with `wrangler secret put` — see README.
+[vars]
+SUPABASE_URL = "https://zlgdpivcbmaodgokkdvz.supabase.co"
+FINALIZE_URL = "https://zlgdpivcbmaodgokkdvz.supabase.co/functions/v1/finalize-session"
+STUCK_MINUTES = "45"   # a 32-min take + transfer fits well under this; watchdog reclaims beyond it
+MAX_ATTEMPTS = "3"
+POLL_INTERVAL = "10"   # seconds between empty-queue polls
+WORKER_ID = "cf-container-1"
+
+[observability]
+enabled = true

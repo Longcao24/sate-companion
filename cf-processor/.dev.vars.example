@@ -1,0 +1,4 @@
+# Copy to .dev.vars for `wrangler dev`. Never commit .dev.vars (it holds secrets).
+SUPABASE_SERVICE_KEY="your-supabase-service-role-key"
+AI_PROCESS_URL="https://sate-v1-5.ngrok.io/process"
+TICK_SECRET="SATE_2026"
