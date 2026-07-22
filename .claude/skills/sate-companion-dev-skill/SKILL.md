@@ -28,6 +28,21 @@ shared BLE radio, hang the AI pipeline, or lose a patient's recording.
   *how it works*, deliberately **without** line numbers so it stays maintainable.
 - **`git log`** — the ground truth for current firmware/edge-fn versions (numbers drift).
 
+## Common tasks → what to do
+
+| Goal | Do this |
+|---|---|
+| **Build / flash the recorder** | `references/build-flash-release.md` → recorder section (FQBN with `default_8MB`; check `lv_conf.h`). |
+| **Build / flash the pendant** | `./SATE_Pendant/flash_xiao.sh SATE_Pendant` (Seeed core only). See `references/build-flash-release.md`. |
+| **Cut a firmware release + OTA** | Bump `FIRMWARE_VERSION` → compile → upload the app `.bin` to the `firmware` bucket + insert a `sate_firmware` row → verify 200 + SHA → `reboot` then `ota`. Full recipe in `references/build-flash-release.md`. |
+| **Run the mobile app** | `npm install && npm run ios` (physical iOS device; Plaud has no simulator). Read RULE #1/#2 first if touching Plaud/BLE. |
+| **Run / deploy the web app** | `cd react_app_sate-ui_update && npm run dev`; `npm run build` before `git subtree push … webapp <branch>`. |
+| **Deploy backend edge fns** | `supabase functions deploy <fn> --no-verify-jwt`. Never `verify_jwt:true`. See `references/backend-and-testing.md`. |
+| **Touch the AI pipeline** | Keep the long call in `cf-processor` (container); `process-device-session` stays a 200 no-op. `references/backend-and-testing.md`. |
+| **Verify a firmware change** | Run the `hwtest/` harness on a real board (`python3 run.py --config config.toml`). Never ship firmware unverified. |
+| **Edit / deploy the docs** | `cd docs-site && npm start`; `npm run deploy:cf`. Keep line numbers OUT of published docs. |
+| **Anything touching Plaud / BLE / audio integrity** | STOP and read `references/safety-invariants.md` + `CLAUDE.md` first — these are the brick / data-loss paths. |
+
 ## MANDATORY pre-flight review (run all 5 rows before you change anything)
 
 Fill this in for the task at hand. If any row is unchecked, stop and resolve it first.
