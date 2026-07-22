@@ -68,7 +68,7 @@ Plaud device ──BLE──▶ PlaudDeviceAgent (native SDK, arm64 device only)
    api.uploadSession({ device_serial:"plaud-<sn>", patient_id, session_number,
                        sample_rate, wav_base64 })   ← UNCHANGED SATE path
                         ▼
-   device-api → device-sessions → process-device-session → recordings
+   device-api → device-sessions → [Cloudflare container] → finalize-session → recordings
 ```
 
 Token: partner secrets never touch the phone. The app calls the

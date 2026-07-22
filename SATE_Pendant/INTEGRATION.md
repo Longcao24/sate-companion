@@ -1,7 +1,7 @@
 # Sona / Nuna Pendant — BLE Integration Guide
 
 How to connect any app to the pendant and receive its audio. The pendant is a
-**Seeed XIAO nRF52840 Sense Plus** running `xiao_audio_ble/xiao_audio_ble.ino`.
+**Seeed XIAO nRF52840 Sense Plus** running `SATE_Pendant.ino`.
 It streams the onboard mic over BLE as **raw 16-bit PCM** — no codec, no
 decoding needed on your side.
 
@@ -124,7 +124,7 @@ Consequences for your app:
 - The BLE connection stays up during a nap. Keep your subscription open; audio
   resumes on the next sound (speech, a bite, noise) with no re-arming needed.
 - If you need continuous audio regardless of silence, that behavior is tunable in
-  firmware (`SLEEP_AFTER_MS`, `WAKE_MEANABS` in `xiao_audio_ble.ino`).
+  firmware (`SLEEP_AFTER_MS`, `WAKE_MEANABS` in `SATE_Pendant.ino`).
 
 ---
 

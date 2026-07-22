@@ -61,7 +61,7 @@ Plaud device ──BLE──▶ PlaudDeviceAgent (native SDK)
    api.uploadSession({ device_serial:"plaud-<sn>", patient_id, session_number,
                        sample_rate, wav_base64 })      ← UNCHANGED SATE path
                         ▼
-   device-api ──▶ device-sessions bucket ──▶ process-device-session ──▶ recordings
+   device-api ──▶ device-sessions bucket ──▶ [Cloudflare container] ──▶ finalize-session ──▶ recordings
 ```
 
 `device_serial` is prefixed **`plaud-<sn>`** so Plaud sessions are distinguishable from
@@ -146,7 +146,7 @@ callbacks and forwards everything else to the real wrapper (connect/list/export/
 working), fires both the 2.x and 3.0 mark requests, waits (≤3.5 s), then restores the
 wrapper. The offsets come back as `markOffsets`, and `PlaudConnectScreen` sends them as
 `flags` on `uploadSession` — the SAME column the SATE hardware flag button uses, so
-`process-device-session` copies them to `recordings.flags` and they render as the same
+`finalize-session` copies them to `recordings.flags` and they render as the same
 seek-bar ticks on the web report.
 
 **Live in-app display.** The SDK has no real-time mark push, so while a take is recording

@@ -210,9 +210,9 @@ old UF2 that still advertises `19B10003`, the current app ignores it.
 ```bash
 export PATH="$HOME/.local/pyshim:$PATH"
 FQBN=Seeeduino:nrf52:xiaonRF52840SensePlus
-cp -r "/Users/hoanglong/Desktop/necklake and insole/xiao_audio_ble" /tmp/xiao_audio_ble
-arduino-cli compile -b "$FQBN" /tmp/xiao_audio_ble
-HEX=$(find ~/Library/Caches/arduino/sketches -name "xiao_audio_ble.ino.hex" | head -1)
+cp -r "/Users/hoanglong/Desktop/necklake and insole/SATE_Pendant" /tmp/SATE_Pendant
+arduino-cli compile -b "$FQBN" /tmp/SATE_Pendant
+HEX=$(find ~/Library/Caches/arduino/sketches -name "SATE_Pendant.ino.hex" | head -1)
 python3 /tmp/uf2conv.py --family 0xADA52840 --convert "$HEX" --output ~/Desktop/xiao_firmware/1_audio_full.uf2
 # verify it prints: start address: 0x27000
 # then double-tap board, run FLASH_audio.command

@@ -95,21 +95,27 @@ Rules that are load-bearing — an earlier version broke each one and cost a 62-
 - **The idempotency probe checks the object, not just the row.** A row is not proof the audio
   landed; answering "already stored" for a ghost row strands the recording on the device forever.
 
-### `process-device-session`
+### Processing a device session (ASYNC — split container + `finalize-session`)
 
-1. Download the WAV from the `device-sessions` bucket.
-2. **Resolve patient** (no fabrication):
-   1. `sate_device_patients.clinical_patient_id` (the app sets this when it pushes the roster), else
-   2. `patients` where `slp_id = owner` and `device_patient_id = <device patient id>`, else
-   3. `null` (unassigned — same as a manual upload with no patient chosen).
-3. POST the WAV to the AI `/process` endpoint (multipart `audio_file`).
-4. `countErrors` + `calculateSpeechAnalysis` (ported from the web app, identical) — see [06](06-ai-pipeline.md).
-5. Copy the WAV into the `recordings` bucket.
-6. **INSERT `recordings`** `{ transcript, error_counts, analysis, patient_id, … }`.
-7. Mark `sate_device_sessions.processed = true`, set `recording_id`.
+`process-device-session` is a **200 no-op** now (don't revive). The work is split so the long AI
+call lives in a process with no wall-clock:
 
-Modes: single `{ session_id }` or a batch sweep over unprocessed sessions. `processed` guards
-double-processing.
+**Cloudflare container** (`cf-processor/`, long-lived) — for each `queued` session:
+1. `claim_next_session()` (atomic, SKIP LOCKED) → `status=processing`.
+2. Download the WAV from the `device-sessions` bucket.
+3. **HOLD** the AI `/process` POST (multipart `audio_file`) — the long transcription.
+4. Copy the WAV into the `recordings` bucket.
+5. POST `finalize-session` with the segments.
+
+**`finalize-session`** edge fn (the light half, fits the 150 s limit):
+6. **Resolve patient** (no fabrication): `sate_device_patients.clinical_patient_id`, else
+   `patients` matched on `slp_id` + `device_patient_id`, else `null` (Standalone).
+7. `countErrors` + `calculateSpeechAnalysis` (ported from the web app, identical) — see [06](06-ai-pipeline.md).
+8. **INSERT `recordings`** `{ transcript, error_counts, analysis, flags, patient_id, … }`, set
+   `sate_device_sessions.status=done` + `recording_id`.
+
+State machine `queued → processing → done | error | no_text`; the watchdog re-queues stalled jobs;
+the user Retry button re-queues an `error`. Never move the AI call into an edge fn / Worker fetch.
 
 ## Storage buckets
 
@@ -163,5 +169,4 @@ npx supabase storage cp /tmp/p.bin ss:///device-sessions/_probe/p.bin --linked -
 
 `process-mobile-uploads` was an earlier mobile-path function that uses **wrong columns**
 (`transcript_data`, `issue_counts`) — not the live `recordings` schema (`transcript`,
-`error_counts`). Do not model new work on it; the device path (`process-device-session`) is the
-correct, live reference.
+`error_counts`). Do not model new work on it; the live device path (`finalize-session`) is the correct reference.

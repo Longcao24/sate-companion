@@ -22,7 +22,7 @@ Pendant ──BLE (raw PCM notify)──▶ PendantLink (react-native-ble-plx)
    api.uploadSession({ device_serial:"pendant-<id>", patient_id, session_number,
                        sample_rate:16000, wav_base64 })   ← UNCHANGED SATE path
                         ▼
-   device-api (user-authed /sessions) ──▶ process-device-session ──▶ recordings
+   device-api (user-authed /sessions) ──▶ [Cloudflare container] ──▶ finalize-session ──▶ recordings
 ```
 
 `device_serial` is prefixed **`pendant-<id>`** (the ble-plx peripheral id). The web

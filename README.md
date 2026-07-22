@@ -3,6 +3,9 @@
 Phone app for the SATE Recorder. Signs in with the **same SLP account as the
 SATE web app**; recorders you set up are claimed to that account.
 
+> **Firmware + hardware setup** (recorder + pendant): see [`SETUP.md`](SETUP.md) (zero-to-flash),
+> [`SATE_Recorder/`](SATE_Recorder/) + [`SATE_Pendant/`](SATE_Pendant/), and [`hardware.md`](hardware.md).
+
 ## Connectivity model (two modes, automatic)
 
 ```text
