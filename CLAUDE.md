@@ -164,7 +164,9 @@ Durable lessons — check the ones relevant to what you're touching. Version num
 
 **Firmware / hardware (ESP32-S3, `SATE_Recorder/`)** — recorder sketch is
 `SATE_Recorder/SATE_Recorder.ino` (folder name matches the `.ino`, so `arduino-cli` builds it
-directly, no temp-copy). Pendant firmware is `SATE_Pendant/` (see the pendant section).
+directly, no temp-copy). Pendant firmware is `SATE_Pendant/` (see the pendant section). Coworker
+setup + prebuilt flash assets: `SETUP.md` + the **GitHub Release** (`gh release … fw-1.5.12`:
+`merged.bin` for flash-only, `sate-arduino-libs.zip` for exact libs). Bump the release tag per fw.
 - 🛑🛑 **#1 BOOT-HANG TRAP — screen bright but frozen at the boot spinner is NOT a bad flash and NOT
   the code. It is `lv_conf.h` `LV_TICK_CUSTOM 0`.** The firmware never calls `lv_tick_inc()`, so if
   `LV_TICK_CUSTOM` isn't `1` (millis()) LVGL's clock is frozen → spinner sticks at frame 1, nothing

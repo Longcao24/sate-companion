@@ -5,6 +5,20 @@ Everything a fresh Mac needs to build and flash the **SATE Recorder** (ESP32-S3)
 `SATE_Pendant/`. Deeper reference: [`hardware.md`](hardware.md), [`doc/07-runbook.md`](doc/07-runbook.md),
 [`doc/09-pendant.md`](doc/09-pendant.md).
 
+## Fastest paths — pick what you need
+
+Prebuilt assets are attached to the **GitHub Release**:
+👉 https://github.com/Longcao24/sate-companion/releases/tag/fw-1.5.12
+
+| You want to… | Do this | Toolchain needed? |
+|---|---|---|
+| **Just flash a board** (not develop) | Download `SATE_Recorder-fw1.5.12.merged.bin`, flash with the web flasher [espressif.github.io/esptool-js](https://espressif.github.io/esptool-js/) at offset `0x0` (or `esptool.py … --flash_mode dio --flash_freq 80m --flash_size 16MB 0x0 <bin>`) | **None** |
+| **Build from source, exact libs** | Download `sate-arduino-libs.zip`, unzip into your Arduino sketchbook (gives `…/libraries/TFT_eSPI`, `…/lvgl`, `…/lv_conf.h`), install the esp32 core, then `arduino-cli compile`/`upload` | arduino-cli + esp32 core |
+| **Build from source, auto-install everything** | `./toolchain/setup-arduino.sh` (below) | script installs it all |
+
+The release `.merged.bin` is the whole flash (bootloader+partitions+app); `.app.bin` is the OTA image.
+Everything below is for **building from source**.
+
 ## One-command setup
 
 ```bash
