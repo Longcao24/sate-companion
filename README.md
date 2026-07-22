@@ -1,10 +1,28 @@
-# SATE Companion (React Native / Expo)
+# SATE
+
+Clinical speech-recorder system: an **ESP32-S3 recorder** + **XIAO nRF52840 pendant** (firmware),
+an **Expo phone app**, a **Vite/React web app**, and a **Supabase + Cloudflare** backend.
+
+## 🚀 Quick start — where to begin
+
+| I want to work on… | Start here |
+|---|---|
+| **Recorder / Pendant firmware** — build, flash, **edit code** | **[`SETUP.md`](SETUP.md)** → `git clone` then `./toolchain/setup-arduino.sh` (zero-to-flash), edit `SATE_Recorder/` · `SATE_Pendant/`. Deep ref: [`hardware.md`](hardware.md) |
+| **Just flash a board** (no toolchain) | [GitHub Release `fw-1.5.12`](https://github.com/Longcao24/sate-companion/releases/tag/fw-1.5.12) → `merged.bin` via [web flasher](https://espressif.github.io/esptool-js/) |
+| **Phone app** (React Native / Expo) | `src/` — see the phone-app section below |
+| **Web app** (Vite / React) | `react_app_sate-ui_update/` (`npm i && npm run dev`) |
+| **Backend** (Supabase + Cloudflare) | [`doc/05-backend-supabase.md`](doc/05-backend-supabase.md), [`doc/06-ai-pipeline.md`](doc/06-ai-pipeline.md), `cf-processor/` |
+| **Architecture / agent context** | [`doc/`](doc/) (numbered handbook), `CLAUDE.md` |
+
+> Firmware flash FQBN: `esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi`
+> (⚠️ `default_8MB` = dual OTA slots, **never** `huge_app`).
+
+---
+
+# SATE Companion (phone app — React Native / Expo)
 
 Phone app for the SATE Recorder. Signs in with the **same SLP account as the
 SATE web app**; recorders you set up are claimed to that account.
-
-> **Firmware + hardware setup** (recorder + pendant): see [`SETUP.md`](SETUP.md) (zero-to-flash),
-> [`SATE_Recorder/`](SATE_Recorder/) + [`SATE_Pendant/`](SATE_Pendant/), and [`hardware.md`](hardware.md).
 
 ## Connectivity model (two modes, automatic)
 
