@@ -228,6 +228,153 @@ def _scan_ble(name_filter: str | None) -> int:
         return 1
 
 
+CRASH_RX = (r"(Guru Meditation|Backtrace:|abort\(\)|Brownout|assert failed|"
+            r"CORRUPT HEAP|StoreProhibited|LoadProhibited|Kernel panic|Panic'ked)")
+
+
+def _read_serial_log(port: str, seconds: float) -> list[str]:
+    """Reset the board and collect its boot/heartbeat log for `seconds`."""
+    import time
+    from hwtest.link import SerialLink
+    link = SerialLink(port)
+    lines: list[str] = []
+    try:
+        link.reset()
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            ln = link.readline(min(1.0, max(0.05, end - time.monotonic())))
+            if ln is not None:
+                lines.append(ln)
+    finally:
+        link.close()
+    return lines
+
+
+def _deep_recorder(port: str, seconds: float) -> int:
+    print(bold("\nDevice — recorder") + dim(f"  ({port} · reset + read {seconds:g}s of boot log)"))
+    try:
+        lines = _read_serial_log(port, seconds)
+    except Exception as e:  # noqa: BLE001
+        bad(f"could not open {port}: {e}")
+        info("close any serial monitor / arduino-cli using the port, check the cable, or pass --port")
+        return 1
+    return _diagnose_recorder_lines(lines, seconds)
+
+
+def _diagnose_recorder_lines(lines: list[str], seconds: float) -> int:
+    """Pure analysis of a recorder boot log → prints findings, returns exit code.
+    Split out from I/O so the diagnosis logic is testable without a board."""
+    import re
+
+    if not lines:
+        bad("no serial output from the board")
+        info("wrong CDC build (needs CDCOnBoot=cdc,USBMode=hwcdc), board unpowered, or wrong port")
+        return 1
+
+    text = "\n".join(lines)
+    faults = 0
+
+    m = re.search(CRASH_RX, text)
+    if m:
+        bad(f"crash / panic detected: {m.group(0)}"); faults += 1
+        for l in lines:
+            if re.search(CRASH_RX, l):
+                info(dim(l.strip())); break
+
+    boots = sum(1 for l in lines if l.startswith("ESP-ROM:") or "rst:0x" in l)
+    if boots > 1:
+        warn(f"{boots} boot banners in {seconds:g}s — possible boot-loop (brownout / bad flash)"); faults += 1
+
+    if any("SD_MMC.begin failed" in l or "setPins failed" in l for l in lines):
+        bad("SD card init FAILED — reseat the microSD / check wiring"); faults += 1
+    else:
+        sd = next((l for l in lines if "SD card size MB" in l), None)
+        if sd:
+            ok(f"SD ok — {sd.strip()}")
+
+    if any("ES8311 init failed" in l for l in lines):
+        bad("audio codec ES8311 init FAILED — check the I2C bus / codec"); faults += 1
+
+    if any("Fallback single LVGL" in l for l in lines):
+        warn("display fell back to a single draw buffer (low PSRAM?)")
+    elif any("[DISPLAY]" in l and "PSRAM" in l for l in lines):
+        ok("display init ok (PSRAM draw buffers)")
+
+    ready = next((l for l in lines if "[MEM]" in l and "ready" in l), None)
+    if ready:
+        ok("setup completed — reached [MEM] ready")
+        mm = re.search(r"int free=\s*(\d+).*largest=\s*(\d+).*min=\s*(\d+).*psram free=\s*(\d+)", ready)
+        if mm:
+            ifree, largest, mn, ps = map(int, mm.groups())
+            info(f"heap free={ifree}  largest={largest}  min={mn}  psram free={ps}")
+            if ps == 0:
+                bad("psram free = 0 — PSRAM not detected (check PSRAM=opi / octal)"); faults += 1
+            if 0 < largest < 40000:
+                warn(f"largest contiguous block {largest} < 40 KB — TLS handshake / OTA may fail (fragmented heap)")
+    else:
+        bad(f"did NOT reach [MEM] ready in {seconds:g}s — setup hanging or crashing (SD / audio / services)")
+        faults += 1
+
+    pm = re.search(r"provisioned=(\d)", text)
+    if pm:
+        info("device is " + (green("claimed / provisioned") if pm.group(1) == "1"
+                             else yellow("UNCLAIMED — needs onboarding")))
+
+    regs = [l for l in lines if "register attempt" in l]
+    if regs:
+        cm = re.search(r"code=(-?\d+)", regs[-1])
+        if cm and int(cm.group(1)) < 0:
+            warn(f"registration failing — {regs[-1].strip()}  (check Wi-Fi / server / device key)")
+
+    print()
+    if faults == 0:
+        ok(green(f"no hardware faults detected  ({len(lines)} log lines read)"))
+        info(dim("note: a frozen screen despite [MEM] ready = the LV_TICK_CUSTOM trap — verify the screen visually"))
+    else:
+        bad(red(f"{faults} hardware fault(s) detected — see above"))
+    return 1 if faults else 0
+
+
+def _deep_pendant(name: str | None, seconds: float) -> int:
+    print(bold("\nDevice — pendant") + dim(f"  (BLE scan + connect, {seconds:g}s)"))
+    try:
+        import asyncio
+        from bleak import BleakClient, BleakScanner
+    except ImportError:
+        warn("bleak not installed — `pip install bleak`")
+        return 1
+
+    want = (name or "SATE").lower()
+
+    async def probe() -> int:
+        dev = await BleakScanner.find_device_by_filter(
+            lambda d, ad: want in ((d.name or ad.local_name or "").lower()), timeout=seconds)
+        if not dev:
+            bad("pendant not found advertising — check it is powered and the blue LED is blinking")
+            return 1
+        ok(f"advertising: {dev.name or '(scan-response name)'}  [{dev.address}]")
+        try:
+            async with BleakClient(dev) as client:
+                ok("connected")
+                try:
+                    val = await client.read_gatt_char("00002a19-0000-1000-8000-00805f9b34fb")
+                    b = val[0]
+                    ok(f"battery {b & 0x7f}%  charging={'yes' if b & 0x80 else 'no'}")
+                except Exception:  # noqa: BLE001
+                    warn("connected but could not read the battery characteristic")
+            ok(green("pendant healthy — advertises, connects, and responds"))
+            return 0
+        except Exception as e:  # noqa: BLE001
+            bad(f"found but connect failed: {e}")
+            return 1
+
+    try:
+        return asyncio.run(probe())
+    except Exception as e:  # noqa: BLE001
+        bad(f"BLE probe failed: {e}")
+        return 1
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     banner()
     print(bold("\nEnvironment"))
@@ -250,6 +397,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     (ok if cfg.exists() else warn)(f"config.toml " + ("present" if cfg.exists() else "missing — copy hwtest/config.example.toml"))
     port = _auto_port()
     (ok if port else warn)(f"serial port: {port}" if port else "no recorder serial port detected")
+
+    # --device: actually probe the attached hardware and surface real faults
+    if getattr(args, "device", False):
+        if args.target == "pendant":
+            return _deep_pendant(args.name, args.seconds)
+        target_port = args.port or port
+        if not target_port:
+            bad("no serial port — plug in the recorder or pass --port (see `sate devices`)")
+            return 2
+        return _deep_recorder(target_port, args.seconds)
+    else:
+        print(dim("\n  add --device to reset the board and diagnose real hardware faults"))
     return 0
 
 
@@ -314,7 +473,13 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--name", help="BLE name filter (default: any)")
     d.set_defaults(func=cmd_devices)
 
-    sub.add_parser("doctor", help="check the toolchain + environment").set_defaults(func=cmd_doctor)
+    doc = sub.add_parser("doctor", help="check the toolchain + environment (add --device to diagnose the board)")
+    doc.add_argument("-d", "--device", action="store_true", help="reset the attached board and diagnose real hardware faults")
+    doc.add_argument("-t", "--target", choices=["recorder", "pendant"], default="recorder")
+    doc.add_argument("-p", "--port", help="serial port for the recorder probe (auto-detected if omitted)")
+    doc.add_argument("--name", help="BLE name filter for the pendant probe (default: SATE)")
+    doc.add_argument("--seconds", type=float, default=15.0, help="how long to read the boot log / scan (default: 15)")
+    doc.set_defaults(func=cmd_doctor)
     sub.add_parser("gui", help="launch the native test window").set_defaults(func=cmd_gui)
     sub.add_parser("dashboard", help="launch the browser test dashboard").set_defaults(func=cmd_dashboard)
     sub.add_parser("version", help="show CLI + firmware versions").set_defaults(func=cmd_version)

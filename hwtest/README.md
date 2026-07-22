@@ -24,6 +24,8 @@ the recorder and pendant:
 ./hwtest/sate flash pendant         # build + flash the pendant (Seeed core)
 ./hwtest/sate devices --ble         # list serial ports + scan for the pendant
 ./hwtest/sate doctor                # check the toolchain + environment
+./hwtest/sate doctor --device       # reset the board + diagnose real hardware faults
+./hwtest/sate doctor -d -t pendant  # BLE probe: advertising, connect, battery
 ./hwtest/sate version               # CLI + firmware source versions
 ./hwtest/sate gui | ./hwtest/sate dashboard
 
