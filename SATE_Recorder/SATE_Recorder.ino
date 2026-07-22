@@ -254,6 +254,7 @@ static volatile int  connUploadUiPct    = 0;        // 0-100
 // build with dozens of -fpermissive errors. Declaring every top-level function
 // here suppresses that generation and makes the build toolchain-independent.
 // -----------------------------------------------------------------------------
+static void finalizeSavedSession(const char *wavPath, const char *jsonPath, uint32_t sessionNum, uint32_t pcmBytes);
 static void applyActivePatient();
 static void ensureStandalonePatient();
 static void uiResetPointers();
