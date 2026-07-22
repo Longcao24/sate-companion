@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Zero-install launcher for the `sate` hardware CLI.
+#   ./hwtest/sate test --sim
+#   ./hwtest/sate flash recorder
+# For a real `sate` command on PATH:  pip install -e hwtest
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Make the `hwtest` package importable without changing the caller's cwd
+# (so a relative --config path still resolves).
+exec env PYTHONPATH="${HERE}${PYTHONPATH:+:${PYTHONPATH}}" python3 -m hwtest.cli "$@"

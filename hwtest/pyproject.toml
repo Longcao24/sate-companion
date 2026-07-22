@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sate-hwcli"
+version = "0.1.0"
+description = "sate — hardware CLI for the SATE Companion system (test + flash the recorder & pendant)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pyserial>=3.5",
+    "bleak>=0.22",
+]
+
+[project.optional-dependencies]
+# tomllib is stdlib on 3.11+; only 3.10 needs tomli
+legacy = ["tomli>=2.0; python_version < '3.11'"]
+
+[project.scripts]
+sate = "hwtest.cli:main"
+
+[tool.setuptools]
+packages = ["hwtest"]
