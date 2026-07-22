@@ -246,6 +246,109 @@ static SatePatient   g_activePatientReq;
 static volatile bool connUploadUiActive = false;   // true while an upload is in flight
 static volatile int  connUploadUiPct    = 0;        // 0-100
 
+
+// -----------------------------------------------------------------------------
+// Forward declarations (explicit) — do NOT remove.
+// arduino-cli's auto prototype-generator strips the return type from static
+// function prototypes on some toolchains (see GitHub issue #2), which breaks the
+// build with dozens of -fpermissive errors. Declaring every top-level function
+// here suppresses that generation and makes the build toolchain-independent.
+// -----------------------------------------------------------------------------
+static void applyActivePatient();
+static void ensureStandalonePatient();
+static void uiResetPointers();
+static void logHeap(const char *tag);
+static void runGui();
+static void pumpGuiMs(unsigned long durationMs);
+static void backlightSet(uint8_t duty);
+static void backlightInit();
+static void wakeScreen();
+static void serviceScreenDim();
+static void setScreenWhite();
+static void setStatePill(const char *text, uint32_t bg, uint32_t fg);
+static inline void setFont(lv_obj_t *o, const lv_font_t *f);
+static void styleButton(lv_obj_t *btn, uint32_t bgColor, uint32_t textColor);
+static void stylePanel(lv_obj_t *panel);
+static void actionEvent(lv_event_t *e);
+static void recordStopEvent(lv_event_t *e);
+static bool btnPressed(Btn &b);
+static void loadTotalRecordings();
+static void bumpTotalRecordings();
+static void recCrashMark(const char *patientId, uint32_t sessionNum);
+static void recCrashClear();
+static void updateConnBadge();
+static void hideProgressOverlay();
+static void showSavingOverlay();
+static void hideSavingOverlay();
+static void updateProgress(uint16_t permille, const char *bigText);
+void sateHookUploadBegin();
+void sateHookUploadProgress(int pct);
+void sateHookUploadEnd();
+static void renderUploadOverlay();
+static void bootScreenCreate();
+static void bootStepBegin(int i);
+static void bootStepDone(int i, bool ok);
+static void bootScreenFail(const char *msg);
+static void bootScreenFinish();
+static bool ensureDir(const char *path);
+static bool initSdCard();
+static void loadPatientsFromSd();
+static void patientDirPath(char *out, size_t outSize);
+static void sessionWavPath(char *out, size_t outSize, const char *dir, uint32_t n);
+static void sessionJsonPath(char *out, size_t outSize, const char *dir, uint32_t n);
+static void sessionSyncMarkPath(char *out, size_t outSize, const char *dir, uint32_t n);
+static void sessionPartPath(char *out, size_t outSize, const char *finalWav, int part);
+static bool sessionExists(const char *dir, uint32_t n);
+static void deleteSessionFiles(const char *dir, uint32_t n);
+static void renameSessionFiles(const char *dir, uint32_t from, uint32_t to);
+static void deleteSession(const char *dir, uint32_t n);
+static uint32_t findNextSessionIndex(const char *dir);
+static uint32_t sessionCount(const char *dir);
+static void sdRefreshUsage(bool force);
+static uint8_t sdUsedPercent();
+static uint64_t sdFreeBytes();
+static int readBatteryMv();
+static uint8_t batteryPercent();
+static const char *batterySymbol(uint8_t pct);
+static bool isUsbCharging();
+static void enterBatterySleep();
+static void serviceBatteryGuard();
+static void batteryBootGuard();
+static bool isSessionSynced(const char *dir, uint32_t n);
+static uint32_t countUnsynced(const char *dir);
+static void markSessionSynced(const char *dir, uint32_t n);
+static void jsonEscapeToBuf(const char *value, char *out, size_t outSize);
+static void writeWavHeader(File &file, uint32_t pcmBytes);
+static void patchWavHeader(File &file, uint32_t pcmBytes);
+static uint32_t mergeSessionParts(const char *finalWav, bool pumpUi);
+static void recoverOrphanSegments();
+static bool initAudio();
+static bool playWavStreamFromSd(const char *path, const char *caption);
+static bool playSessionAudio(const char *dir, uint32_t n, const char *caption);
+static void refreshHomeUpload();
+static void refreshSessionsUpload();
+static void onboardStepRow(lv_obj_t *parent, int idx, const char *text, int state);
+static void showOnboardingScreen();
+static void showHomeScreen();
+static void showSessionsScreen();
+static void showConnectionScreen();
+static void showSyncScreen();
+static void runSync();
+static void showResultsScreen();
+static int prepareResumeSegments(const char *wavPath, uint32_t *outBytes);
+static void maybeResumeRecording();
+static void playSessionFromList(int sessionNum);
+static void serviceFactoryResetButton();
+void setup();
+void loop();
+void sateHookPatientsUpdated();
+void sateHookConnChanged();
+void sateHookRecord();
+void sateHookGuiPump();
+static bool deviceReady();
+static void isrRecBtn();
+static void isrFlagBtn();
+
 void sateHookPatientsUpdated() { connPatientsReq = true; }
 void sateHookConnChanged()     { connStateReq = true; }
 void sateHookRecord()          { connRecordReq = true; }
