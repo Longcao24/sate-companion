@@ -1,7 +1,7 @@
 # 09 — SATE Pendant integration
 
 Optional capture path: connect a **SATE Pendant** (Sona/Nuna — a Seeed XIAO nRF52840
-Sense running `xiao_audio_ble.ino`) over BLE and stream its live mic audio into SATE.
+Sense running `SATE_Pendant.ino`) over BLE and stream its live mic audio into SATE.
 Pendant audio lands in the **same** `recordings` table as everything else.
 
 Unlike Plaud (proprietary arm64 SDK, device-lock risk), the pendant is **standard BLE
@@ -42,7 +42,7 @@ show up as a device with their recordings, same as Plaud.
 
 ## BLE profile (from the pendant firmware)
 
-Firmware project: `~/Desktop/necklace-insole/firmware` (`xiao_audio_ble.ino`).
+Firmware project: the in-repo `SATE_Pendant/` folder (`SATE_Pendant.ino`).
 
 ```
 Device name      SATE Pendant
@@ -59,8 +59,8 @@ accumulate → write `0x00` → wrap the PCM in a 44-byte WAV header → `upload
 
 ## Flashing the pendant firmware (⚠️ SoftDevice-corruption trap)
 
-Firmware lives at `~/Desktop/necklace-insole/firmware/` (`xiao_audio_ble/`,
-`flash_xiao.sh`, `HARDWARE.md` — the full hard-won recipe). Board = **Seeed XIAO
+Firmware is in the repo at `SATE_Pendant/` (`SATE_Pendant.ino`, `flash_xiao.sh`,
+`HARDWARE.md`, `INTEGRATION.md` — the full hard-won recipe). Board = **Seeed XIAO
 nRF52840 Sense Plus**, flashed by UF2 (double-tap reset → `XIAO-SENSE` drive mounts →
 raw-write the `.uf2`).
 
@@ -82,7 +82,7 @@ raw-write the `.uf2`).
   ZIP=~/Library/Arduino15/packages/Seeeduino/hardware/nrf52/1.1.13/bootloader/Seeed_XIAO_nRF52840_Sense_Plus/Seeed_XIAO_nRF52840_Sense_Plus_bootloader-0.6.2_s140_7.3.0.zip
   adafruit-nrfutil --verbose dfu serial -pkg "$ZIP" -p /dev/cu.usbmodemXXXX -b 115200   # ~20s, do NOT unplug
   # 2. double-tap again, then flash the correct-core app:
-  ./flash_xiao.sh ~/Desktop/necklace-insole/firmware/xiao_audio_ble
+  ./SATE_Pendant/flash_xiao.sh SATE_Pendant
   ```
   A **factory-fresh** board needs this DFU restore too — its SoftDevice state isn't
   Bluefruit-compatible until you flash Seeed's own bootloader+SoftDevice.

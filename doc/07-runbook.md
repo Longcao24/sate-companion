@@ -33,8 +33,9 @@ The S3 module is **16 MB flash + 8 MB octal PSRAM**, flash mode **DIO**:
 `/dev/cu.usbmodem101`):
 
 ```
-esp32:esp32:esp32s3:PSRAM=opi,FlashSize=16M,PartitionScheme=huge_app
+esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi
 ```
+(`default_8MB` = dual OTA slots — **never `huge_app`**, which is single-slot and disables OTA.)
 
 ### Build the recorder
 
@@ -191,8 +192,11 @@ from the existing row (after confirming its object really exists), so it costs b
 
 Deployed via MCP / Supabase tooling (deploy ≠ git push):
 
-- `device-api` — device + app REST surface.
-- `process-device-session` — AI/recordings bridge.
+- `device-api` — device + app REST surface (must stay `verify_jwt:false`).
+- `finalize-session` — light half of processing: analysis + INSERT `recordings` + `status=done`
+  (must stay `verify_jwt:false`). Called by the Cloudflare container.
+- `process-device-session` — **200 no-op** (don't revive; it would race the container).
+- The long AI call runs in the **Cloudflare Container** (`cf-processor/`), not an edge fn.
 
 Function secrets to keep set: `AI_PROCESS_URL` (if the ngrok URL rotates), `PROCESSOR_SECRET`.
 
@@ -214,8 +218,10 @@ Function secrets to keep set: `AI_PROCESS_URL` (if the ngrok URL rotates), `PROC
 |---------|--------------------|
 | App can't see the device in onboarding | Scan started before BLE `PoweredOn` (fixed via `onStateChange` gating). Confirm the device advertises (`SATE-XXXXXX`, service UUID). |
 | "Server registration failed" / 401 at register | Expired Supabase session with no refresh → empty claim token. Sign out + back in (populates refresh token), retry. Register route accepts `/register` and `/devices/register`. |
-| Touch lags after Wi-Fi connect | Blocking TLS handshake on the GUI core every poll. fw 1.0.3 mitigates; proper fix = networking on core 0. |
-| Device uploaded but no `recordings` row | `process-device-session` failed/timed out (`process_error` set). Re-invoke it in sweep mode; check the AI tunnel is up. |
+| "Server registration failed (code -1)" at setup | mbedTLS handshake starved of contiguous internal RAM. Ensure LVGL draw buffers + heap are in PSRAM (`display.cpp` SPIRAM, `lv_conf` `LV_MEM_CUSTOM 1`); check `[CONN] register attempt … maxAlloc=` ≥ ~34 KB. Not a coex/token issue. |
+| Screen bright but frozen at boot spinner | `lv_conf.h` `LV_TICK_CUSTOM 0` (reset by an lvgl reinstall). Set to `1`. Not a bad flash. |
+| Touch lags after Wi-Fi connect | Fixed since fw 1.2.5 (networking on core 0). If it recurs, the net task didn't move to core 0. |
+| Device uploaded but no `recordings` row | Check `sate_device_sessions.status` (`queued`/`processing`/`error`/`no_text`) + `process_error`. The **Cloudflare container** processes; ensure it's warm (pg_cron `/tick`) and the ngrok tunnel is up. User Retry re-queues an `error`. **Do NOT** re-invoke `process-device-session` (no-op). |
 | Web app shows no device recordings | See the live debugging notes for the current investigation; check `sate_device_sessions.processed`, `recording_id`, and that `recordings.patient_id` resolved. |
 | App launch / provisioning broken after network change | Stale Mac LAN IP. `ipconfig getifaddr en0`, update the dev host. |
 | Wi-Fi scan returns 0 APs | BLE/Wi-Fi coexistence; firmware retries the scan once under `ESP_COEX_PREFER_BALANCE`. |

@@ -1,5 +1,15 @@
 # Hardware → Supabase → AI → `recordings` (direct integration)
 
+> ⚠️ **PARTIALLY SUPERSEDED (processing is now ASYNC).** The upload path below (device →
+> `device-api` → `device-sessions` bucket → `sate_device_sessions`) is still accurate, but the
+> **AI step moved out of `process-device-session`**. `process-device-session` is now a **200 no-op**;
+> the long transcription runs in a **Cloudflare Container** (`cf-processor/`) that holds the ngrok
+> `/process` call, then calls **`finalize-session`** (analysis + INSERT `recordings`). This is
+> because an edge fn's ~150 s wall-clock kills a long take mid-`fetch`. Wherever this doc says
+> "`process-device-session` … downloads WAV / calls AI / inserts recordings", read that as
+> **container + `finalize-session`**. Current, authoritative: [doc/06-ai-pipeline.md](doc/06-ai-pipeline.md)
+> and [doc/05-backend-supabase.md](doc/05-backend-supabase.md).
+
 Goal: a SATE recorder uploads a session straight to the **live Supabase** backend
 (project `SATE`, ref `zlgdpivcbmaodgokkdvz`); the session is auto-assigned to the
 SLP's existing patient, run through the **same AI** a manual web upload uses, and
@@ -83,7 +93,7 @@ where id = '<clinical patient uuid>' and slp_id = '<slp user uuid>';
   first cut; pin the Supabase CA for production hardening.
 - **Processing trigger**: `device-api` fires `process-device-session` fire-and-forget
   (`EdgeRuntime.waitUntil`). If a long AI call exceeds the edge wall-clock, the session stays
-  `processed=false` with `process_error` set — re-invoke `process-device-session` (sweep mode)
+  `processed=false` with `process_error` set — the watchdog re-queues it (or the user Retry button); the container reprocesses
   to retry. A pg_cron sweep can be added (kept out here to avoid embedding the service key in SQL).
 - **Idempotency**: `sate_device_sessions.processed` guards against double-processing; chunk
   re-sends at the same offset are idempotent.

@@ -4,11 +4,12 @@
 
 | Component | Tech | Source | Role |
 |-----------|------|--------|------|
-| Recorder firmware | Arduino / ESP32-S3, NimBLE, WiFiClientSecure | `SATE_Touch_Patient_Record_Play_White/` | Capture audio → SD → upload (Wi-Fi) or expose over BLE |
-| Companion app | Expo SDK 54, React Native, `react-native-ble-plx` | `src/` | Setup, claim, offline bridge, remote control |
-| Backend | Supabase (Postgres + Storage + Edge Functions / Deno) | `react_app_sate-ui_update/supabase/functions/` | Auth, device API, AI orchestration, persistence |
-| Web app | Vite + React 19 + TypeScript | `react_app_sate-ui_update/src/` | The SLP-facing SATE app (manual uploads, results) |
-| AI service | external HTTP (`/process`) over an ngrok tunnel | `https://sate-v1-5.ngrok.io/process` | Transcribe + segment audio |
+| Recorder firmware | Arduino / ESP32-S3, NimBLE, WiFiClientSecure | `SATE_Recorder/` (fw 1.5.12) | Capture audio → SD → upload (Wi-Fi) or expose over BLE |
+| Pendant firmware | Arduino / XIAO nRF52840 Sense, BLE PCM stream | `SATE_Pendant/` | Wearable mic → live PCM over BLE → phone wraps to WAV → same pipeline |
+| Companion app | Expo (iOS), React Native, `react-native-ble-plx` + Plaud SDK | `src/` | Setup, claim, offline bridge, remote control, Plaud + Pendant capture |
+| Backend | Supabase (Postgres + Storage + Edge Functions / Deno) + **Cloudflare Container** | `react_app_sate-ui_update/supabase/functions/`, `cf-processor/` | Auth, device API, async AI processing, persistence |
+| Web app | Vite + React 19 + TypeScript | `react_app_sate-ui_update/src/` | The SLP-facing SATE app (manual uploads, results, device mgmt, `/admin`) |
+| AI service | external HTTP (`/process`) over an ngrok tunnel, **held by the container** | ngrok → self-hosted CUDA | Transcribe + segment audio |
 | Mock server | Node/Express | `mock-server/` | Local stand-in for the backend during dev |
 
 ## The recorder's two connectivity modes
@@ -52,16 +53,19 @@ Recorder ── record → WAV on SD
   │  POST /api/sessions/chunk?...&offset&final   (apikey + Bearer key-dev-…)   ~1 MB slices
   ▼
 device-api (edge fn)  → stitch slices → patch WAV header → device-sessions bucket
-  │                     insert sate_device_sessions → triggerProcessor(session_id)
+  │                     INSERT sate_device_sessions (status=queued)
+  ▼   (AI is ASYNC — NOT run in an edge fn; see below)
+Cloudflare Container (cf-processor)  claim_next_session (SKIP LOCKED) → status=processing →
+  download WAV → HOLD ngrok /process → copy WAV to recordings bucket →
   ▼
-process-device-session (edge fn)  → resolve patient → POST AI /process → countErrors +
-                                     calculateSpeechAnalysis → copy WAV to recordings bucket →
-                                     INSERT recordings → mark session processed
+finalize-session (edge fn)  → resolve patient → countErrors + calculateSpeechAnalysis →
+                              INSERT recordings → status=done
 ```
 
 Sliced upload keeps the device responsive and online; a dropped slice is retried at its own
-offset (idempotent). See [05-backend-supabase.md](05-backend-supabase.md) and
-[06-ai-pipeline.md](06-ai-pipeline.md).
+offset (idempotent). ⚠️ The long AI call runs in the **container**, never an edge fn (the 150 s
+edge wall-clock kills it mid-take); `process-device-session` is a 200 no-op. See
+[05-backend-supabase.md](05-backend-supabase.md) and [06-ai-pipeline.md](06-ai-pipeline.md).
 
 ### C. Offline bridge (BLE)
 

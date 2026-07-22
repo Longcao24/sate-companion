@@ -29,12 +29,19 @@ signed-in SLP, bridges offline sessions over BLE, and sends remote commands. Sou
 
 | Screen | Purpose |
 |--------|---------|
-| `LoginScreen` | Sign in against Supabase Auth; stores `{token, refreshToken, tokenExpiresAt, user}` |
-| `HomeScreen` | Claimed devices, online/pending status, entry to actions |
-| `ProvisionScreen` | BLE onboarding: scan → connect → Wi-Fi creds → claim + register |
-| `DevicePreviewScreen` | Live device view / details |
-| `RecorderSettingsScreen` | Per-device settings, rename, remote commands |
+| `LoginScreen` | Sign in against Supabase Auth (password **or** QR/mobile-link code); stores `{token, refreshToken, tokenExpiresAt, user}` |
+| `HomeScreen` | Claimed devices (SATE + Plaud + Pendant), online/pending status, entry to actions |
+| `ProvisionScreen` / `ChangeWifi` | BLE onboarding: scan → connect → Wi-Fi creds → claim + register; Wi-Fi change keeps the account |
+| `RecorderDetailScreen` / `RecorderSettingsScreen` | Per-device view + settings, rename, remote commands, sync-over-BLE |
+| `PlaudConnectScreen` / `PlaudSettingsScreen` | Connect + manage a **Plaud** recorder (⚠️ device-lock rules — see `plaud-integration.md` / RULE #1) |
+| `PendantConnectScreen` | Connect + live-capture from a **SATE Pendant** (XIAO nRF52840) — see [09-pendant.md](09-pendant.md) |
+| `ReportScreen` | Per-recording report: transcript, analysis, playback, flag markers, name/protocol review |
 | `SettingsScreen` | App settings, server URL, sign out |
+
+> **Multi-device (iOS-only):** SATE recorder, Plaud, and Pendant all feed the **same** upload
+> pipeline (`uploadSession`, `device_serial` = `SATE-…` / `plaud-<sn>` / `pendant-<id>`). One shared
+> `BleManager` for SATE + Pendant; Plaud uses its own SDK (see CLAUDE.md RULE #2). Plaud + Pendant
+> need a native rebuild (Plaud SDK / expo-camera for QR); pure JS won't add them.
 
 ## Store (`src/store.tsx`)
 

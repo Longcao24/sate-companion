@@ -25,9 +25,21 @@ function (the device authenticates with its device key, not a user JWT).
 
 | Function | `verify_jwt` | Role |
 |----------|--------------|------|
-| `device-api` | **false** | The device + app REST surface. Routes by auth header: device key (`Bearer key-…`) vs SLP user JWT. |
-| `process-device-session` | **false** | AI/recordings bridge. Auth = service-role key or `PROCESSOR_SECRET`. |
+| `device-api` | **false** | The device + app REST surface. Routes by auth header: device key (`Bearer key-…`) vs SLP user JWT. Current ~v33. |
+| `finalize-session` | **false** | The **light half** of device processing: `countErrors` + `calculateSpeechAnalysis` → INSERT `recordings` → set `status=done`. Called by the Cloudflare container after it holds the AI call. |
+| `process-device-session` | **false** | ⚠️ **200 NO-OP now.** `device-api` still fire-and-forgets to it, but it must NOT process (would race the container + duplicate `recordings`). Don't revive it. |
+| `mint-plaud-token` | **false** | 2-step Plaud OAuth server-side → Plaud `user_id` token (see `plaud-integration.md`). |
+| `mobile-link` | **false** | Mints/consumes one-time QR/code for phone login. |
 | `create-checkout-session`, `create-portal-session`, `cancel-subscription`, `get-invoices`, `stripe-webhook` | — | Stripe billing. |
+
+> **The long AI transcription does NOT live in any edge function.** It runs in a long-lived
+> **Cloudflare Container** (`cf-processor/`, `sate-processor.longcao.workers.dev`) that claims
+> `queued` sessions (SKIP LOCKED), holds the ngrok `/process` call, then calls `finalize-session`.
+> `pg_cron` pings the Worker `/tick` every minute to keep it warm. **Never move the AI call into an
+> edge fn or a Worker `fetch`** (150 s edge / ~100 s Worker 524 kills it mid-call). See
+> [06-ai-pipeline.md](06-ai-pipeline.md). ⚠️ Redeploying `device-api` / `finalize-session` /
+> `process-device-session` with the MCP default `verify_jwt:true` breaks device registration + the
+> pipeline — always pass `verify_jwt:false` / `--no-verify-jwt`.
 
 `verify_jwt=false` on `device-api` is required because the **device** has no Supabase user JWT —
 it presents a device key the function validates itself. The Supabase Edge **gateway** still

@@ -48,7 +48,7 @@ between `src/protocol.ts` (app) and `connectivity.cpp` (firmware).
   load it). `expo-dev-client` is installed for this.
 - **Firmware:** arduino-cli, ESP32 core, NimBLE-Arduino 2.x, ArduinoJson 7.x,
   LVGL 8.4, ES8311 codec, SD_MMC, Preferences (NVS), HTTPClient, WiFi.
-  - FQBN: `esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,FlashSize=8M,PartitionScheme=huge_app,PSRAM=opi`
+  - FQBN: `esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi   # default_8MB=dual OTA, NOT huge_app`
   - Serial port: `/dev/cu.usbmodem101`. Device serial: `SATE-D19EB8` (from eFuse MAC).
 - **Phone:** iPhone "HLong", iOS 26.5. Bundle id `com.auspexmedix.satecompanion`.
 - **Mac LAN IP (dev server host):** **dynamic — changes when the Mac joins a
@@ -68,8 +68,8 @@ npx expo run:ios --device "HLong"      # build + install + launch dev client
 npx expo start --dev-client            # just the bundler, once installed
 
 # Firmware
-arduino-cli compile --fqbn "<FQBN above>" SATE_Touch_Patient_Record_Play_White
-arduino-cli upload -p /dev/cu.usbmodem101 --fqbn "<FQBN above>" SATE_Touch_Patient_Record_Play_White
+arduino-cli compile --fqbn "<FQBN above>" SATE_Recorder
+arduino-cli upload -p /dev/cu.usbmodem101 --fqbn "<FQBN above>" SATE_Recorder
 
 # Dev server
 cd mock-server && node server.js       # listens on :4000, token "dev-token"
@@ -139,7 +139,7 @@ End-to-end "tap a button → recorder captures + uploads → app watches it land
 
 ---
 
-## 4. Firmware changes (`SATE_Touch_Patient_Record_Play_White/`)
+## 4. Firmware changes (`SATE_Recorder/`)
 
 New files: `connectivity.h`, `connectivity.cpp` (NimBLE GATT server + Wi-Fi
 client). Main sketch heavily reworked. **Firmware version: 0.6.0.**
