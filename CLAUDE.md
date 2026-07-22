@@ -180,8 +180,10 @@ directly, no temp-copy). Pendant firmware is `SATE_Pendant/` (see the pendant se
   heap live in **PSRAM** (`lv_conf.h` `LV_MEM_CUSTOM 1`/`ps_malloc`, and `display.cpp`
   `MALLOC_CAP_SPIRAM`) so the register TLS handshake has contiguous internal RAM — don't move them
   back to internal DMA RAM (that caused "Server registration failed code -1"). See `hardware.md` §3.
-- **GPIO34 cannot be used for battery ADC on the S3** — it bootloops the board. Battery
-  sensing was disabled; a real ADC1 pin or a fuel-gauge IC is required.
+- **Battery sense = GPIO9 (ADC1), enabled** (`BAT_ADC_PIN 9`, `BAT_SENSE_ENABLED 1`) behind the
+  board's on-board 0.5 divider (`analogReadMilliVolts × 2`) → Home chip + heartbeat telemetry +
+  low-voltage cutoff. ⚠️ **Do NOT move it to GPIO34** — GPIO34 is a classic-ESP32 pin, wrong on the
+  S3, and bootloops the board (that was the fw 1.0.6 mistake; GPIO9 is the fix). See hardware.md §8.31.
 - **Two-button pinout**: record = GPIO2, flag = GPIO14 (interrupt-latched). Flag markers
   flow device → sessions → recordings → web report seek-bar ticks. Don't reassign lightly.
 - **Connectivity runs on a core-0 task**, GUI + buttons on core 1 (fixed button lag + stuck
