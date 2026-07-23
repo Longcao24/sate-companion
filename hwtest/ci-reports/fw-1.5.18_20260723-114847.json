@@ -1,0 +1,30 @@
+{
+  "firmware": "1.5.18",
+  "date": "2026-07-23T11:48:47",
+  "device": "SATE-D0FDD4",
+  "port": "/dev/cu.usbmodem1101",
+  "flashed": false,
+  "scenarios": [
+    {
+      "key": "boot_health",
+      "status": "FAIL",
+      "detail": "never reached '[MEM] ready' within 40s \u2014 boot hang / bad flash"
+    },
+    {
+      "key": "reboot_resume",
+      "status": "FAIL",
+      "detail": "device never reported 'record start' after the RECORD trigger"
+    },
+    {
+      "key": "byte_match",
+      "status": "FAIL",
+      "detail": "device never reported 'record start'"
+    },
+    {
+      "key": "verified_trim",
+      "status": "PASS",
+      "detail": "no un-verified free observed; any reclaim was server-confirmed"
+    }
+  ],
+  "verdict": "FAIL"
+}

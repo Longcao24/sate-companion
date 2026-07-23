@@ -1,0 +1,44 @@
+# Copy to config.toml and fill in, then:  python3 run.py --config config.toml
+# (config.toml is git-ignored; this example is committed.)
+
+[serial]
+# The recorder's USB-Serial-JTAG port. Find it with:  ls /dev/cu.usbmodem*
+# Serial output only appears if the firmware was built CDCOnBoot=cdc,USBMode=hwcdc.
+port = "/dev/cu.usbmodem101"
+baud = 115200
+
+[server]
+# device-api base URL, e.g. https://<project-ref>.functions.supabase.co/device-api
+base_url = ""
+# The recorder's device key (returned by /register; currently "key-dev-<serial>").
+device_key = "key-dev-sate-xxxxxx"
+device_serial = "SATE-XXXXXX"
+# Supabase anon key, sent as the `apikey` header (edge functions require it).
+anon_key = ""
+
+[actions]
+# How a recording is started:
+#   manual = an operator presses RECORD on the device when prompted (default)
+#   remote = queue a record command via device-api  (NOTE: remote takes use
+#            review=false and do NOT auto-resume — use manual for reboot_resume)
+record_mode = "manual"
+# How a reboot is triggered:
+#   reset  = pulse the serial DTR/RTS reset line (clean reset; exercises the
+#            resume-on-boot path but is NOT a true power brownout)
+#   manual = an operator physically cuts and restores power (real brownout)
+reboot_mode = "reset"
+# true = prompts auto-continue after prompt_wait_s (for a servo/relay rig with no
+# human watching). false = wait for Enter (CLI) or the Done button (dashboard).
+unattended = false
+prompt_wait_s = 6
+
+[record]
+patient_id = "Unassigned"   # standalone recording uses a default patient id
+take_s = 6                  # seconds to record in the byte_match test
+resume_hold_s = 8           # seconds to record before the reboot in reboot_resume
+
+# --- Pendant (BLE) — used only with `--target pendant` ---
+[pendant]
+name = "SATE Pendant"       # advertised name / localName to match in the scan
+stream_s = 5                # seconds to stream while you make continuous sound
+max_gap_ms = 400            # a longer gap between notifies (under sound) = "stuck"

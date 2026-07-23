@@ -102,6 +102,17 @@ physical stacks; it encodes both rules above, including the lock-safe Plaud rele
   (`webapp` remote = `Longcao24/SATE_hardwave`, which Vercel builds).
 - Proprietary Plaud frameworks are git-ignored (`modules/plaud-sate/ios/Frameworks/`) —
   never commit them. Deploy `mint-plaud-token` with `--no-verify-jwt`.
+- **`sate ci` is the standard firmware gate — every recorder firmware version MUST pass it
+  before release.** It builds + flashes the debug build, runs the hands-off suite
+  (`boot_health`, `reboot_resume`, `byte_match`, `verified_trim`) against a real board with
+  remote record/stop/reboot, writes `hwtest/ci-reports/fw-<version>_<stamp>.json`, and exits
+  non-zero on failure. Never release a version without a passing report.
+- **Regression rule: any new feature or fix re-runs `sate ci` (the standard suite) BEFORE it
+  lands** — firmware, harness, or backend alike; add `sate e2e` when the change touches the
+  backend. The 1.5.16→1.5.18 chain is why: each fix exposed the next latent bug, and only
+  re-running the full suite after every change caught them. `sate infra` probes every tier
+  (auth, DB, device-api + the v15 verify route, Storage, CF worker, AI-queue state, device
+  heartbeat) when something looks down; `sate pipeline` is the live animated pipeline map.
 - **Hardware-in-the-loop tests** live in `hwtest/` (Python). A compiler can't catch the
   worst bugs — reboot mid-record, dropped-BLE truncation, delete-during-upload splicing,
   verified trim, crash-safe delete, OTA — so before a firmware release run the harness on

@@ -3,6 +3,6 @@ config.toml
 __pycache__/
 *.pyc
 "SATE Hardware Test.app"/
+"SATE Debugger.app"/
 sate_hwcli.egg-info/
-.venv/
 .mirror.ppm

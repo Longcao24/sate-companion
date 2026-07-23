@@ -268,6 +268,7 @@ class Debugger:
         f = section("2 · TEST RECORDING")
         add(f, "▶  Run automatic tests", lambda: self._run_tests_inproc(self.AUTO, sim=False),
             primary=True, wide=True)
+        add(f, "Live pipeline view (recorder → AI → done)…", self._open_pipeline, wide=True)
 
         # Every scenario the harness ships, individually selectable — so a bench run
         # can be narrowed to the one case you are chasing instead of the whole suite.
@@ -722,6 +723,24 @@ class Debugger:
             finally:
                 self.q.put(("done", None, None))
         threading.Thread(target=work, daemon=True).start()
+
+    def _open_pipeline(self):
+        """The realtime audio-pipeline map — where a take is across the whole system."""
+        if not self.access_token:
+            self._log("  sign in first — the pipeline view reads your account's rows.", "bad"); return
+        if not self._ensure_device_id():
+            self._log("  no device found on the account yet.", "bad"); return
+        try:
+            from pipeline_view import open_pipeline
+        except ImportError:
+            import sys as _sys
+            _sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from pipeline_view import open_pipeline
+        srv = self.cfg.get("server", {})
+        open_pipeline(self.root, token=self.access_token, serial=self.serial,
+                      device_id=self.device_id,
+                      base_url=srv.get("base_url", DEFAULT_SERVER),
+                      anon_key=srv.get("anon_key", DEFAULT_ANON))
 
     def _ensure_device_id(self):
         """Resolve the bench device without requiring the Connect dialog first.

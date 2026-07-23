@@ -9,6 +9,10 @@ One professional entry point for testing and flashing the recorder and pendant:
     sate flash pendant        build + flash the pendant firmware
     sate flash recorder --version 1.5.12    flash a published older build
     sate firmware             list every firmware image you can flash
+    sate ci                   the standard firmware gate (build + flash + full suite)
+    sate e2e                  deep test: recorder → Supabase → Cloudflare → AI → done
+    sate infra                connection test: probe every tier (auth, DB, edge fn, storage, CF, AI, device)
+    sate pipeline             live animated map of the audio pipeline
     sate devices              list connected devices (serial ports + BLE)
     sate doctor               check the toolchain and environment
     sate gui | dashboard      launch the native window / browser dashboard
@@ -23,6 +27,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 VERSION = "0.1.0"
@@ -97,6 +102,474 @@ def _run(cmd: list[str], cwd: Path | None = None) -> int:
 
 
 # ---------------------------------------------------------------- commands
+# The standard CI gate for the SATE recorder. EVERY firmware version must pass this
+# before it is released — it is the release criterion, not an optional extra.
+CI_SCENARIOS = ["boot_health", "reboot_resume", "byte_match", "verified_trim"]
+PROTECTED_SERIALS = ("SATE-D19EB8",)  # real in-use unit: CI must never touch it
+
+
+def cmd_ci(args: argparse.Namespace) -> int:
+    """Build + flash the working tree (debug), run the standard suite, write a report.
+
+    One command = the whole firmware gate:
+      1. read FIRMWARE_VERSION from the source;
+      2. compile + flash the debug (CDC) build so the harness can read the log
+         (skippable with --no-flash to judge whatever is already on the board);
+      3. run the hands-off scenarios (remote record/stop/reboot — nobody needed
+         at the bench);
+      4. write hwtest/ci-reports/fw-<version>_<stamp>.json and exit non-zero on
+         any FAIL/ERROR.
+    """
+    import datetime
+    import json as _json
+    import re as _re
+
+    cfg = load_config(args.config)
+
+    # -- the device under test must never be the protected in-use unit
+    serial_cfg = str(cfg.get("server", {}).get("device_serial", "")).upper()
+    if serial_cfg in PROTECTED_SERIALS:
+        bad(f"config points at protected device {serial_cfg} — refusing to run CI against it.")
+        return 2
+
+    # -- firmware version from source (the version being gated)
+    src = (REPO / "SATE_Recorder" / "SATE_Recorder.ino").read_text(errors="ignore")
+    m = _re.search(r'FIRMWARE_VERSION\s*=\s*"([^"]+)"', src)
+    fw = m.group(1) if m else "unknown"
+
+    banner()
+    info(f"CI gate for recorder firmware {bold(fw)}")
+    info(f"standard scenarios: {', '.join(CI_SCENARIOS)}")
+
+    port = getattr(args, "port", None) or cfg.get("serial", {}).get("port")
+    if not port or not Path(port).exists():
+        port = _auto_port()
+    if not port:
+        bad("no serial port — plug the recorder in (CI asserts on its serial log).")
+        return 2
+    cfg.setdefault("serial", {})["port"] = port
+
+    # -- flash the build being gated (debug: the harness needs the serial log)
+    if not getattr(args, "no_flash", False):
+        fqbn = RECORDER_FQBN + ",CDCOnBoot=cdc,USBMode=hwcdc"
+        info("building + flashing the working tree (debug build)…")
+        if _run(["arduino-cli", "compile", "--fqbn", fqbn, "SATE_Recorder"], cwd=REPO) != 0:
+            bad("compile failed — CI gate FAILED before any test ran.")
+            return 1
+        if _run(["arduino-cli", "upload", "-p", port, "--fqbn", fqbn, "SATE_Recorder"], cwd=REPO) != 0:
+            bad("flash failed — CI gate FAILED.")
+            return 1
+        ok(f"flashed {fw}")
+    else:
+        warn("--no-flash: gating whatever firmware is already on the board.")
+
+    # -- serial must actually be ALIVE, not merely enumerated. The board has a
+    # known failure mode where the CDC port exists but produces nothing until a
+    # physical replug — running the suite then fails every scenario misleadingly.
+    # A reset must yield SOME output within a few seconds, or we abort up front.
+    info("checking the serial line is alive…")
+    try:
+        from hwtest.link import SerialLink
+        _l = SerialLink(port)
+        _l.reset()
+        _alive = False
+        _end = time.time() + 12
+        while time.time() < _end:
+            if _l.readline(1.0):
+                _alive = True
+                break
+        _l.close()
+    except Exception as e:  # noqa: BLE001
+        bad(f"serial open failed: {e}")
+        _alive = False
+    if not _alive:
+        bad("serial port is enumerated but SILENT — the known USB-CDC wedge.")
+        info("unplug the USB cable, plug it back in, then re-run `sate ci`.")
+        info("(the device itself usually still works over Wi-Fi — only the log view is dead,")
+        info(" and CI cannot certify a firmware without its serial evidence)")
+        return 2
+    ok("serial alive")
+
+    # -- sign in so the remote record/stop/reboot commands work hands-off
+    acc = cfg.get("account", {})
+    if acc.get("email") and acc.get("password"):
+        try:
+            from hwtest import sate_account as A
+            cfg.setdefault("server", {})["access_token"] = A.login(acc["email"], acc["password"])
+            info(f"signed in as {acc['email']} (remote commands enabled)")
+        except Exception as e:  # noqa: BLE001
+            warn(f"login failed ({e}) — scenarios that need remote commands will prompt/fail")
+    cfg.setdefault("actions", {}).setdefault("record_mode", "remote")
+
+    # -- run the standard suite
+    from hwtest.runner import run
+    results = run(cfg, CI_SCENARIOS, sim=False, color=_USE_COLOR)
+    passed = not any(r.status in ("FAIL", "ERROR") for r in results)
+
+    # -- report file: the durable record that this firmware passed its gate
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    rep_dir = REPO / "hwtest" / "ci-reports"
+    rep_dir.mkdir(exist_ok=True)
+    rep = rep_dir / f"fw-{fw}_{stamp}.json"
+    rep.write_text(_json.dumps({
+        "firmware": fw,
+        "date": datetime.datetime.now().isoformat(timespec="seconds"),
+        "device": cfg.get("server", {}).get("device_serial", ""),
+        "port": port,
+        "flashed": not getattr(args, "no_flash", False),
+        "scenarios": [{"key": r.key, "status": r.status, "detail": r.detail} for r in results],
+        "verdict": "PASS" if passed else "FAIL",
+    }, indent=2) + "\n")
+    info(f"report: {rep}")
+
+    print()
+    if passed:
+        ok(f"CI GATE PASSED — firmware {fw} meets the standard suite. OK to release.")
+        return 0
+    bad(f"CI GATE FAILED — firmware {fw} must NOT be released. See the report + log above.")
+    return 1
+
+
+PROCESSOR_URL = "https://sate-processor.longcao.workers.dev"
+
+
+def cmd_infra(args: argparse.Namespace) -> int:
+    """Connection test for EVERY tier the audio depends on.
+
+    One probe per hop, with latency, so 'the pipeline is stuck' turns into 'THIS
+    tier is down'. Checks, in the order the audio travels:
+
+      Supabase Auth → Supabase DB (REST) → device-api edge fn (incl. the v15
+      /sessions/verify route that was once missing from the deployment) → Storage →
+      Cloudflare processor Worker → pipeline state (queued / stuck / errors, the
+      only visibility we have into the AI service) → the device's own heartbeat.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    cfg = load_config(args.config)
+    acc = cfg.get("account", {})
+    srv = cfg.get("server", {})
+    base = srv.get("base_url", "")
+    serial = str(srv.get("device_serial", ""))
+    device_id = str(srv.get("device_id", ""))
+
+    from hwtest import sate_account as A
+
+    banner()
+    info("infrastructure / connection test — one probe per tier\n")
+    failures = 0
+    warnings = 0
+
+    def probe(name, fn, *, critical=True, hint=""):
+        nonlocal failures, warnings
+        t = time.time()
+        try:
+            detail = fn() or ""
+            ms = (time.time() - t) * 1000
+            ok(f"{name:<28} {ms:6.0f} ms  {detail}")
+            return True
+        except Exception as e:  # noqa: BLE001
+            ms = (time.time() - t) * 1000
+            (bad if critical else warn)(f"{name:<28} {ms:6.0f} ms  {e}")
+            if hint:
+                info(f"  ↳ {hint}")
+            if critical:
+                failures += 1
+            else:
+                warnings += 1
+            return False
+
+    def _http(url, headers=None, timeout=15):
+        h = {"User-Agent": "sate-cli"}   # Cloudflare 403s a bare urllib UA
+        h.update(headers or {})
+        req = urllib.request.Request(url, headers=h)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read().decode()
+
+    # 1) Supabase Auth
+    tok = None
+
+    def p_auth():
+        nonlocal tok
+        if not (acc.get("email") and acc.get("password")):
+            raise RuntimeError("no [account] in config.toml")
+        tok = A.login(acc["email"], acc["password"])
+        return f"signed in as {acc['email']}"
+    probe("Supabase Auth", p_auth,
+          hint="check [account] in hwtest/config.toml and the Supabase project status")
+
+    # 2) Supabase DB over REST (the rows the whole pipeline runs on)
+    def p_db():
+        if not tok:
+            raise RuntimeError("skipped (no auth)")
+        st, body = _http(
+            A.SUPABASE_URL + "/rest/v1/sate_device_sessions?select=id&limit=1",
+            {"Authorization": f"Bearer {tok}", "apikey": A.ANON_KEY})
+        if st != 200:
+            raise RuntimeError(f"HTTP {st}")
+        return "sate_device_sessions readable"
+    probe("Supabase DB (REST)", p_db)
+
+    # 3) device-api edge fn — the front door for every device
+    def p_api():
+        if not tok:
+            raise RuntimeError("skipped (no auth)")
+        st, body = _http(f"{base}/api/devices",
+                         {"Authorization": f"Bearer {tok}", "apikey": A.ANON_KEY})
+        n = len(_json.loads(body)) if st == 200 else 0
+        if st != 200:
+            raise RuntimeError(f"HTTP {st}")
+        return f"{n} device(s) on the account"
+    probe("device-api edge fn", p_api,
+          hint="supabase functions deploy device-api --no-verify-jwt --use-api")
+
+    # 4) device-api /sessions/verify — the v15 route verified-trim depends on.
+    #    This exact route was once missing from the DEPLOYED copy while present in
+    #    the repo, and the device silently never reclaimed SD space. Probe it.
+    def p_verify():
+        dk = str(srv.get("device_key") or (("key-" + device_id) if device_id else ""))
+        if not dk or dk == "key-":
+            raise RuntimeError("no device_key/device_id in config")
+        st, body = _http(f"{base}/api/sessions/verify?session_number=1&bytes=1"
+                         f"&device_serial={serial}",
+                         {"Authorization": f"Bearer {dk}", "apikey": A.ANON_KEY})
+        if st != 200:
+            raise RuntimeError(f"HTTP {st} — deployed device-api predates v15!")
+        return "v15 route deployed (verified-trim works)"
+    probe("device-api /sessions/verify", p_verify,
+          hint="the DEPLOYED fn is older than the repo — redeploy device-api")
+
+    # 5) Storage (public firmware bucket doubles as the storage-tier probe)
+    def p_storage():
+        st, body = _http(A.SUPABASE_URL + "/rest/v1/sate_firmware?select=version,url"
+                         "&order=created_at.desc&limit=1",
+                         {"Authorization": f"Bearer {tok}", "apikey": A.ANON_KEY})             if tok else (0, "[]")
+        rows = _json.loads(body) if st == 200 else []
+        if rows and rows[0].get("url"):
+            r = urllib.request.Request(rows[0]["url"], method="HEAD")
+            with urllib.request.urlopen(r, timeout=15) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"firmware object HTTP {resp.status}")
+            return f"fw {rows[0]['version']} object reachable"
+        # no published firmware yet — any well-formed answer (incl. 404) from the
+        # public-object path proves the storage tier itself is up
+        try:
+            _http(A.SUPABASE_URL + "/storage/v1/object/public/firmware/_probe")
+        except urllib.error.HTTPError as he:
+            if he.code in (400, 404):
+                return "storage endpoint reachable (no published firmware to HEAD)"
+            raise
+        return "storage endpoint reachable"
+    probe("Supabase Storage", p_storage, critical=False)
+
+    # 6) Cloudflare processor Worker (fronts the container that holds the AI call)
+    def p_worker():
+        st, body = _http(PROCESSOR_URL + "/health")
+        if st != 200 or not _json.loads(body).get("ok"):
+            raise RuntimeError(f"HTTP {st}")
+        return "worker ok (container wakes on /tick)"
+    probe("Cloudflare processor", p_worker,
+          hint="wrangler deploy in cf-processor/ — without it nothing processes")
+
+    # 7) pipeline state = the only visibility into the AI service
+    def p_pipe():
+        if not tok:
+            raise RuntimeError("skipped (no auth)")
+        hdr = {"Authorization": f"Bearer {tok}", "apikey": A.ANON_KEY,
+               "Prefer": "count=exact", "Range": "0-0"}
+        counts = {}
+        for status in ("queued", "processing", "error"):
+            req = urllib.request.Request(
+                A.SUPABASE_URL + "/rest/v1/sate_device_sessions?select=id"
+                f"&status=eq.{status}", headers=hdr)
+            with urllib.request.urlopen(req, timeout=15) as r:
+                cr = r.headers.get("Content-Range", "/0")
+                counts[status] = int(cr.split("/")[-1]) if "/" in cr else 0
+        msg = f"queued={counts['queued']} processing={counts['processing']} error={counts['error']}"
+        if counts["queued"] > 5 or counts["processing"] > 3:
+            raise RuntimeError(msg + " — backlog: the AI service may be down/slow")
+        return msg
+    probe("Pipeline / AI service", p_pipe, critical=False,
+          hint="a growing queue usually means the ngrok AI endpoint is unreachable")
+
+    # 8) the bench device's heartbeat
+    def p_dev():
+        if not tok:
+            raise RuntimeError("skipped (no auth)")
+        for d in A.list_devices(tok):
+            if str(d.get("serial", "")) == serial:
+                if not d.get("online"):
+                    raise RuntimeError(f"offline (last_seen {d.get('last_seen')})")
+                return f"online · {d.get('state')} · fw {d.get('fw')}"
+        raise RuntimeError(f"{serial} not claimed on this account")
+    probe(f"Device heartbeat ({serial})", p_dev, critical=False,
+          hint="power/Wi-Fi, or claim it via the Debugger's Connect / set up")
+
+    print()
+    if failures:
+        bad(f"{failures} tier(s) DOWN, {warnings} warning(s) — the pipeline cannot run end-to-end.")
+        return 1
+    if warnings:
+        warn(f"all critical tiers up; {warnings} warning(s) above.")
+        return 0
+    ok("every tier reachable — infrastructure is healthy.")
+    return 0
+
+
+def cmd_e2e(args: argparse.Namespace) -> int:
+    """The DEEP test: follow one take through the ENTIRE system.
+
+    recorder → device-api (chunked upload) → Storage + DB row → queued →
+    cf-processor claims → AI /process → finalize-session → done (recording row).
+
+    Drives the device with remote record/stop and watches the same rows the web
+    app reads, so it needs no serial cable — only the account and the device on
+    Wi-Fi. Exit code gates on the audio ACTUALLY reaching "done" with a
+    byte-verified object in Storage.
+    """
+    import json as _json
+    import urllib.request
+
+    cfg = load_config(args.config)
+    acc = cfg.get("account", {})
+    srv = cfg.setdefault("server", {})
+    if not (acc.get("email") and acc.get("password")):
+        bad("config.toml needs [account] email/password — e2e drives the device remotely.")
+        return 2
+
+    from hwtest import pipeline as P
+    from hwtest import sate_account as A
+
+    banner()
+    tok = A.login(acc["email"], acc["password"])
+    serial = str(srv.get("device_serial", ""))
+    device_id = str(srv.get("device_id", ""))
+    if serial.upper() in PROTECTED_SERIALS:
+        bad(f"{serial} is a protected in-use device — refusing.")
+        return 2
+    if not (serial and device_id):
+        bad("config.toml [server] needs device_serial and device_id.")
+        return 2
+    base = srv.get("base_url", "")
+    info(f"deep end-to-end test on {bold(serial)} (recorder → Supabase → Cloudflare → AI → done)")
+
+    def cmd(op):
+        req = urllib.request.Request(
+            f"{base}/api/devices/{device_id}/commands",
+            data=_json.dumps({"op": op}).encode(), method="POST",
+            headers={"Authorization": f"Bearer {tok}", "apikey": A.ANON_KEY,
+                     "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=20):
+            pass
+
+    def dev_state():
+        for d in A.list_devices(tok):
+            if str(d.get("serial", "")) == serial:
+                return (str(d.get("state") or "idle") if d.get("online") else "offline")
+        return "unknown"
+
+    t0 = time.time()
+    marks = {}          # stage key -> wall-clock seconds from t0
+
+    def mark(stage, note=""):
+        dt = time.time() - t0
+        marks[stage] = dt
+        info(f"[{dt:6.1f}s] {bold(stage)}  {note}")
+
+    # baseline: don't confuse an old row for the new take
+    hist = P.recent_sessions(tok, serial, 1)
+    baseline = hist[0].created if hist else None
+    last_num = hist[0].session_number if hist else 0
+
+    st = dev_state()
+    if st == "offline":
+        bad("device is offline — e2e needs it on Wi-Fi.")
+        return 2
+    if st == "recording":
+        bad("device is already recording — stop it first (sate: the Debugger / remote stop).")
+        return 2
+
+    take_s = float(getattr(args, "take", 0) or cfg.get("record", {}).get("take_s", 8))
+
+    # 1) record
+    cmd("record")
+    mark("record", "remote RECORD queued")
+    end = time.time() + 40
+    while time.time() < end and dev_state() != "recording":
+        time.sleep(2)
+    if dev_state() != "recording":
+        bad("device never started recording (heartbeat state stayed idle).")
+        return 1
+    info(f"          recording — capturing {take_s:.0f}s of audio…")
+    time.sleep(take_s)
+
+    # 2) stop → upload
+    cmd("stop")
+    mark("upload", "remote STOP queued — device finalizes + uploads over HTTPS")
+
+    # 3) the row appears (Storage + DB)
+    row = None
+    end = time.time() + float(getattr(args, "upload_timeout", 180))
+    while time.time() < end:
+        h = P.recent_sessions(tok, serial, 3)
+        row = next((x for x in h if (baseline is None or (x.created or 0) > baseline)), None)
+        if row:
+            break
+        time.sleep(3)
+    if not row:
+        bad("upload never landed: no new session row appeared on the server.")
+        return 1
+    mark("stored", f"session {row.session_number} · {row.bytes/1e6:.2f} MB in Storage + DB")
+
+    # 4) byte-verify the object really exists (the same check the device trusts)
+    dk = str(srv.get("device_key") or ("key-" + device_id))
+    vurl = (f"{base}/api/sessions/verify?session_number={row.session_number}"
+            f"&bytes={row.bytes}&device_serial={serial}")
+    try:
+        vreq = urllib.request.Request(vurl, headers={"Authorization": f"Bearer {dk}",
+                                                     "apikey": A.ANON_KEY})
+        with urllib.request.urlopen(vreq, timeout=20) as r:
+            verified = bool(_json.loads(r.read().decode()).get("stored"))
+    except Exception as e:  # noqa: BLE001
+        warn(f"verify call failed ({e})")
+        verified = False
+    (ok if verified else warn)(f"          Storage object byte-verified ({row.bytes} bytes)"
+                               if verified else "          verify did not confirm — continuing")
+
+    # 5) queued → cf-processor → AI → finalize → done
+    def on_change(st2):
+        label = {"queued": "queued — waiting for the processor",
+                 "ai": "cf-processor claimed — AI transcription in flight",
+                 "done": "finalize done — recording row written",
+                 "error": f"ERROR: {st2.error}"}.get(st2.stage, st2.stage)
+        mark(st2.stage if st2.stage != "ai" else "claimed", label)
+
+    final = P.watch(tok, serial, row.session_number,
+                    timeout_s=float(getattr(args, "process_timeout", 600)),
+                    on_change=on_change, baseline_created=baseline)
+
+    total = time.time() - t0
+    print()
+    print(bold("═════════════ E2E SUMMARY ═════════════"))
+    qw = f"{final.queue_wait_s:.1f}s" if final.queue_wait_s is not None else "—"
+    pr = f"{final.processing_s:.1f}s" if final.processing_s is not None else "—"
+    print(f"  session      : {final.session_number}  ({final.bytes/1e6:.2f} MB)")
+    print(f"  storage      : {'byte-verified' if verified else 'NOT verified'}")
+    print(f"  queue wait   : {qw}")
+    print(f"  processing   : {pr}   (cf-processor + AI + finalize)")
+    print(f"  recording row: {'yes — ' + str(final.recording_id) if final.recording_id else 'none (no_text takes have none)'}")
+    print(f"  wall clock   : {total:.1f}s from RECORD to the end")
+    print()
+    passed = final.status == "done" and verified
+    if passed:
+        ok("E2E PASSED — the audio travelled recorder → Supabase → Cloudflare → AI → done.")
+        return 0
+    bad(f"E2E FAILED — final status {final.status}" + ("" if verified else " (and storage unverified)"))
+    return 1
+
+
 def cmd_test(args: argparse.Namespace) -> int:
     from hwtest.runner import run
     from hwtest.scenarios import ALL
@@ -737,6 +1210,28 @@ def build_parser() -> argparse.ArgumentParser:
 
     fw = sub.add_parser("firmware", help="list firmware images you can flash")
     fw.set_defaults(func=cmd_firmware)
+
+    ci = sub.add_parser("ci", help="the standard firmware gate: build + flash + full hands-off suite")
+    ci.add_argument("-c", "--config", help="path to config.toml")
+    ci.add_argument("--port", help="serial port (default: config/auto-detect)")
+    ci.add_argument("--no-flash", action="store_true",
+                    help="gate the firmware already on the board instead of flashing the working tree")
+    ci.set_defaults(func=cmd_ci)
+
+    e2 = sub.add_parser("e2e", help="deep test: recorder → Supabase → Cloudflare → AI → done")
+    e2.add_argument("-c", "--config", help="path to config.toml")
+    e2.add_argument("--take", type=float, help="seconds to record (default: config take_s or 8)")
+    e2.add_argument("--upload-timeout", type=float, default=180, dest="upload_timeout")
+    e2.add_argument("--process-timeout", type=float, default=600, dest="process_timeout")
+    e2.set_defaults(func=cmd_e2e)
+
+    inf = sub.add_parser("infra", help="connection test: probe every tier the audio depends on")
+    inf.add_argument("-c", "--config", help="path to config.toml")
+    inf.set_defaults(func=cmd_infra)
+
+    pl = sub.add_parser("pipeline", help="live animated map of the audio pipeline (desktop window)")
+    pl.set_defaults(func=lambda a: __import__("subprocess").call(
+        [sys.executable, str(REPO / "hwtest" / "pipeline_view.py")]))
 
     d = sub.add_parser("devices", help="list connected devices")
     d.add_argument("--ble", action="store_true", help="also scan for the pendant over BLE")

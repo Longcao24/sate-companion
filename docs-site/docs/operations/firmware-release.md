@@ -91,7 +91,42 @@ build, the `LV_TICK_CUSTOM=0` trap, `huge_app`) is committed and **never rolls b
 ([Hardware testing](hardware-testing)) before publishing.
 :::
 
-## Always test first
+## The CI gate — mandatory for every version
 
-Run the [hardware-in-the-loop harness](hardware-testing) on a real recorder before
-publishing — it catches the reboot/upload/delete/OTA classes a compile can't.
+**Every recorder firmware version must pass `sate ci` before it is released.** This
+is the standard test, not an optional extra — it is the release criterion.
+
+```bash
+sate ci               # build + flash the working tree (debug), run the standard suite
+sate ci --no-flash    # gate whatever is already on the board
+```
+
+One command runs the whole gate on a real recorder:
+
+1. Reads `FIRMWARE_VERSION` from the source — the version being gated.
+2. Compiles and flashes the **debug** (USB-CDC) build, because the harness asserts
+   on the firmware's own serial log.
+3. Runs the standard hands-off scenarios — `boot_health`, `reboot_resume`,
+   `byte_match`, `verified_trim` — driving the device with remote
+   `record` / `stop` / `reboot`, so nobody has to be at the bench.
+4. Writes a durable report to `hwtest/ci-reports/fw-<version>_<stamp>.json` and
+   exits non-zero on any FAIL/ERROR, so it drops into scripts and release checklists.
+
+The gate refuses to run against the protected in-use unit. It needs the board on
+USB, the device on Wi-Fi, and the account in `hwtest/config.toml` (see
+[Hardware testing](hardware-testing) for what each scenario checks and why these
+four catch the classes a compile can't: reboot-mid-record, swallowed stops,
+byte mismatches, unverified SD frees).
+
+The two delete scenarios (`delete_journal`, `delete_during_upload`) stay outside the
+gate because they need a human tap on the Sessions screen — run them from the
+desktop Debugger before a release that touches delete/renumber code.
+
+:::danger Regression rule — every new feature
+Any change — firmware, harness, backend — re-runs the standard suite **before it
+merges**, not just before a release. `sate ci` *is* the regression suite: the
+1.5.16 → 1.5.18 chain is the proof, where each fix exposed the next latent bug
+(resume blocked the network; then the stop was swallowed) and only re-running the
+full suite after every change caught them. Feature touches the backend too? Add
+`sate e2e`. Something looks down? `sate infra` first.
+:::

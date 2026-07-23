@@ -65,7 +65,18 @@ sate firmware                  # list flashable images (cache + GitHub releases)
 sate flash recorder --version 1.5.12   # put a published older build back on
 sate gui                       # native window   |   sate dashboard = browser
 sate debug                     # desktop Debugger: screen mirror + remote control
+sate ci                        # THE firmware gate: build + flash + standard suite
 ```
+
+**Regression rule: re-run `sate ci` before ANY feature/fix lands** (and `sate e2e` when the
+backend is touched). Deeper layers: `sate e2e` follows one take recorder → Supabase →
+Cloudflare → AI → done with per-stage timings (no USB needed); `sate infra` probes every
+tier with latency (incl. the deployed `/sessions/verify` route and the AI queue state);
+`sate pipeline` opens the live animated map.
+
+**`sate ci` is the release criterion.** Every firmware version must pass it on a real
+board before it ships; it writes a per-version report to `hwtest/ci-reports/`. Do not
+cut a release, publish an OTA, or tag a version without a passing `sate ci` run.
 
 Four of the six recorder scenarios are hands-off — the harness drives `record` / `stop` /
 `reboot` through `device-api` with the signed-in clinician session. Only the two delete

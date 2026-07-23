@@ -139,6 +139,36 @@ CI / a pre-flash gate.
   since 1.5.17 a resumed take keeps its network up, so `reboot_resume` is fully
   hands-off: remote record → remote reboot → assert resume → remote stop.
 
+## CI — the standard gate for every firmware version
+
+```bash
+sate ci               # build + flash the working tree (debug) + run the standard suite
+sate ci --no-flash    # gate the firmware already on the board
+```
+
+This is **the CI for the SATE recorder**: `boot_health`, `reboot_resume`,
+`byte_match`, `verified_trim`, fully hands-off, against a real board. A version that
+has not passed `sate ci` does not ship. Each run writes
+`hwtest/ci-reports/fw-<version>_<stamp>.json` as the durable record; exit code is
+non-zero on any FAIL/ERROR so the command gates scripts directly. The protected
+in-use unit is refused. The two delete scenarios stay manual (screen taps) — run
+them from the Debugger when a release touches delete/renumber code.
+
+## Deeper layers — whole-system tests
+
+- **`sate e2e`** — records remotely and follows THAT take through every hop
+  (device-api → Storage+DB byte-verified → queued → cf-processor → AI → finalize →
+  done) with per-stage timings. Needs no USB — account + Wi-Fi only.
+- **`sate infra`** — one probe per tier with latency: Auth, DB, device-api (incl.
+  the deployed `/sessions/verify` route), Storage, the Cloudflare worker, the AI
+  queue state, and the device heartbeat.
+- **`sate pipeline`** / Debugger "Live pipeline view" — animated realtime map of
+  the pipeline: green behind the audio, the current hop pulsing with a moving dot,
+  live elapsed, and past-run timings with averages.
+
+**Regression rule:** every new feature or fix re-runs `sate ci` before it lands;
+backend-touching changes add `sate e2e`.
+
 ## When the board vanishes from USB
 
 Occasionally, usually right after a run, the recorder stops enumerating entirely -

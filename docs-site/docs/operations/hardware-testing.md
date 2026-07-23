@@ -31,7 +31,15 @@ sate devices --ble        # list serial ports + scan the pendant
 sate doctor --device      # reset the board + diagnose real hardware faults
 sate firmware             # list every firmware image you can flash
 sate flash recorder --version 1.5.12   # put a published older build back on
+sate ci                   # the standard firmware gate: build + flash + full suite
+sate e2e                  # deep test: recorder → Supabase → Cloudflare → AI → done
+sate infra                # connection test: probe every tier the audio depends on
+sate pipeline             # live animated map of the audio pipeline (desktop window)
 ```
+
+`sate ci` is **the CI for the SATE recorder**: the standard gate every firmware
+version must pass before release. See
+[Firmware release](firmware-release#the-ci-gate--mandatory-for-every-version).
 
 Install it with `pip install -e hwtest` (gives a `sate` command), or run in place
 with `./hwtest/sate …`. `sate <command> -h` shows options.
@@ -155,7 +163,7 @@ screen mirrored live on the left with the controls on the right:
 | Section | What |
 |---|---|
 | **1 · Device** | Connect / set up (Wi-Fi scan, so you only type the password), diagnose, live status, and **Unlink & reset** — the mobile app's flow (`DELETE /api/devices/:id`, the unit factory-resets on its next heartbeat, BLE `factory_reset` as the off-Wi-Fi fallback), so the full first-time path (claim + provision + test) can be re-run from scratch |
-| **2 · Test recording** | Run the hands-off suite, or tick **any** of the six scenarios individually and run just those; screenshot. (The simulator has no button — run it with `sate test --sim`.) |
+| **2 · Test recording** | Run the hands-off suite, or tick **any** of the six scenarios individually and run just those; **Live pipeline view** (the realtime map above); screenshot. (The simulator has no button — run it with `sate test --sim`.) |
 | **3 · Remote control** | `record` · `stop` · `reboot` · `sync now` · `re-sync all` |
 | **Tools** | Reboot over BLE, move Wi-Fi |
 | **Firmware** | Flash the debug build, flash production, or **flash an older published version** |
@@ -170,6 +178,48 @@ into CI / a pre-flash gate.
 
 The raw entry points still work if you prefer (`python3 hwtest/run.py --config …`,
 `gui.py`, `dashboard.py`).
+
+## Deeper layers — the whole system, not just the device
+
+The scenario suite proves the device half. Three deeper tools follow the audio all
+the way through the backend:
+
+### `sate e2e` — one take through the entire system
+
+Remote-records ~8 s, stops, then follows that exact take hop by hop:
+recorder → device-api (chunked upload) → **Storage + DB row** (byte-verified with
+the same `/sessions/verify` check the device trusts) → `queued` → **cf-processor
+claims** → **AI transcription** → **finalize** → `done` (+ the `recordings` row).
+It reads the same rows the web app reads, so it needs **no USB cable** — only the
+account and the device on Wi-Fi. Prints per-stage timings; exit code gates on the
+audio actually reaching `done`. A real run on the bench:
+
+```
+[   2.1s] record   remote RECORD queued
+[  18.3s] upload   remote STOP queued — device finalizes + uploads
+[  28.0s] stored   session 31 · 0.35 MB in Storage + DB   (byte-verified)
+[  28.7s] done     finalize done — queue wait 0.5s, processing 2.6s
+E2E PASSED — the audio travelled recorder → Supabase → Cloudflare → AI → done.
+```
+
+### `sate infra` — is every tier even reachable?
+
+One probe per hop with latency, so "the pipeline is stuck" becomes "THIS tier is
+down": Supabase Auth → DB (REST) → device-api → the **v15 `/sessions/verify`
+route** (this exact route was once missing from the deployment while present in the
+repo — the probe exists so that never goes unnoticed again) → Storage → the
+Cloudflare processor Worker → pipeline counts (queued / processing / error — the
+only visibility into the self-hosted AI service; a growing queue means it is down)
+→ the device's own heartbeat. Non-zero exit if a critical tier is down.
+
+### `sate pipeline` — the live map
+
+A desktop window (also in the Debugger: **Live pipeline view**) that draws the
+eight hops as an animated flow — completed segments green, the current hop pulsing
+with a travelling dot — plus the in-flight take's live elapsed time and a history
+table of past runs (queue wait / processing / total, with running averages).
+Polls the same rows as the web app every 2 s. **Run pipeline test** inside the
+window records 8 s remotely and lets you watch the take travel the map in realtime.
 
 ## Flashing an older firmware — `sate firmware` / `--version`
 

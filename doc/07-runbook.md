@@ -133,6 +133,11 @@ Key lines: `[MEM] boot/ready … largest=<maxAlloc>` (internal-heap watermark) a
 
 ### Publishing an OTA release
 
+> **`sate ci` is the mandatory gate — every firmware version must pass it before release.**
+> One command: reads `FIRMWARE_VERSION`, builds + flashes the debug build, runs the standard
+> hands-off suite (`boot_health`, `reboot_resume`, `byte_match`, `verified_trim`), writes a
+> report to `hwtest/ci-reports/fw-<version>_<stamp>.json`, exits non-zero on failure.
+>
 > **Run the hardware-in-the-loop harness on a real recorder before you publish** (`hwtest/`, Python):
 > `sate test` (or `sate gui` / `sate dashboard` / `sate debug`; `sate test --sim` self-tests with no
 > board). It drives record/stop/reboot/delete and asserts on the firmware serial log + the bytes the
