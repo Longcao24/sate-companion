@@ -29,6 +29,8 @@ sate flash recorder       # build + flash (auto-detects the port)
 sate flash pendant        # build + flash (Seeed core)
 sate devices --ble        # list serial ports + scan the pendant
 sate doctor --device      # reset the board + diagnose real hardware faults
+sate firmware             # list every firmware image you can flash
+sate flash recorder --version 1.5.12   # put a published older build back on
 ```
 
 Install it with `pip install -e hwtest` (gives a `sate` command), or run in place
@@ -54,7 +56,7 @@ flowchart TD
 | Scenario | Guards | Device |
 |---|---|---|
 | `boot_health` | Boots to `[MEM] ready`, no crash/hang (LV_TICK_CUSTOM trap) | Recorder |
-| `reboot_resume` | A button take interrupted by a reboot **auto-resumes** | Recorder |
+| `reboot_resume` | A take interrupted by a reboot **auto-resumes**, and stays remote-controllable while it does | Recorder |
 | `byte_match` | Uploaded bytes on the server **== bytes the device sent** | Recorder |
 | `verified_trim` | SD audio is freed **only after** the server confirms it | Recorder |
 | `delete_journal` | A delete interrupted by a reboot **heals** (no hidden takes) | Recorder |
@@ -64,6 +66,33 @@ flowchart TD
 | `pendant_stop` | Notifies stop after `0x00` | Pendant |
 | `pendant_battery` | Battery reads 0–100 with a sane charging bit | Pendant |
 | `pendant_findme` | Find-me flashes the LEDs | Pendant |
+
+## How the harness drives the device
+
+Four of the six recorder scenarios are now **hands-off** — the harness starts, stops,
+and reboots the device through the `device-api` command channel with the signed-in
+clinician's session, so a full run needs nobody at the bench. Only the two delete
+scenarios still prompt, because deleting a session is a screen action with no remote
+equivalent.
+
+| Command | Since | Used for |
+|---|---|---|
+| `record` | — | start a take |
+| `stop` | fw 1.5.15 | end a take (before this, only the button or the ~62-min ceiling could) |
+| `reboot` | — | interrupt a take mid-capture |
+| `sync_now` / `resync_all` | — | drive the upload + verified-trim paths |
+
+:::danger A serial reset cannot reboot a recording device
+On the debug build `Serial` is USB-CDC, and its DTR/RTS reset is handled **in
+software** by the CDC stack. The capture loop never services USB, so the reset pulse
+is simply never seen — the board keeps recording and the test sees nothing at all.
+Reboot mid-take with the **remote `reboot` command** (it runs on the core-0 net task,
+which keeps ticking through a take). `BenchActions.trigger_reboot()` prefers it
+automatically and only falls back to the serial line.
+
+Flashing is unaffected: `esptool` resets through the USB-Serial-JTAG **hardware**
+peripheral, which works even when the firmware is wedged.
+:::
 
 ## Two transports
 
@@ -95,7 +124,26 @@ sate test --sim           # self-test the harness, no board
 sate test --only byte_match,reboot_resume   # a subset
 sate gui                  # native window (or double-click "SATE Hardware Test.app")
 sate dashboard            # browser dashboard
+sate debug                # the desktop Debugger app (screen mirror + remote control)
 ```
+
+## The desktop Debugger app
+
+A native window (`sate debug`, or `python3 hwtest/debugger.py`) built for bench work
+rather than CI. It opens on a **login page** — everything after it uses the real
+clinician session, the same way the mobile app does — and then shows the device
+screen mirrored live on the left with the controls on the right:
+
+| Section | What |
+|---|---|
+| **1 · Device** | Connect / set up (Wi-Fi scan, so you only type the password), diagnose, live status |
+| **2 · Test recording** | Run the hands-off suite, or tick **any** of the six scenarios individually and run just those; simulator; screenshot |
+| **3 · Remote control** | `record` · `stop` · `reboot` · `sync now` · `re-sync all` |
+| **Tools** | Reboot over BLE, move Wi-Fi |
+| **Firmware** | Flash the debug build, flash production, or **flash an older published version** |
+
+Scenarios that need a human are labelled "needs a tap on the device" in the list, so
+an unattended run can be selected at a glance.
 
 The GUI has a **PORT** picker (auto-scans `/dev/cu.usbmodem*`) for the recorder and
 a **PENDANT** scan for BLE. Bench steps that need a human (press RECORD, make noise)
@@ -104,6 +152,28 @@ into CI / a pre-flash gate.
 
 The raw entry points still work if you prefer (`python3 hwtest/run.py --config …`,
 `gui.py`, `dashboard.py`).
+
+## Flashing an older firmware — `sate firmware` / `--version`
+
+To reproduce a field bug on the build that actually shipped, or to bisect a
+regression, flash a published image instead of the working tree:
+
+```bash
+sate firmware                            # what is available (local cache + GitHub releases)
+sate flash recorder --version 1.5.12     # fetch + flash that build
+sate flash recorder --image ./some.bin   # flash a specific file
+```
+
+Images are cached in `~/.sate/firmware/`. Two kinds, and mixing them up is the
+classic dead-black-screen:
+
+| Kind | Size | Written at | Why |
+|---|---|---|---|
+| **merged** | ~16 MB | `0x0` | The whole flash — bootloader + partition table + app. Lands the board in a known state whichever OTA slot it was running. Preferred. |
+| **app** | ~1.7 MB | app offset | The OTA payload only. `boot_app0.bin` is rewritten alongside it to reset `otadata` — without that the bootloader may keep running the *other* slot and the flash looks like it did nothing. |
+
+Manual flashing always uses **DIO** flash mode; `qio` on this board gives a dead
+black screen. (`arduino-cli upload` chooses the mode itself — this path cannot.)
 
 ## Diagnose a board — `sate doctor --device`
 

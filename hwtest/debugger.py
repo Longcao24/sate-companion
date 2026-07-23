@@ -18,6 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from hwtest import cli as C  # noqa: E402
+from hwtest.scenarios import ALL as SCENARIOS  # noqa: E402
 
 # Public client config (same trust level as the app bundle / firmware).
 DEFAULT_SERVER = "https://zlgdpivcbmaodgokkdvz.supabase.co/functions/v1/device-api"
@@ -76,6 +77,12 @@ class Btn(tk.Frame):
 
 
 class Debugger:
+    # Since fw 1.5.16/1.5.17 the reboot-resume case is hands-off too: remote record,
+    # remote reboot, remote stop. Only the delete cases still need a human on the
+    # Sessions screen (there is no remote "delete session" command).
+    MANUAL = ("delete_journal", "delete_during_upload")
+    AUTO = ("boot_health", "byte_match", "verified_trim", "reboot_resume")
+
     def __init__(self, root: tk.Tk, cfg: dict):
         self.root = root
         self.cfg = cfg or {}
@@ -229,26 +236,57 @@ class Debugger:
         add(row, "Live status", self._refresh_status)
 
         # 2) TEST — record & verify (mobile-app step 2)
-        AUTO = ["boot_health", "byte_match", "verified_trim"]      # hands-off (remote record)
-        MANUAL = ["reboot_resume", "delete_journal", "delete_during_upload"]  # need a button / screen tap
         f = section("2 · TEST RECORDING")
-        add(f, "▶  Run automatic tests", lambda: self._run_tests_inproc(AUTO, sim=False), primary=True, wide=True)
-        add(f, "Manual tests (press RECORD / delete on device)…", lambda: self._run_tests_inproc(MANUAL, sim=False), wide=True)
+        add(f, "▶  Run automatic tests", lambda: self._run_tests_inproc(self.AUTO, sim=False),
+            primary=True, wide=True)
+
+        # Every scenario the harness ships, individually selectable — so a bench run
+        # can be narrowed to the one case you are chasing instead of the whole suite.
+        self.scn_vars = {}
+        box = tk.Frame(ap, bg=CARD, highlightbackground=HAIR, highlightthickness=1)
+        box.pack(fill="x", pady=(6, 2))
+        for sc in SCENARIOS:
+            manual = sc.key in self.MANUAL
+            v = tk.BooleanVar(value=not manual)
+            self.scn_vars[sc.key] = v
+            r = tk.Frame(box, bg=CARD); r.pack(fill="x", padx=8, pady=1)
+            tk.Checkbutton(r, variable=v, bg=CARD, activebackground=CARD, highlightthickness=0,
+                           bd=0).pack(side="left")
+            tk.Label(r, text=sc.key, bg=CARD, fg=INK, font=("Menlo", 10, "bold"),
+                     width=20, anchor="w").pack(side="left")
+            tk.Label(r, text=("needs a tap on the device" if manual else "hands-off"),
+                     bg=CARD, fg=(WARNC if manual else INK2), font=("Menlo", 9),
+                     anchor="w").pack(side="left")
+        row = tk.Frame(ap, bg=CARD); row.pack(fill="x")
+        add(row, "Run selected", self._run_selected)
+        add(row, "All", lambda: self._select_scn("all"))
+        add(row, "Hands-off only", lambda: self._select_scn("auto"))
         row = tk.Frame(ap, bg=CARD); row.pack(fill="x")
         add(row, "Try in simulator", lambda: self._run_tests_inproc(None, sim=True))
         add(row, "Take screenshot", self._snap_once)
 
-        # 3) TOOLS
+        # 3) REMOTE CONTROL — the device-api command channel (fw >=1.5.17)
+        f = section("3 · REMOTE CONTROL")
+        row = tk.Frame(ap, bg=CARD); row.pack(fill="x")
+        add(row, "● Record", lambda: self._remote("record"))
+        add(row, "■ Stop", lambda: self._remote("stop"))
+        add(row, "↻ Reboot", lambda: self._remote("reboot"))
+        row = tk.Frame(ap, bg=CARD); row.pack(fill="x")
+        add(row, "Sync now", lambda: self._remote("sync_now"))
+        add(row, "Re-sync all", lambda: self._remote("resync_all"))
+
+        # 4) TOOLS
         f = section("TOOLS")
         row = tk.Frame(ap, bg=CARD); row.pack(fill="x")
-        add(row, "Reboot device", self._reboot)
+        add(row, "Reboot over BLE", self._reboot)
         add(row, "Move Wi-Fi…", self._connect_dialog)
 
-        # 4) FIRMWARE
+        # 5) FIRMWARE
         f = section("FIRMWARE")
         row = tk.Frame(ap, bg=CARD); row.pack(fill="x")
         add(row, "Flash debug build", lambda: self._confirm_flash(True))
         add(row, "Flash production", lambda: self._confirm_flash(False), danger=True)
+        add(f, "Flash an older version…", self._flash_old_dialog, wide=True)
 
         # results
         rc = tk.Frame(right, bg=BG); rc.pack(fill="x", pady=(12, 0))
@@ -487,6 +525,67 @@ class Debugger:
                 self.q.put(("done", None, None))
         threading.Thread(target=worker, daemon=True).start()
 
+    def _select_scn(self, which):
+        for k, v in self.scn_vars.items():
+            v.set(True if which == "all" else (k not in self.MANUAL))
+
+    def _run_selected(self):
+        keys = [k for k, v in self.scn_vars.items() if v.get()]
+        if not keys:
+            self._log("  tick at least one scenario first.", "bad"); return
+        if any(k in self.MANUAL for k in keys):
+            self._log("  note: a selected scenario needs you to delete a session on the device screen.", "dim")
+        self._run_tests_inproc(keys, sim=False)
+
+    def _ensure_device_id(self):
+        """Resolve this bench device's device-api id from the signed-in account."""
+        if self.device_id or not (self.access_token and self.serial):
+            return self.device_id
+        try:
+            from hwtest import sate_account as A
+            dk, did = A.device_key_for(self.access_token, self.serial)
+            self.device_key = dk or self.device_key
+            self.device_id = did or self.device_id
+        except Exception:  # noqa: BLE001
+            pass
+        return self.device_id
+
+    def _remote(self, op):
+        """Queue a device-api command (record / stop / reboot / sync_now / resync_all).
+
+        Note this is the ONLY reliable way to reboot a unit that is mid-take: the
+        debug build's Serial is USB-CDC and its DTR/RTS reset is handled in software,
+        which the capture loop never services, so a serial reset is ignored while
+        recording. The command channel lives on the core-0 net task and keeps running.
+        """
+        if self.busy:
+            return
+        if not self.access_token:
+            self._log("  sign in first — remote commands go through your account.", "bad"); return
+        if not self._ensure_device_id():
+            self._log("  no device selected — run 1 · Connect / set up device first.", "bad"); return
+        self._log(f"\nsending remote command: {op}", "head")
+        self._set_busy(True)
+
+        def work():
+            import json, urllib.request
+            srv = self.cfg.get("server", {})
+            url = f"{srv.get('base_url', DEFAULT_SERVER)}/api/devices/{self.device_id}/commands"
+            try:
+                req = urllib.request.Request(
+                    url, data=json.dumps({"op": op}).encode(), method="POST",
+                    headers={"Authorization": f"Bearer {self.access_token}",
+                             "apikey": srv.get("anon_key", DEFAULT_ANON),
+                             "Content-Type": "application/json"})
+                with urllib.request.urlopen(req, timeout=20):
+                    pass
+                self.q.put(("log", f"  queued — the device runs it on its next poll (<10s)", "ok"))
+            except Exception as e:  # noqa: BLE001
+                self.q.put(("log", f"  failed: {e}", "bad"))
+            finally:
+                self.q.put(("done", None, None))
+        threading.Thread(target=work, daemon=True).start()
+
     def _reboot(self):
         if self.busy:
             return
@@ -507,6 +606,86 @@ class Debugger:
                 self.q.put(("log", f"  {msg}", "ok" if "ack" in msg else "bad"))
             except Exception as e:  # noqa: BLE001
                 self.q.put(("log", f"  reboot failed: {e}", "bad"))
+            finally:
+                self.q.put(("done", None, None))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _flash_old_dialog(self):
+        """Pick a published build and put it back on the board.
+
+        Used to reproduce a field bug on the version that actually shipped, or to
+        bisect a regression. Prefers the *merged* image: it rewrites the whole flash
+        (bootloader + partitions + app), so the board lands in a known state no
+        matter which OTA slot it was running.
+        """
+        if self.busy:
+            return
+        self._log("\nlooking for flashable firmware images…", "head")
+        self._set_busy(True)
+
+        def work():
+            try:
+                from hwtest import firmware as FW
+                rows = FW.list_available(str(C.REPO))
+                self.q.put(("fwlist", rows, None))
+            except Exception as e:  # noqa: BLE001
+                self.q.put(("log", f"  could not list firmware: {e}", "bad"))
+                self.q.put(("done", None, None))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_fw_list(self, rows):
+        self._set_busy(False)
+        if not rows:
+            self._log("  no images found — cut a GitHub release with a .bin asset, "
+                      "or drop one in ~/.sate/firmware/.", "bad")
+            return
+        win = tk.Toplevel(self.root); win.title("Flash an older version"); win.configure(bg=BG)
+        win.transient(self.root); win.grab_set()
+        tk.Label(win, text="Flash an older firmware", bg=BG, fg=INK,
+                 font=("Menlo", 13, "bold")).pack(anchor="w", padx=18, pady=(16, 2))
+        tk.Label(win, text="This replaces what is on the board. 'merged' rewrites the whole\n"
+                           "flash; 'app' writes the OTA slot and resets otadata.",
+                 bg=BG, fg=INK2, font=("Menlo", 10), justify="left").pack(anchor="w", padx=18)
+        lb = tk.Listbox(win, bg=CARD, fg=INK, font=("Menlo", 11), height=min(10, len(rows)),
+                        relief="flat", highlightthickness=1, highlightbackground=HAIR,
+                        activestyle="none", width=54)
+        for e in rows:
+            lb.insert("end", f"  {e['version']:9} {e['kind']:7} {e['size']/1e6:6.1f} MB   {e['source']}")
+        lb.selection_set(0)
+        lb.pack(fill="x", padx=18, pady=12)
+        bar = tk.Frame(win, bg=BG); bar.pack(fill="x", padx=18, pady=(0, 16))
+
+        def go():
+            sel = lb.curselection()
+            if not sel:
+                return
+            entry = rows[sel[0]]
+            win.destroy()
+            if not _confirm(self.root, "Flash older firmware",
+                            f"Flash {entry['version']} ({entry['kind']}) onto the board?\n\n"
+                            "Whatever is on it now is overwritten."):
+                return
+            self._do_flash_entry(entry)
+
+        Btn(bar, "Flash it", go, primary=True).pack(side="right")
+        Btn(bar, "Cancel", win.destroy).pack(side="right", padx=(0, 8))
+
+    def _do_flash_entry(self, entry):
+        port = self._resolve_port()
+        if not port:
+            self._log("  no serial port — plug the board in.", "bad"); return
+        self._log(f"\nflashing firmware {entry['version']} ({entry['kind']})…", "head")
+        self._set_busy(True)
+
+        def work():
+            try:
+                from hwtest import firmware as FW
+                path = FW.fetch(entry, str(C.REPO), log=lambda l: self.q.put(("log", l, None)))
+                okd = FW.flash_image(port, path, kind=entry["kind"],
+                                     log=lambda l: self.q.put(("log", l, None)))
+                self.q.put(("log", f"  {'done' if okd else 'flash failed'}", "ok" if okd else "bad"))
+            except Exception as e:  # noqa: BLE001
+                self.q.put(("log", f"  flash failed: {e}", "bad"))
             finally:
                 self.q.put(("done", None, None))
         threading.Thread(target=work, daemon=True).start()
@@ -572,6 +751,8 @@ class Debugger:
                 elif kind == "log":
                     self._log("  " + a if not a.startswith(("[", "$", "══")) else a, b)
                     self._scan_state(a); self._scan_result(a)
+                elif kind == "fwlist":
+                    self._show_fw_list(a)
                 elif kind == "info":
                     if hasattr(self, "info_lbl"):
                         self.info_lbl.config(text=a)

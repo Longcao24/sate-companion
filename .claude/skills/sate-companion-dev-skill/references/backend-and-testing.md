@@ -61,8 +61,26 @@ sate test -t pendant           # pendant over BLE
 sate test --only byte_match    # a subset of scenarios
 sate doctor --device           # reset the board + diagnose real hardware faults
 sate flash recorder            # build + flash (auto-detects the port)
+sate firmware                  # list flashable images (cache + GitHub releases)
+sate flash recorder --version 1.5.12   # put a published older build back on
 sate gui                       # native window   |   sate dashboard = browser
+sate debug                     # desktop Debugger: screen mirror + remote control
 ```
+
+Four of the six recorder scenarios are hands-off — the harness drives `record` / `stop` /
+`reboot` through `device-api` with the signed-in clinician session. Only the two delete
+scenarios need a human (no remote delete command).
+
+**A serial DTR/RTS reset cannot reboot a recording device.** On the debug build `Serial` is
+USB-CDC, whose reset is handled in software, and the capture loop never services USB — the
+pulse is never seen. Reboot mid-take with the remote `reboot` command (core-0 net task).
+Flashing is unaffected: esptool resets through the USB-Serial-JTAG hardware, which works even
+when the firmware is wedged.
+
+**Check what is DEPLOYED, not just what is in the repo.** A verified-trim failure on the bench
+traced to a `device-api` deployment that predated `/sessions/verify`: every probe 401'd and the
+device never reclaimed SD, with nothing wrong in the source. `supabase functions deploy … --use-api`
+avoids the Docker bundler.
 
 `sate doctor --device` resets the board, reads the boot log, and reports real faults (no
 serial output, crash/panic/brownout, SD init failure, ES8311 audio failure, PSRAM not
@@ -70,4 +88,5 @@ detected, setup never reaching `[MEM] ready`, unclaimed/failing registration). T
 `python3 hwtest/run.py …` entry points still work.
 
 Log tags the harness asserts on: `[MEM] ready`, `[CONN] resume … session …`,
-`[CONN] uploaded … (N bytes)`, `[REC] healed interrupted delete`. See `hwtest/README.md`.
+`[CONN] uploaded … (N bytes)`, `[REC] healed interrupted delete`, `[REC] resume session …
+from part …` (and `[REC] resume: ABORT - …`, which gives the reason a resume did not happen). See `hwtest/README.md`.

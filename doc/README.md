@@ -61,7 +61,7 @@ sate-companion/
 ├── src/                                   companion app (Expo / React Native)
 │   ├── screens/  ble/  api/  components/  sync/
 │   ├── protocol.ts   store.tsx   theme.ts
-├── SATE_Recorder/                         recorder firmware (Arduino / ESP32-S3, fw 1.5.12)
+├── SATE_Recorder/                         recorder firmware (Arduino / ESP32-S3, fw 1.5.13)
 │   ├── SATE_Recorder.ino  connectivity.*  display.*  es8311.*  lv_conf.reference.h
 ├── SATE_Pendant/                          pendant firmware (XIAO nRF52840) + flash_xiao.sh
 ├── react_app_sate-ui_update/              SATE web app (Vite/React) + Supabase

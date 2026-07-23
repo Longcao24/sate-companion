@@ -1,0 +1,10 @@
+# Recorder (USB serial). The device-api checks (urllib) and --sim need nothing
+# beyond the standard library.
+pyserial>=3.5
+
+# Pendant (BLE central). Only needed for `--target pendant` on real hardware.
+# macOS also needs Bluetooth permission for Python/Terminal (Privacy & Security).
+bleak>=0.22
+
+# tomllib is stdlib on Python 3.11+. On 3.10 or older, also install tomli:
+# tomli>=2.0 ; python_version < "3.11"

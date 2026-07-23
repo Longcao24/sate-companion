@@ -4,7 +4,7 @@
 
 | Component | Tech | Source | Role |
 |-----------|------|--------|------|
-| Recorder firmware | Arduino / ESP32-S3, NimBLE, WiFiClientSecure | `SATE_Recorder/` (fw 1.5.12) | Capture audio → SD → upload (Wi-Fi) or expose over BLE |
+| Recorder firmware | Arduino / ESP32-S3, NimBLE, WiFiClientSecure | `SATE_Recorder/` (fw 1.5.13) | Capture audio → SD → upload (Wi-Fi) or expose over BLE |
 | Pendant firmware | Arduino / XIAO nRF52840 Sense, BLE PCM stream | `SATE_Pendant/` | Wearable mic → live PCM over BLE → phone wraps to WAV → same pipeline |
 | Companion app | Expo (iOS), React Native, `react-native-ble-plx` + Plaud SDK | `src/` | Setup, claim, offline bridge, remote control, Plaud + Pendant capture |
 | Backend | Supabase (Postgres + Storage + Edge Functions / Deno) + **Cloudflare Container** | `react_app_sate-ui_update/supabase/functions/`, `cf-processor/` | Auth, device API, async AI processing, persistence |

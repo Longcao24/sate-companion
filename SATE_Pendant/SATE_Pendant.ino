@@ -34,6 +34,11 @@
 #include <bluefruit.h>
 #include <PDM.h>
 
+// Pendant firmware version. First versioned release. Bump on every release and log
+// it in the docs "Version log". NOTE: not yet exposed over BLE — the app can't read
+// this until a version characteristic (or a DIS firmware-revision string) is added.
+static const char *FIRMWARE_VERSION = "1.0.0";
+
 #define SAMPLE_RATE   16000
 #define MIC_GAIN      64           // PDM analog gain 0..80 (default 20). 64 = a bit louder than stock, still clean.
                                    // 70+ and/or digital gain clipped loud samples -> harsh "rè" buzz. Keep ≤~66.
@@ -67,6 +72,7 @@
 static int16_t ring[RING_SIZE];
 static volatile uint32_t ringHead = 0;   // written by PDM callback
 static volatile uint32_t ringTail = 0;   // read by loop
+static volatile uint32_t ringDropped = 0; // samples dropped on overrun (BLE stalled)
 static short pdmTemp[512];                // PDM.read scratch
 static volatile int32_t warmup = 0;       // samples to drop after PDM.begin (mic settling "pop")
 static float hpfX1 = 0, hpfY1 = 0;        // DC-block high-pass state (reset per stream in micStart)
@@ -83,6 +89,7 @@ BLEService        audioSvc("19B10000-E8F2-537E-4F6C-D104768A1214");
 BLECharacteristic audioChr("19B10001-E8F2-537E-4F6C-D104768A1214");
 BLECharacteristic ctrlChr ("19B10002-E8F2-537E-4F6C-D104768A1214");
 BLEBas            batSvc;   // standard Battery Service 0x180F / 0x2A19 (%)
+BLEDfu            bledfu;   // Adafruit/Nordic BLE OTA DFU service — lets the app push firmware over BLE
 
 // ── Battery (XIAO nRF52840: VBAT on P0.31 behind 1M/510k divider, enabled by
 //    pulling P0.14 low; LiPo 3.3 V empty .. 4.2 V full) ────────────────────────
@@ -155,6 +162,7 @@ void onPDMdata() {
     i = drop;
   }
   uint32_t h = ringHead;
+  uint32_t t = ringTail;            // snapshot the consumer position for the overrun guard
   float x1 = hpfX1, y1 = hpfY1;
   for (; i < n; i++) {
     // DC-block high-pass first (removes bias + rumble -> clearer), then gain.
@@ -165,6 +173,13 @@ void onPDMdata() {
     // is ~linear near 0), loud peaks bend smoothly toward ±full-scale instead of
     // hard-clipping. Output of tanh is (-1,1) so it can never exceed int16 range.
     float v = 32767.0f * tanhf((y * DIGITAL_GAIN) / 32767.0f);
+    // Overrun guard: if the BLE consumer has stalled (notify() failing under a
+    // sagging low-battery rail) and the ring is full, DROP the newest sample
+    // instead of overwriting audio that hasn't been sent yet. This keeps the
+    // already-queued stream contiguous — one clean gap when the link recovers,
+    // not a mid-buffer corruption. The HPF state above keeps advancing so the
+    // filter stays aligned with real time across the gap.
+    if ((uint32_t)(h - t) >= RING_SIZE) { ringDropped++; continue; }
     ring[(h++) & RING_MASK] = (int16_t)v;
   }
   hpfX1 = x1; hpfY1 = y1;
@@ -234,11 +249,28 @@ void setup() {
 
   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);   // before begin(): MTU 247 + big queue
   Bluefruit.begin();
+  // Run the SoC on the DC/DC regulator instead of the default LDO. Under the
+  // streaming load (131 notify/s, 2M PHY, BANDWIDTH_MAX) the radio draws hard
+  // current bursts; on the LDO those pull ~2x the peak current, sagging the rail.
+  // On a low / high-internal-resistance LiPo that sag makes the SoC miss
+  // connection events -> notify() fails -> audio packets drop. DC/DC ~halves the
+  // peak draw, which is why the drops only showed up at low battery. Must go
+  // through the SoftDevice API (it owns POWER); the XIAO nRF52840 populates the
+  // required DC/DC inductors, so this is safe.
+  sd_power_dcdc_mode_set(NRF_POWER_DCDC_ENABLE);
   Bluefruit.autoConnLed(false);   // we drive LEDs ourselves (saves ~1 mA)
   Bluefruit.setName("SATE Pendant");
   Bluefruit.setTxPower(0);        // 0 dBm plenty for on-body -> phone-in-hand
   Bluefruit.Periph.setConnectCallback(onConnect);
   Bluefruit.Periph.setDisconnectCallback(onDisconnect);
+
+  // OTA DFU service — add it FIRST (Adafruit requires this so its attribute
+  // handle stays fixed across firmware versions). The board already ships the
+  // Adafruit/Seeed DFU bootloader (0.6.2 + S140 7.3.0), so no bootloader swap is
+  // needed: a phone connects to the running pendant, writes the DFU control
+  // point, the board reboots into the bootloader, and the app streams the new
+  // firmware over BLE. App side must speak the Nordic BLE DFU protocol.
+  bledfu.begin();
 
   audioSvc.begin();
 

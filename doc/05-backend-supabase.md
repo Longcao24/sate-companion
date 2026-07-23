@@ -27,7 +27,7 @@ function (the device authenticates with its device key, not a user JWT).
 |----------|--------------|------|
 | `device-api` | **false** | The device + app REST surface. Routes by auth header: device key (`Bearer key-…`) vs SLP user JWT. Current ~v33. |
 | `finalize-session` | **false** | The **light half** of device processing: `countErrors` + `calculateSpeechAnalysis` → INSERT `recordings` → set `status=done`. Called by the Cloudflare container after it holds the AI call. |
-| `process-device-session` | **false** | ⚠️ **200 NO-OP now.** `device-api` still fire-and-forgets to it, but it must NOT process (would race the container + duplicate `recordings`). Don't revive it. |
+| `process-device-session` | **false** | ⚠️ **200 NO-OP now.** `device-api` still fire-and-forgets to it, but it must NOT process (would race the container + duplicate `recordings`). Don't revive it. **Known gap (audit 2026-07-22):** the copy checked into the repo is NOT the no-op — it still processes and inserts `recordings`; prod is deployed as the no-op, so do NOT deploy the repo file as-is. |
 | `mint-plaud-token` | **false** | 2-step Plaud OAuth server-side → Plaud `user_id` token (see `plaud-integration.md`). |
 | `mobile-link` | **false** | Mints/consumes one-time QR/code for phone login. |
 | `create-checkout-session`, `create-portal-session`, `cancel-subscription`, `get-invoices`, `stripe-webhook` | — | Stripe billing. |
@@ -56,6 +56,7 @@ Device-key routes (`Authorization: Bearer key-…`):
 | `/register` or `/devices/register` | POST | Validate claim token, insert `sate_devices`, return `device_key` |
 | `/devices/:id/commands` | GET | Device polls queued commands (sends `pending`, `state`) |
 | `/sessions`, `/sessions/raw`, `/sessions/chunk` | POST | Upload a session (chunked = `?offset=&final=`) |
+| `/sessions/verify` | GET | **Read-only** (≥v15): `stored:true` only when the row exists AND the storage object exists — the recorder's gate before it frees SD audio |
 
 SLP user-JWT routes:
 
@@ -94,6 +95,21 @@ Rules that are load-bearing — an earlier version broke each one and cost a 62-
   is a 409 and the device restarts the session.
 - **The idempotency probe checks the object, not just the row.** A row is not proof the audio
   landed; answering "already stored" for a ghost row strands the recording on the device forever.
+  `storeSessionRecord` probes by `(user, device_serial, patient_id, session_number, bytes)` +
+  `objectExists` to **dedup a re-uploaded take** (e.g. a lost BLE `mark_synced` ACK that made the
+  recorder resend). ⚠️ There is **no DB unique-constraint backstop yet** — the probe is the only guard.
+
+### Session verify + firmware publish (device-api ≥v15)
+
+- **`GET /api/sessions/verify`** (device-key auth, **read-only**) answers "is session N with exactly
+  B bytes durably stored?" — `stored:true` only when the `sate_device_sessions` row exists AND
+  `objectExists` confirms the storage object really landed. The recorder calls it before freeing SD
+  audio (see [02](02-firmware.md)); **never make it mutate.**
+- **`POST /firmware`** (`publishFirmware`) now validates the version is plain **semver** and the
+  image is a real ESP32 app bin (starts with the `0xE9` magic byte, ≤4 MB) before it can become
+  "latest". ⚠️ **Known gap (audit 2026-07-22):** this route is registered **above** the `/admin`
+  `isAdmin()` gate, so any authenticated user can publish fleet firmware — it still needs an
+  `isAdmin()` gate (same in the Cloudflare port).
 
 ### Processing a device session (ASYNC — split container + `finalize-session`)
 

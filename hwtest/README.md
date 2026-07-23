@@ -42,7 +42,7 @@ points still work. Run `sate <command> -h` for options.
 | Scenario | Guards |
 |---|---|
 | `boot_health` | Boots to `[MEM] ready`, no crash/hang (LV_TICK_CUSTOM trap, heap/PSRAM) |
-| `reboot_resume` | A button take interrupted by a reboot **auto-resumes** |
+| `reboot_resume` | A take interrupted by a reboot **auto-resumes**, and stays remote-controllable while it does |
 | `byte_match` | Uploaded bytes on the server **== bytes the device sent** (no truncation/mismatch) |
 | `verified_trim` | SD audio is freed **only after** the server confirms it (never on `.synced` alone) |
 | `delete_journal` | A delete interrupted by a reboot **heals** (no take hidden behind a numbering hole) |
@@ -118,14 +118,37 @@ CI / a pre-flash gate.
 ## The bench rig (what needs hardware, not software)
 
 - **USB serial**: always. Reset-to-run is automated (DTR/RTS).
-- **Starting a take**: RECORD is a physical button. Default `record_mode = "manual"`
-  prompts the operator (Enter in the CLI, a **Done** button in the dashboard). A
-  servo can automate it later — set `unattended = true`.
-- **Reboot**: `reboot_mode = "reset"` uses the serial reset line (clean reset —
-  exercises the resume path). For a **true brownout**, use `reboot_mode = "manual"`
-  (prompted power cut) or wire a USB power relay (future `mode = "relay"`).
-- **Auto-resume only arms for button (local) takes** — a remote/server-commanded
-  take intentionally does not resume, so `reboot_resume` must use `record_mode = manual`.
+- **Starting a take**: `record_mode = "remote"` queues a `record` command through
+  `device-api` with the signed-in clinician session, so no one has to be at the bench.
+  `record_mode = "manual"` prompts an operator instead (Enter in the CLI, a **Done**
+  button in the dashboard/desktop app).
+- **Stopping a take**: the remote `stop` command (fw >=1.5.15). Before it existed, a
+  server-started take could only be ended at the device or by the ~62-min ceiling.
+- **Reboot**: the remote `reboot` command by default. For a **true brownout**, use
+  `reboot_mode = "manual"` (prompted power cut) or wire a USB power relay.
+- **A serial reset CANNOT reboot a recording device.** On the debug build `Serial` is
+  USB-CDC, whose DTR/RTS reset is handled in software, and the capture loop never
+  services USB — the pulse is never seen, the board just keeps recording and the test
+  sees nothing. `trigger_reboot()` prefers the remote command and only falls back to
+  the serial line. Flashing is unaffected: esptool resets through the USB-Serial-JTAG
+  **hardware**, which works even when the firmware is wedged.
+- **Auto-resume covers every take** since fw 1.5.16 (button and remote alike), and
+  since 1.5.17 a resumed take keeps its network up, so `reboot_resume` is fully
+  hands-off: remote record → remote reboot → assert resume → remote stop.
+
+## When the board vanishes from USB
+
+Occasionally, usually right after a run, the recorder stops enumerating entirely -
+`sate doctor` reports "no recorder serial port detected" and `/dev/cu.usbmodem*` does
+not exist at all. The unit also goes offline on Wi-Fi at the same time, so it is not
+merely a lost CDC interface.
+
+Nothing in software reaches it in that state: there is no port to reset and no
+network to command. **Unplug the USB cable and plug it back in.** Root cause is not
+established yet; if you catch it, note what the last operation was.
+
+Distinguish this from the CDC-reset limitation above: there, the port still exists
+and flashing still works - the board just ignores a DTR/RTS reset while recording.
 
 ## Honest limitations
 

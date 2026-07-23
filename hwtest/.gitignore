@@ -1,0 +1,8 @@
+config.toml
+.venv/
+__pycache__/
+*.pyc
+"SATE Hardware Test.app"/
+sate_hwcli.egg-info/
+.venv/
+.mirror.ppm

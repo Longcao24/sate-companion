@@ -35,6 +35,8 @@ Cloudflare Container (cf-processor/, Python, sate-processor.longcao.workers.dev)
 
 - **`process-device-session` is a 200 NO-OP.** `device-api` still fire-and-forgets to it, but it
   must NOT process — that would race the container and duplicate `recordings`. Don't revive it.
+  ⚠️ **Known gap (audit 2026-07-22):** the copy checked into the repo is NOT the no-op — it still
+  processes and inserts `recordings`. Prod is deployed as the no-op; do NOT deploy the repo file as-is.
 - **`finalize-session`** and **`device-api`** must stay `verify_jwt: false`.
 - The container's own loop drains the queue; `pg_cron` pinging the Worker `/tick` just keeps it warm.
 

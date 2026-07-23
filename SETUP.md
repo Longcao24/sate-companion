@@ -64,6 +64,12 @@ Bump `FIRMWARE_VERSION` in `SATE_Recorder/SATE_Recorder.ino`, compile, upload th
 (`SATE_Recorder.ino.bin`, ~1.7 MB — not the merged bin) to the `firmware` Storage bucket + insert a
 `sate_firmware` row. Full recipe: [`doc/07-runbook.md`](doc/07-runbook.md), [`hardware.md` §12](hardware.md).
 
+**Before publishing, run the hardware-in-the-loop harness on a real board** (`hwtest/`, Python):
+`cd hwtest && python3 run.py --config config.toml` (`python3 gui.py` / `python3 dashboard.py` for a
+UI; `python3 run.py --sim` self-tests with no board). It drives record/reboot/delete over USB and
+checks the firmware serial log against the bytes the server stored — catching reboot-resume,
+verified-trim and crash-safe-delete regressions a compiler can't.
+
 ## Flash the pendant (XIAO nRF52840)
 
 ```bash

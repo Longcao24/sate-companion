@@ -6,8 +6,9 @@ the part most worth reading — **how the firmware is optimized for memory, RAM,
 and the two CPU cores** so long recordings run smooth and never reboot.
 
 Firmware lives in `SATE_Recorder/` (sketch `SATE_Recorder.ino` — folder matches the
-`.ino`, so `arduino-cli` builds it in place). Current good version: **fw 1.5.12**
-(dual-core, two external buttons, screen). Rollback tag: `fw-0.9.1-working`.
+`.ino`, so `arduino-cli` builds it in place). Current source version: **fw 1.5.13**
+(`FIRMWARE_VERSION`; dual-core, two external buttons, screen). No GitHub release has been cut for it
+yet, so the prebuilt flash assets are still tagged `fw-1.5.12`. Rollback tag: `fw-0.9.1-working`.
 
 The **pendant** firmware (XIAO nRF52840, a separate wearable) lives in `SATE_Pendant/`
 with its own `HARDWARE.md` + `flash_xiao.sh` — see that folder and `doc/09-pendant.md`.
@@ -332,13 +333,39 @@ reads the cached count instantly.
 > "all synced". Fix (fw 0.9.3): check the `.synced` marker before deciding a
 > slot is empty; stop only when wav+parts+marker are all absent.
 
-### 8.10 SD audio retention — NOT auto-deleted (fw 1.5.9+) ⚠️
-The old boot-time `purgeSyncedAudio()` and post-upload purge are **gone**. The device holds
-the ONLY copy of a take until the user deletes it by hand (`deleteSessionFiles()`, the sole
-`SD_MMC.remove` for audio). fw 1.5.12 re-adds a *bounded* reclaim, `trimPatientSyncedAudio`:
-keep the newest 5 sessions, free audio only of older **durably-synced** ones (`.synced` =
-server ACKed `final=1`), keep the tombstone marker (numbering), never touch unsynced audio.
-A `.synced` marker means "durably in Storage", never inferred from anything else.
+### 8.10 SD audio retention — reclaimed only when SERVER-VERIFIED (fw 1.5.13+) ⚠️
+The old blind reclaim paths (boot-time `purgeSyncedAudio()`, post-upload purge, the 5-session
+`trimSessionsToMax`) are **gone**. fw 1.5.12 re-added a *bounded* reclaim, and fw 1.5.13 made it
+**server-verified**: `trimPatientSyncedAudio` keeps the newest `KEEP_AUDIO_SESSIONS` (=5) per patient
+and frees the audio of older synced takes **only after** `verifySessionStored()` gets a **byte-exact
+`stored:true`** from `GET /api/sessions/verify` (device-api ≥v15 — checks the DB row AND that the
+storage object exists; `sessionAssembledBytes()` is the byte count that must match). It keeps the
+`.synced` tombstone marker (numbering stays contiguous) and, on ANY doubt — offline, non-2xx, parse
+fail, byte mismatch — **keeps the audio** and retries next cycle. **A `.synced` marker alone is NOT
+proof** (it only means "a POST returned 2xx") and must never authorize a free. Full deletion stays
+user-only: `deleteSessionFiles()` (the sole `SD_MMC.remove` for audio, the Delete button).
+
+Reboot durability (fw 1.5.13, extended 1.5.16-1.5.18): segments **flush to SD every ~5 s**
+(`FLUSH_EVERY_BYTES`, not once per minute); **every** take interrupted by a reboot **auto-resumes**
+into the same session on boot — button-started *and* server/app-started since fw 1.5.16
+(`maybeResumeRecording()`; an empty header-only `part00` is restarted, not deleted; a `tries`
+boot-loop guard gives up after two attempts). Resume needs nothing but local NVS and the SD
+segments: no Wi-Fi, no server. And `deleteSession()`'s multi-rename renumber is **journaled to NVS**
+(`"sate-del"`) and re-driven on boot (`recoverInterruptedDelete()` → `compactPatientDir()`) so a
+reboot mid-shift heals into contiguous `1..N` instead of hiding later takes.
+
+**The resume itself runs from `loop()`, never from `setup()` (fw 1.5.17).** Resuming re-enters the
+capture, which blocks until Stop. `connStartNetTask()` lives in `loop()`, so a resume that blocks
+`setup()` takes the unit off the air entirely — no heartbeat, no remote `stop`, no serial — and a
+server-started take, with nobody at the device, goes dark until the ~62-minute ceiling. `setup()`
+only sets a pending flag; `loop()` performs the resume once the net task is up (or ~8 s in, if the
+unit is offline), so a resumed take stays controllable for its whole length. Do not move it back.
+
+**A remote `stop` is latched only while a take is *armed* (fw 1.5.18).** `recTakeArmed` is set
+before the take's start sequence and cleared when capture returns, so a stop can neither go stale
+(and kill the *next* take) nor be dropped mid-start. Clearing a "stale" stop at take start instead
+was the earlier design, and it swallowed the stop that a resumed take is ended with — leaving takes
+running for minutes with nothing able to stop them.
 
 ### 8.11 Touch sets a flag; heavy work runs in `loop()`
 Touch callbacks only set `pendingAction`; record/upload/screen-rebuild run from
@@ -634,9 +661,12 @@ to `null`** in the edge fn, not `255` (same for `mv<=0`).
 The device pulls firmware updates over the air: the heartbeat returns
 `ota:{url,version}` when an `ota` command is queued (admin **Publish firmware**
 card uploads the `.bin` to Supabase Storage + `sate_firmware`); `runOtaUpdate()`
-downloads it, flashes the **spare** app slot, and reboots into it — a bad image
-auto-rolls-back (ESP keeps the old slot). **This only works because the build uses
-a dual-app-slot partition (`default_8MB`, see §3).** A unit flashed with a
+downloads it, flashes the **spare** app slot, and reboots into it. **This only works because the
+build uses a dual-app-slot partition (`default_8MB`, see §3).**
+> ⚠️ **Known gap (audit 2026-07-22): there is NO device-side OTA rollback.** `verifyOta` is not
+> overridden, so the new slot is marked valid on first boot with no post-boot self-test — a bad
+> image that still boots enough to mark itself valid can **brick** the device. Needs a post-boot
+> self-test before GA; until then, treat every OTA as one-way and stage it on a spare board first. A unit flashed with a
 single-slot scheme (`huge_app`) cannot receive OTA and needs one more USB flash
 onto the dual-slot layout first. Bump `FIRMWARE_VERSION` every release (§ top) —
 OTA compares it to decide whether to flash.

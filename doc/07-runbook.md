@@ -123,8 +123,30 @@ Key lines: `[MEM] boot/ready … largest=<maxAlloc>` (internal-heap watermark) a
 | 1.0.3 | **Touch-lag fix**: poll 3 s→12 s, `setInsecure()` once, GUI pump around poll ([02](02-firmware.md#touch-lag-fix-fw-103)) |
 | 1.5.9 | **Offline-backlog fix + no auto-delete** (see below) |
 | 1.5.10 | Adds the `resync_all` command |
+| 1.5.12 | Bounded reclaim `trimPatientSyncedAudio` (keep newest 5 synced sessions per patient) |
+| 1.5.13 | **Server-verified trim** (`GET /api/sessions/verify` before freeing SD audio) + reboot auto-resume of a local take + crash-safe delete/renumber |
+| 1.5.14 | On-demand **screen mirror** over serial (`SCREENDUMP`) — debug/USB-CDC builds only, never fires in normal use, refuses while recording |
+| 1.5.15 | **Remote `stop` command** — before it, a server-started take could only be ended at the device or by the ~62-min ceiling (`REMOTE_RECORD_SECONDS` was declared but never used) |
+| 1.5.16 | **Every** take is crash-resumable, not just button takes, so an app-started recording survives a reboot. `[REC] resume …` diagnostics added (the path used to be silent) |
+| 1.5.17 | **Resume runs from `loop()`, not `setup()`** — resuming inside `setup()` meant `connStartNetTask()` never ran and the unit went dark (no heartbeat, no remote stop, no serial) for the whole take |
+| 1.5.18 | A remote **`stop` issued while a take is starting is no longer swallowed** (`recTakeArmed`); before this a resumed take ran on unbounded. Source `FIRMWARE_VERSION` only — prebuilt bins stay tagged `fw-1.5.12` |
 
 ### Publishing an OTA release
+
+> **Run the hardware-in-the-loop harness on a real recorder before you publish** (`hwtest/`, Python):
+> `sate test` (or `sate gui` / `sate dashboard` / `sate debug`; `sate test --sim` self-tests with no
+> board). It drives record/stop/reboot/delete and asserts on the firmware serial log + the bytes the
+> server actually stored (scenarios: `boot_health`, `reboot_resume`, `byte_match`, `verified_trim`,
+> `delete_journal`, `delete_during_upload`) — a compiler can't catch reboot-mid-record /
+> verified-trim / crash-safe-delete regressions. Four of the six are hands-off (remote `record` /
+> `stop` / `reboot`); only the delete pair needs someone at the device. See `hwtest/README.md`.
+>
+> Note a **serial reset cannot reboot a device that is recording** — on the debug build `Serial` is
+> USB-CDC and its reset is software-handled, which the capture loop never services. Use the remote
+> `reboot` command. Flashing is unaffected (esptool resets via the USB-Serial-JTAG hardware).
+>
+> To reproduce a bug on the build that shipped, `sate firmware` lists every flashable image and
+> `sate flash recorder --version 1.5.12` puts it back on the board.
 
 Publishing only marks a build as "latest" (a row in `sate_firmware` + the `.bin` in the public
 `firmware` bucket). **It does not flash anything** — a recorder only updates when an `ota` command

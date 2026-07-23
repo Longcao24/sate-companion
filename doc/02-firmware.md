@@ -3,7 +3,9 @@
 ESP32-S3 touchscreen recorder. Arduino framework, NimBLE for BLE, `WiFiClientSecure` +
 `HTTPClient` for HTTPS. Source: `SATE_Recorder/` (sketch `SATE_Recorder.ino`).
 
-Current version: **fw 1.5.12** (see [07-runbook.md](07-runbook.md#firmware-version-history)).
+Current version: **fw 1.5.13** (source `FIRMWARE_VERSION`; see
+[07-runbook.md](07-runbook.md#firmware-version-history)). No GitHub release has been cut for it yet,
+so the prebuilt flash assets are still tagged `fw-1.5.12`.
 Deep hardware reference (pin map, board + build/flash, audio pipeline, optimization playbook,
 LVGL/PSRAM memory budget): root `hardware.md`.
 
@@ -152,29 +154,60 @@ manufacturer data so the app sees pending without connecting). A session is "don
 wav + parts + `.synced` marker state agree — the fix in fw 0.9.3 stopped a purged-audio session
 from hiding all later ones.
 
-### ⚠️ Nothing deletes a recording automatically (fw ≥1.5.9)
+### ⚠️ SD audio is reclaimed only after the server VERIFIES it (fw ≥1.5.13)
 
-**The device holds the only copy of a take until the user explicitly deletes it** from the Sessions
-screen. All three reclaim paths were removed in 1.5.9:
+**The device holds the only copy of a take until it is *provably* on the server.** The blind reclaim
+paths that once dropped audio on nothing more than a `.synced` marker (post-upload purge in
+`uploadStep`, boot-time `purgeSyncedAudio()`, the 5-session `trimSessionsToMax()`) are gone. In their
+place `trimPatientSyncedAudio()` (`connectivity.cpp`) does a **verified** reclaim: for synced takes
+older than the newest `KEEP_AUDIO_SESSIONS` (=5) per patient it frees **only the audio**, and **only
+after** `verifySessionStored()` gets a **byte-exact `stored:true`** from `GET /api/sessions/verify`
+(device-api ≥v15 — the endpoint checks the DB row AND that the storage object really exists).
+`sessionAssembledBytes()` computes the byte count that must match the server's stored `bytes`. It
+keeps a `.synced` **tombstone** (the slot stays numbered) and, on **any** doubt — offline, non-2xx,
+parse failure, or a byte mismatch — **keeps the audio** and just retries next cycle.
 
-| Removed | Did |
-|---------|-----|
-| post-upload purge (`uploadStep`) | dropped the audio the moment a session uploaded |
-| `purgeSyncedAudio()` | dropped every `.synced` session's audio at boot |
-| `trimSessionsToMax()` | capped the card at 5 sessions per patient |
+> **SAFETY: a `.synced` marker alone is NOT proof and must never authorize a free.** A marker only
+> ever meant "a POST returned 2xx" (or an app-set BLE `mark_synced`) — **not** that the audio is
+> intact on the server. That gap destroyed a recording (see [05](05-backend-supabase.md)); the
+> verify gate (row + object exists) is what makes reclaim safe. Do not bypass it.
 
-A `.synced` marker only ever proved that a POST returned 2xx — **not** that the audio is intact and
-usable on the server. That gap destroyed a recording (see [05](05-backend-supabase.md)). A 32 GB
-card holds ~278 h at 16 kHz mono, so keeping everything is cheap.
-
-The uploader deletes nothing — the only `SD_MMC.remove` left in `connectivity.cpp` drops a
-`.synced` marker in `resyncAll()`. **Audio is deleted in exactly one place**:
+**Full deletion is still user-only.** The one place all of a take's audio disappears is
 `deleteSessionFiles()` in the `.ino`, reached only from `ACT_DELETE_SESSION` (the user tapping
-Delete). If you are adding a second, stop and reconsider.
+Delete). The verified trim frees audio but keeps the tombstone; nothing else removes a recording. If
+you are adding a second deleter, stop and reconsider.
 
 The take itself stops cleanly if the card ever does fill (`recordWavStreamToSd` watches the
 remaining space and finalises what it captured) — a full card is a normal end state, not an error,
 and it must never discard the minutes already recorded.
+
+### Recording durability across a reboot (fw 1.5.13)
+
+- **Segments flush to SD every ~5 s** (`FLUSH_EVERY_BYTES` in `recordWavStreamToSd`), not once per
+  minute — a brownout / watchdog reset loses at most the last few seconds, not the whole open minute.
+- **Every take auto-resumes on boot** (`maybeResumeRecording()`, fw >=1.5.16): a take interrupted by
+  a reboot continues into the *same* session — button-started **and** server/app-started, because an
+  SLP who starts a recording from the app expects a power blip not to end it. If only an empty
+  header-only `part00` survived, it **restarts** the take into that session rather than deleting it.
+  It runs from local NVS + the SD segments alone: no Wi-Fi, no server. A `tries` boot-loop guard
+  gives up after two attempts so a take that reliably crashes cannot wedge the unit.
+- **The resume runs from `loop()`, never from `setup()`** (fw >=1.5.17). It re-enters the capture,
+  which blocks until Stop, and `connStartNetTask()` lives in `loop()` — so resuming inside `setup()`
+  meant the network task never started: no heartbeat, no remote `stop`, no serial, unstoppable except
+  at the button or the ~62-minute ceiling. `setup()` sets a pending flag; `loop()` resumes once the
+  net task is up (or ~8 s in, if offline).
+- **A remote `stop` is latched only while a take is armed** (`recTakeArmed`, fw >=1.5.18) — set
+  before the start sequence, cleared when capture returns. It therefore cannot go stale and end the
+  next take, and cannot be dropped during this take's own start (the bug that left resumed takes
+  running unbounded).
+- **Every `[REC] resume …` branch logs why.** The path used to be silent, so a failed resume was
+  invisible; `[REC] resume: ABORT - …` now names the reason (boot-loop guard, missing patient,
+  missing `part00`).
+- **Delete/renumber is crash-safe.** `deleteSession()` shifts later sessions down to keep numbering
+  contiguous; that multi-rename is journaled to NVS (`"sate-del"`) before it runs and re-driven on
+  boot (`recoverInterruptedDelete()` → `compactPatientDir()` in `setup()`), so a reboot mid-shift
+  heals into contiguous `1..N` instead of leaving a hole that would hide every later take. Idempotent
+  and re-runnable.
 
 ### Uploader invariants
 
@@ -187,9 +220,11 @@ and it must never discard the minutes already recorded.
   count; at 3 strikes it parks for 5 min, and go-online / `sync_now` clears all parks.
 - **A stall keeps its resume offset** and continues from there; restarting at 0 made the server
   truncate its temp blob (pre-v12) and the session could never converge.
-- **Deleting a session renumbers every later one**, so the UI takes the SD bus, waits for the
-  uploader to release its file, and calls `connNotifySessionsRenumbered()` to drop the resume point
-  and strike table — both are keyed by session number and would otherwise point at *different audio*.
+- **Deleting a session renumbers every later one** (the shift itself is crash-safe — journaled to
+  NVS and re-driven on boot, see *Recording durability across a reboot* above), so the UI takes the
+  SD bus, waits for the uploader to release its file, and calls `connNotifySessionsRenumbered()` to
+  drop the resume point and strike table — both are keyed by session number and would otherwise point
+  at *different audio*.
 - **`resync_all`** clears `.synced` for sessions that still have audio, forcing a full re-backup.
 
 ## Optimization summary

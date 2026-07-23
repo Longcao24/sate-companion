@@ -80,7 +80,10 @@ class RebootResume(Scenario):
 
     def run(self, ctx: Ctx) -> Result:
         ctx.log("  Starting a take, then rebooting mid-recording…")
-        ctx.act.trigger_record(local=True)   # must be a button-started take (remote takes don't auto-resume)
+        # fw >=1.5.16 resumes EVERY interrupted take, so a remote take exercises this
+        # hands-off; fw >=1.5.17 runs the resume from loop() so the resumed take stays
+        # network-reachable and we can stop it again at the end.
+        ctx.act.trigger_record()
         if not ctx.link.wait_for(RE_REC_START, timeout=20, on_line=ctx.record_line):
             return self._r(FAIL, "device never reported 'record start' after the RECORD trigger", ctx)
         # Let a few seconds of audio flush to SD (the fix flushes every ~5s), THEN
@@ -101,6 +104,9 @@ class RebootResume(Scenario):
                     why = f" — device said: {mm.group(1)}"
                     break
             return self._r(FAIL, f"the interrupted take did NOT auto-resume{why}", ctx)
+        # Leave the bench idle: the resumed take runs until Stop, so end it.
+        ctx.act.trigger_stop()
+        ctx.link.wait_for(RE_UPLOADED, timeout=60, on_line=ctx.record_line)
         return self._r(PASS, f"auto-resumed session {m.group(1)} after the reboot", ctx)
 
 

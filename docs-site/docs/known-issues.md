@@ -37,6 +37,9 @@ These can lose or mismatch a patient's recording — the worst outcomes.
 | <span class="sate-badge ok">fixed</span> | Delete-during-upload could splice **two takes into one WAV** (3 s guard vs 60 s chunk) — now waits for the upload + trim tail | `SATE_Recorder.ino`, `connectivity.cpp` |
 | <span class="sate-badge ok">fixed</span> | Reboot mid-renumber left a **numbering hole → later takes invisible forever** — now NVS-journaled + healed on boot | `SATE_Recorder.ino` (`recoverInterruptedDelete`) |
 | <span class="sate-badge ok">fixed</span> | Recorder didn't **auto-resume after reboot** (60 s flush window) — now ~5 s flush + restart-empty-`part00` | `SATE_Recorder.ino` (`maybeResumeRecording`) |
+| <span class="sate-badge ok">fixed</span> | A **server-started take that was interrupted ended early** — only button takes were marked crash-resumable, so a brownout mid-take silently truncated an app-started recording (fw 1.5.16) | `SATE_Recorder.ino` (`recCrashMark`) |
+| <span class="sate-badge ok">fixed</span> | Resuming from `setup()` **took the whole device off the air**: the capture blocks until Stop, so the network task never started — no heartbeat, no remote stop, no serial, unstoppable except at the button (fw 1.5.17) | `SATE_Recorder.ino` (`setup`/`loop`) |
+| <span class="sate-badge ok">fixed</span> | A remote **`stop` arriving during a take's start sequence was swallowed** — a resumed take hit that window every time and ran on unbounded (observed 4.5 min / 8.6 MB) (fw 1.5.18) | `SATE_Recorder.ino` (`sateHookStop`, `recTakeArmed`) |
 | <span class="sate-badge ok">fixed</span> | Uploader freed SD audio on a `.synced` marker alone — now **server byte-verified** before free | `connectivity.cpp` (`verifySessionStored`) + `device-api` `/sessions/verify` |
 | <span class="sate-badge ok">fixed</span> | BLE session pull could **upload a truncated WAV** as complete — now byte-reconciled | `src/ble/SateBle.ts` |
 | <span class="sate-badge ok">fixed</span> | Duplicate sessions + duplicate AI runs on a lost `markSynced` ACK — server **dedup probe** added | `device-api` `storeSessionRecord` |
@@ -49,6 +52,10 @@ These can lose or mismatch a patient's recording — the worst outcomes.
 
 | Status | Issue | Where |
 |---|---|---|
+| <span class="sate-badge ok">fixed</span> | **Deployed `device-api` was behind the repo** and had no `/sessions/verify`, so every verified-trim probe 401'd and the device never reclaimed SD — deploying v15 fixed it instantly. Deploy state is not visible from the code: check it, don't assume | `device-api` (deployment) |
+| <span class="sate-badge ok">fixed</span> | A server-started take **could not be stopped remotely** — `REMOTE_RECORD_SECONDS` was declared but never used, so a remote take ran to the ~62-min ceiling (fw 1.5.15) | `SATE_Recorder.ino`, `connectivity.cpp` |
+| <span class="sate-badge">note</span> | On the debug (USB-CDC) build a **serial DTR/RTS reset cannot reboot a recording device** — the CDC reset is handled in software and the capture loop never services USB. Use the remote `reboot` command. Flashing is unaffected (esptool resets through the USB-Serial-JTAG hardware) | `hwtest/hwtest/context.py` |
+| <span class="sate-badge warn">open</span> | **The board occasionally drops off USB entirely** after a test run - it stops enumerating (no `/dev/cu.usbmodem*` at all) and goes offline on Wi-Fi at the same time. Only a physical unplug/replug brings it back; no software reset reaches it. Seen repeatedly on the debug (USB-CDC) build during bench runs. Root cause not established - needs a capture with the board in that state | `SATE_Recorder.ino` / USB-CDC |
 | <span class="sate-badge warn">open</span> | **OTA has no device-side rollback** — a bad image bricks the fleet (server magic/semver/size validation added) | `connectivity.cpp` (`verifyOta` not overridden) |
 | <span class="sate-badge warn">open</span> | `renameSessionFiles` ignores `SD_MMC.rename()` returns → new number + old audio on a glitch | `SATE_Recorder.ino` |
 | <span class="sate-badge warn">open</span> | `saveMetadataToSd()` return ignored → flags + patient tag silently lost on a full card | `SATE_Recorder.ino` |

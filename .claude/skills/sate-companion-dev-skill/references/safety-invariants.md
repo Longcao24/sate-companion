@@ -57,7 +57,24 @@ The device is the only copy of a recording until it is PROVABLY on the server.
 exists). Any doubt — offline, non-2xx, byte mismatch — KEEPS the audio. Never free audio on the
 `.synced` marker alone. Full deletion stays user-only.
 
-## 5. Firmware flash traps that silently brick
+## 5. A blocking take must never run before the network task starts
+
+`maybeResumeRecording()` re-enters the capture, which **blocks until Stop**. It is called
+from `loop()` (behind a pending flag set in `setup()`), and gated on the net task being up
+or ~8 s elapsed. Do **not** move it back into `setup()`: `connStartNetTask()` lives in
+`loop()`, so a resume that blocks `setup()` takes the whole unit off the air — no heartbeat,
+no remote `stop`, no serial — and a server-started take, where nobody is at the device, just
+goes dark until the ~62-minute ceiling. This shipped and was caught on the bench (fw 1.5.17).
+
+The same rule applies to anything else that blocks for a user-controlled duration: it belongs
+in `loop()`, after connectivity, never in `setup()`.
+
+Related: a remote `stop` is latched only while a take is **armed** (`recTakeArmed`, set before
+the take's start sequence, cleared when capture returns). Do not "clear stale stops" at take
+start instead — that swallows a stop issued during the take's own start, which left resumed
+takes running unbounded (fw 1.5.18).
+
+## 6. Firmware flash traps that silently brick
 
 - **`PartitionScheme=default_8MB`** (dual OTA slots). `huge_app` silently disables OTA.
 - **`lv_conf.h` `LV_TICK_CUSTOM=1`.** If `0`, the boot spinner freezes at frame 1 while

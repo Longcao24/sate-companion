@@ -8,9 +8,9 @@ sidebar_position: 1
 Internal engineering reference for the **SATE Clinical Recorder** — the handheld ESP32-S3
 speech-capture device. This page is grounded in the source under `SATE_Recorder/`
 (`SATE_Recorder.ino`, `connectivity.cpp/.h`, `display.cpp`, `es8311.cpp`). The details
-below are current as of **firmware 1.5.16** (`FIRMWARE_VERSION` in `SATE_Recorder.ino`).
+below are current as of **firmware 1.5.17** (`FIRMWARE_VERSION` in `SATE_Recorder.ino`).
 
-<div class="badge-row"><span class="sate-badge">Firmware 1.5.16</span><span class="sate-badge">ESP32-S3</span><span class="sate-badge">16 MB flash / 8 MB PSRAM</span></div>
+<div class="badge-row"><span class="sate-badge">Firmware 1.5.17</span><span class="sate-badge">ESP32-S3</span><span class="sate-badge">16 MB flash / 8 MB PSRAM</span></div>
 
 > Companion references: `doc/02-firmware.md` (architecture), `doc/07-runbook.md`
 > (build/flash/OTA), root `hardware.md` (pin map + RAM budget). Where they disagree with
@@ -42,14 +42,28 @@ audio-integrity finding still fully applies.
 **Lifecycle in one paragraph.** On boot, `setup()` (`SATE_Recorder.ino`) runs an
 on-screen init checklist (display → SD → audio codec → SATE services), heals any interrupted
 delete/renumber (`recoverInterruptedDelete()`), then either shows the onboarding gate (until
-the device is *claimed* to an account) or Home, and resumes a reboot-interrupted take
-(`maybeResumeRecording()`). At runtime `loop()` on core 1 drives the LVGL GUI, the
+the device is *claimed* to an account) or Home, and **arms** a reboot-interrupted take for
+resume. The resume itself runs from `loop()` once the network task is up, never from
+`setup()` (see the note below). At runtime `loop()` on core 1 drives the LVGL GUI, the
 ISR-latched buttons, the battery/dim/factory-reset services, and consumes flags set by the
 connectivity task. Pressing RECORD streams a WAV to the SD card as a chain of 1-minute
 segments; on stop the session's metadata JSON is written and the session is queued. A
 core-0 network task (`connLoop()`) polls the server for commands, uploads pending sessions
 in ~1 MB resumable chunks over HTTPS, and — when Wi-Fi is unavailable — advertises over BLE
 so the companion app can provision, bridge-sync, and control the device.
+
+:::danger The resume must run from `loop()`, never from `setup()`
+Resuming re-enters the capture, which **blocks until Stop**. Calling it at the end of
+`setup()` therefore means `loop()` never runs — and `connStartNetTask()` lives in
+`loop()`. The unit records on with **no heartbeat, no remote `stop`, and no serial**:
+invisible to the server and unstoppable except at the button or the ~62-minute
+ceiling. A remote take, where nobody is standing at the device, simply goes dark.
+
+`setup()` only sets a pending flag; `loop()` performs the resume once the net task is
+up (or ~8 s in, if the unit is offline). That keeps a resumed take controllable for
+its whole length. This was a real fault, found on the bench and fixed in **1.5.17** —
+do not move the call back into `setup()`.
+:::
 
 **Device state machine.** The UI runs a small `DeviceState` machine
 (`SATE_Recorder.ino`). Uploads run concurrently on the net task, so *Uploading* is
@@ -95,7 +109,7 @@ sequenceDiagram
     Note over C: Wi-Fi and BLE bring-up, net task not started yet
     alt device ready (claimed)
         S->>D: showHomeScreen
-        S->>SD: maybeResumeRecording
+        S->>S: arm resume (loop() runs it once the net task is up)
     else not claimed
         S->>D: showOnboardingScreen
     end
@@ -271,12 +285,12 @@ get its ~40 KB contiguous block on a heap fragmented by hours of 1 MB chunks. **
 | **Segmented recording** | Streams mic → SD as `session_NNNN.partKK.wav`, one file per **1-minute** segment. No on-device merge — the server stitches segments on upload. | `recordWavStreamToSd()` |
 | **~5 s durability flush** | `file.flush()` every `FLUSH_EVERY_BYTES` (= 5 s of PCM), so a brownout loses at most a few seconds, not the open minute. | — |
 | **Flag markers** | The FLAG button records the elapsed-ms offset of a clinical moment (up to `FLAG_CAP_MAX`=64). Written into the session JSON `flags_ms[]`, uploaded as `&flags=`, surfaced as seek-bar ticks on the web report. | `saveMetadataToSd()` |
-| **Auto-resume after reboot** | A **local** (button-started, `review=true`) take marks itself active in NVS (`recCrashMark()`); on boot `maybeResumeRecording()` continues the same session. An empty header-only `part00` **restarts** the take rather than deleting it. Remote takes don't auto-resume. | — |
+| **Auto-resume after reboot** | **Every** take marks itself active in NVS (`recCrashMark()`) — button-started *and* server/app-started — so any take interrupted by a reboot or brownout continues in the same session instead of ending early. It works from local NVS plus the SD segments alone: **no Wi-Fi and no server are needed**. An empty header-only `part00` **restarts** the take rather than deleting it. A boot-loop guard gives up after two attempts so a take that reliably crashes cannot wedge the device. | — |
 | **Card-full guard** | Refuses to start a take without room for a full segment; if the card fills mid-take, it stops cleanly and keeps every captured segment (a full card is a normal end state, never data loss). | `SD_MIN_FREE_BYTES` |
 | **Nap / screen dim** | Backlight fades to duty 10 (~4%) after 5 min idle; any touch/button wakes it. | `serviceScreenDim()` |
 | **Battery guard** | Reads GPIO9 (×2 divider, 1-point calibrated), reports `%`/`mV` telemetry, and deep-sleeps near-empty to protect the LiPo. | `readBatteryMv()`, `serviceBatteryGuard()`, `batteryBootGuard()` |
 | **Verified SD reclaim** | After a synced take, frees the **audio** (not the tombstone) of synced takes older than the newest `KEEP_AUDIO_SESSIONS`=5 — **only** on a byte-exact server confirmation. | `trimPatientSyncedAudio()` |
-| **Remote commands** | `sync_now`, `resync_all`, `reload_patients`, `record`, `wifi_change`, `reboot`, `ota`, plus `unclaimed`→factory-reset. | `runRemoteCommand()`, `pollCommands()` |
+| **Remote commands** | `sync_now`, `resync_all`, `reload_patients`, `record`, **`stop`**, `wifi_change`, `reboot`, `ota`, plus `unclaimed`→factory-reset. `stop` (fw 1.5.15) ends a take exactly like the RECORD button; before it, a server-started take could only be ended at the device or by the ~62-minute ceiling. A stop is latched only while a take is **armed** — from the moment the take is decided on, through the status screen and its GUI pump, until capture returns — so it can neither go stale and kill the next take, nor be dropped mid-start. | `runRemoteCommand()`, `pollCommands()`, `sateHookStop()` |
 | **Sessions screen + delete** | List/playback of recorded sessions; Delete removes a take and renumbers the rest (crash-safe, see §9). Full deletion is **user-only**. | `ACT_DELETE_SESSION`; `deleteSession()` |
 | **Battery telemetry** | `bat`/`recs`/`mv` on every heartbeat for the admin dashboard. Lifetime recording count persisted in NVS (`sate-stats`) so it survives the 5-session trim. | `connSetTelemetry()`; `loadTotalRecordings()` |
 | **Find-me / live state** | `connSetLiveState()` forces an immediate heartbeat so the app sees "recording"/"uploading" near-instantly; BLE advert `NEEDS_SYNC` flag exposes pending count. | `connSetLiveState()` |
@@ -439,7 +453,7 @@ hooks (`sateHook*`); `loop()` renders. Upload progress is likewise flag-driven
 
 ## 7. Configuration
 
-### Mandatory flash config (verified fw 1.5.12–1.5.16)
+### Mandatory flash config (verified fw 1.5.12–1.5.17)
 
 ```
 esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi
@@ -471,7 +485,7 @@ needs.
 
 | Constant | Value | File |
 |---|---|---|
-| `FIRMWARE_VERSION` | `"1.5.16"` | `SATE_Recorder.ino` |
+| `FIRMWARE_VERSION` | `"1.5.17"` | `SATE_Recorder.ino` |
 | `AUDIO_SAMPLE_RATE` | 16000 | `SATE_Recorder.ino` |
 | `AUDIO_BIT_DEPTH` / `AUDIO_CHANNELS` | 16 / 1 (mono) | `SATE_Recorder.ino` |
 | `SEGMENT_SECONDS` | 60 (1-min segments) | `SATE_Recorder.ino` |

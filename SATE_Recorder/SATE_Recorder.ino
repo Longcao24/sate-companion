@@ -110,7 +110,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.16";   // remote takes auto-resume after a reboot (local NVS, no Wi-Fi needed)
+static const char    *FIRMWARE_VERSION  = "1.5.18";   // a remote stop issued while a take is starting is no longer swallowed
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -233,6 +233,9 @@ static volatile bool connPatientsReq = false;
 static volatile bool connStateReq    = false;
 static volatile bool connRecordReq   = false;
 static volatile bool connStopReq     = false;  // app/server asked to STOP an in-progress take
+static volatile bool recTakeArmed    = false;  // a take is starting or running: a remote stop applies to it
+static bool     g_resumePending = false;       // an interrupted take is waiting to be resumed from loop()
+static uint32_t g_bootMs        = 0;           // millis() at the end of setup()
 
 // Patient the SLP typed in the app for the next remote recording, delivered in
 // the /commands poll. Staged here and applied by loop() (UI task) so we never
@@ -355,7 +358,12 @@ static void isrFlagBtn();
 void sateHookPatientsUpdated() { connPatientsReq = true; }
 void sateHookConnChanged()     { connStateReq = true; }
 void sateHookRecord()          { connRecordReq = true; }
-void sateHookStop()            { connStopReq = true; }
+// Only latch a stop while a take is armed, so a stop that arrives with nothing to
+// stop cannot sit around and kill the NEXT take. Armed covers the whole start
+// sequence (mark, status screen, GUI pump), not just the capture loop — a stop that
+// lands in that window used to be dropped, which left a resumed take running for
+// minutes with no way to end it.
+void sateHookStop()            { if (recTakeArmed) connStopReq = true; }
 // sateHookGuiPump() is defined after the Display object below (it needs it).
 
 void sateHookSetActivePatient(const char *id, const char *name, const char *age,
@@ -1886,7 +1894,9 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
   *outPcmBytes = 0;
   currentState = RECORDING;
   recordStopReq = false;
-  connStopReq   = false;   // drop any stale remote-stop so it can't end the new take
+  // NOTE: connStopReq is deliberately NOT cleared here. sateHookStop() only latches
+  // it while a take is armed, so it can never be stale — and clearing it here would
+  // swallow a stop issued during this take's own start sequence.
   g_flagCount = 0;                         // fresh flag list for this take
                                            // (pre-crash flags lived in RAM and are lost)
   setStatePill("REC", COL_REC_BG, COL_REC);
@@ -3024,10 +3034,12 @@ static void runRecordSavePlaySession(bool review = true,
   // and no server involvement — and can be ended at the device or with the remote
   // "stop" command (fw >=1.5.15). The `tries` boot-loop guard in
   // maybeResumeRecording() still applies. Cleared the instant capture returns.
+  recTakeArmed = true;      // from here a remote "stop" belongs to this take
   recCrashMark(g_patients[currentPatientIndex].patientId, sessionNum);
 
   uint32_t pcmBytes = 0;
   bool ok = recordWavStreamToSd(wavPath, &pcmBytes, pcmTotal);
+  recTakeArmed = false;
   recCrashClear();   // every take is marked now, so every take clears its mark
 
   if (!ok) {
@@ -3141,6 +3153,8 @@ static void maybeResumeRecording()
   }
 
   // Tell the SLP the take is continuing and give them a beat to hit Stop.
+  recTakeArmed = true;      // arm BEFORE the status screen: the remote stop that
+                            // ends this take often arrives during the pump below
   Serial.printf("[REC] resume session %lu from part %d (%lu bytes already on card)\n",
                 (unsigned long)sess, startPart, (unsigned long)existingBytes);
   showStatus("Resuming recording", "Interrupted take - press RECORD to stop");
@@ -3149,6 +3163,7 @@ static void maybeResumeRecording()
   connSetUiSdBusy(true);
   uint32_t pcmBytes = 0;
   bool ok = recordWavStreamToSd(wavPath, &pcmBytes, PCM_MAX_BYTES, startPart, existingBytes);
+  recTakeArmed = false;
   recCrashClear();
 
   if (!ok || pcmBytes == 0) {
@@ -3302,9 +3317,12 @@ void setup()
   // roster, the user only sees the onboarding screen.
   if (deviceReady()) {
     showHomeScreen();
-    // If a take was interrupted by a reboot mid-capture, pick it back up now
-    // (audio init + SD + patients are all up at this point).
-    maybeResumeRecording();
+    // Defer resuming an interrupted take to loop(). Doing it HERE would block
+    // setup() inside the capture (it runs until Stop), so connStartNetTask() in
+    // loop() would never run: the unit would record on with no network — no
+    // heartbeat, no remote "stop", unreachable until someone pressed the button.
+    g_resumePending = true;
+    g_bootMs = millis();
   } else {
     showOnboardingScreen();
   }
@@ -3374,6 +3392,14 @@ void loop()
 {
   runGui();
   serviceSerialScreendump();   // DEBUG builds only: on-demand screen mirror over serial
+
+  // Resume an interrupted take once the net task is up (or ~8 s in if we are
+  // offline), so the whole resumed take stays reachable by the remote "stop".
+  if (g_resumePending && currentState == HOME &&
+      (connNetTaskStarted() || (millis() - g_bootMs) > 8000)) {
+    g_resumePending = false;
+    maybeResumeRecording();
+  }
   serviceFactoryResetButton(); // hold BOOT 5 s -> wipe config + reboot
   serviceScreenDim();          // dim backlight after 5 min idle, wake on activity
   serviceBatteryGuard();       // sleep near-empty to protect the LiPo (fw 1.5.3)

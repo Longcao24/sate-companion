@@ -1,3 +1,4 @@
+
 # Build, flash & firmware release
 
 Real commands for every component. Line-precise detail and the long-form recipe are in
@@ -54,6 +55,7 @@ restore first (`adafruit-nrfutil dfu serial … Seeed_…_s140_7.3.0.zip`). See 
      -H "Authorization: Bearer $KEY" -H "apikey: $KEY" \
      -H "Content-Type: application/octet-stream" -H "x-upsert: true" --data-binary @<bin>
    ```
+
    then insert a row via the Supabase MCP `execute_sql`:
    `insert into sate_firmware (version, url, notes) values ('<v>', '$SUPABASE_URL/storage/v1/object/public/firmware/sate_<v>.bin', '<notes>');`
    `$KEY` = the Supabase `sb_secret_…` key (not the repo's `svc-…` app key). Verify the public

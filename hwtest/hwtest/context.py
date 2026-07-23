@@ -126,9 +126,21 @@ class BenchActions(Actions):
     def trigger_reboot(self) -> None:
         if self.reboot_mode == "manual":
             self.prompt("Cut power to the device, wait ~2s, then restore it")
-        else:
-            self.log("    ▸ resetting the device over the serial line…")
-            self.link.reset()
+            return
+        # Prefer the remote "reboot" command. A serial reset CANNOT reboot the board
+        # while it is recording: on the debug build Serial is USB-CDC, whose DTR/RTS
+        # reset is handled in software, and the capture loop never services USB — the
+        # pulse is simply never seen. The remote command runs on the core-0 net task,
+        # which keeps ticking through a take.
+        if self._can_remote():
+            self.log("    ▸ sending remote REBOOT command…")
+            try:
+                self._send_remote("reboot")
+                return
+            except Exception as e:  # noqa: BLE001
+                self.log(f"    ▸ remote reboot failed ({e}) — falling back to a serial reset")
+        self.log("    ▸ resetting the device over the serial line…")
+        self.link.reset()
 
     def trigger_delete(self, session_number: int) -> None:
         self.prompt(f"On the Sessions screen, delete session {session_number}")

@@ -7,6 +7,8 @@ One professional entry point for testing and flashing the recorder and pendant:
     sate test -t pendant      test the pendant over BLE
     sate flash recorder       build + flash the recorder firmware
     sate flash pendant        build + flash the pendant firmware
+    sate flash recorder --version 1.5.12    flash a published older build
+    sate firmware             list every firmware image you can flash
     sate devices              list connected devices (serial ports + BLE)
     sate doctor               check the toolchain and environment
     sate gui | dashboard      launch the native window / browser dashboard
@@ -148,6 +150,26 @@ def cmd_test(args: argparse.Namespace) -> int:
     return 1 if any(r.status in ("FAIL", "ERROR") for r in results) else 0
 
 
+def cmd_firmware(args: argparse.Namespace) -> int:
+    """Every image `sate flash --version` can put on a board."""
+    from . import firmware as FW
+    banner()
+    rows = FW.list_available(str(REPO))
+    if not rows:
+        warn("no firmware images found (no local cache, no GitHub release assets).")
+        info("build one with `sate flash recorder --compile-only`, or cut a release.")
+        return 0
+    info(f"cache: {FW.CACHE}")
+    print()
+    print(f"  {'VERSION':10} {'KIND':8} {'SIZE':>9}  {'SOURCE':8} NAME")
+    for e in rows:
+        print(f"  {e['version']:10} {e['kind']:8} {e['size']/1e6:8.1f}M  {e['source']:8} {e['name']}")
+    print()
+    info("flash one with:  sate flash recorder --version <VERSION>")
+    info("'merged' rewrites the whole flash; 'app' writes the OTA slot + resets otadata.")
+    return 0
+
+
 def cmd_flash(args: argparse.Namespace) -> int:
     if shutil.which("arduino-cli") is None and args.target == "recorder":
         bad("arduino-cli not found on PATH — see `sate doctor`.")
@@ -156,6 +178,20 @@ def cmd_flash(args: argparse.Namespace) -> int:
     if args.target == "recorder":
         banner()
         info(f"repo: {REPO}")
+        # Flashing a KNOWN OLDER build (repro a field bug / bisect a regression) goes
+        # straight to esptool — there is nothing to compile.
+        if getattr(args, "version", None) or getattr(args, "image", None):
+            from . import firmware as FW
+            port = args.port or _auto_port()
+            if not port:
+                bad("no serial port found — pass --port /dev/cu.usbmodemXXX (see `sate devices`)."); return 2
+            if args.image:
+                okd = FW.flash_image(port, args.image, log=info)
+            else:
+                info(f"flashing published firmware {args.version} (not the working tree)")
+                okd = FW.flash_version(port, args.version, repo_dir=str(REPO), log=info)
+            (ok if okd else bad)("flashed" if okd else "flash failed")
+            return 0 if okd else 1
         # --debug adds the CDC serial interface so the hwtest harness can read the
         # firmware log ([MEM] ready, [CONN] uploaded, …). Production builds emit no serial.
         fqbn = RECORDER_FQBN + (",CDCOnBoot=cdc,USBMode=hwcdc" if args.debug else "")
@@ -695,7 +731,12 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--compile-only", action="store_true", help="compile, do not upload")
     f.add_argument("--upload-only", action="store_true", help="upload the last build, skip compile")
     f.add_argument("--debug", action="store_true", help="recorder: build with CDC serial so `sate test` can read the log")
+    f.add_argument("--version", help="flash a published build instead of the working tree, e.g. 1.5.12")
+    f.add_argument("--image", help="flash a specific .bin (app or merged image)")
     f.set_defaults(func=cmd_flash)
+
+    fw = sub.add_parser("firmware", help="list firmware images you can flash")
+    fw.set_defaults(func=cmd_firmware)
 
     d = sub.add_parser("devices", help="list connected devices")
     d.add_argument("--ble", action="store_true", help="also scan for the pendant over BLE")

@@ -102,6 +102,16 @@ physical stacks; it encodes both rules above, including the lock-safe Plaud rele
   (`webapp` remote = `Longcao24/SATE_hardwave`, which Vercel builds).
 - Proprietary Plaud frameworks are git-ignored (`modules/plaud-sate/ios/Frameworks/`) —
   never commit them. Deploy `mint-plaud-token` with `--no-verify-jwt`.
+- **Hardware-in-the-loop tests** live in `hwtest/` (Python). A compiler can't catch the
+  worst bugs — reboot mid-record, dropped-BLE truncation, delete-during-upload splicing,
+  verified trim, crash-safe delete, OTA — so before a firmware release run the harness on
+  a real recorder: `cd hwtest && python3 run.py --config config.toml` (CLI),
+  `sate gui` (native window), `sate dashboard` (browser), or `sate debug` (desktop Debugger:
+  screen mirror + remote control + flash an older published build via `sate flash --version`). It resets the board
+  over serial, drives record/reboot/delete, and asserts on the firmware's own log
+  (`[MEM] ready`, `[CONN] resume … session …`, `[CONN] uploaded … (N bytes)`,
+  `[REC] healed interrupted delete`) **plus** the bytes the server stored (`GET /sessions/verify`).
+  `python3 run.py --sim` self-tests the harness with no board. See `hwtest/README.md`.
 
 ## Project knowledge & gotchas (from accumulated notes)
 
@@ -117,6 +127,15 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   USER-authed `POST /sessions` (Plaud has no `sate_devices` row / device key).
 - **Admin page** `/admin` manages ALL devices + firmware system-wide, gated by the
   `sate_admins` table (by email). Don't expose admin routes without that gate.
+  ⚠️ **Known gap (audit 2026-07-22):** `POST /firmware` (publishFirmware) is routed ABOVE the
+  `/admin` gate, so any authenticated user can push fleet-wide OTA. `publishFirmware` now validates
+  the image (semver + `0xE9` magic + size cap) but still needs an `isAdmin()` gate. Same in the
+  cloudflare port. (Deprioritized behind features, but fix before GA.)
+- **`GET /api/sessions/verify`** (device-api ≥v15, device-key auth, read-only) — the recorder asks
+  "is session N with exactly B bytes durably stored?" before freeing SD audio. Answers `stored:true`
+  only when the row exists AND `objectExists`. Never make it mutate. `storeSessionRecord` also probes
+  by (user, serial, patient, session_number, bytes) + `objectExists` to dedup a re-uploaded take (a
+  lost BLE `markSynced` ACK). There is NO DB unique constraint backstop yet — add one.
 
 **⚠️ Device AI processing is ASYNC — never call the AI from an edge function**
 - **The bug:** the old `process-device-session` edge ran `fetch(AI_PROCESS_URL)` (ngrok, self-hosted
@@ -134,8 +153,12 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   `finalize-session` edge (analysis + insert `recordings` + set done; the light half, fits the edge
   limit). `pg_cron` pings the Worker `/tick` every minute to keep the container warm; the container's
   own loop drains the queue.
-- **`process-device-session` is now a 200 no-op** — `device-api` still fire-and-forgets to it, but it
+- **`process-device-session` must be a 200 no-op** — `device-api` still fire-and-forgets to it, but it
   must NOT process, or it races the container and duplicates recordings. Don't revive it.
+  ⚠️ **Audit 2026-07-22:** the copy CHECKED INTO the repo is NOT the no-op — it still downloads the WAV,
+  awaits the AI, and inserts `recordings` (filters `processed=false` while the container claims on
+  `status`, so BOTH process the same session → duplicate recordings + the 150s edge-kill hang). Prod is
+  deployed as the no-op; do NOT deploy the repo file as-is. Make it a real early-return before GA.
 - **Retry:** watchdog (`requeue_stale_sessions`) auto-requeues stalled `processing` jobs up to
   `MAX_ATTEMPTS` then → `error`; transient failures (network/`5xx`/`408`/`429`) requeue with backoff
   (`requeue_session`); permanent (`4xx`, no segments) → `error` immediately; the user Retry button
@@ -145,14 +168,42 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   long call MUST live in a real long-running process (the container). `finalize-session` and
   `device-api` MUST stay `verify_jwt:false`. See `doc/05-backend-supabase.md`.
 
-**⚠️ Recorder audio is never auto-deleted (fw ≥1.5.9)**
-- The device holds the ONLY copy of a take until the user deletes it by hand. The three old reclaim
-  paths (post-upload purge, boot-time `purgeSyncedAudio`, 5-session `trimSessionsToMax`) are GONE.
-  The uploader deletes NOTHING; the only `SD_MMC.remove` in `connectivity.cpp` drops a `.synced`
-  marker in `resyncAll()`. Audio is removed in exactly one place, `deleteSessionFiles()` in the
-  `.ino`, reached only from the user tapping Delete. Don't add a second one.
-- A `.synced` marker only means "a POST returned 2xx", NOT "the audio is safe on the server". It is
-  written only when the server ACKs `final=1` (`upFinalAcked`). Never infer it from anything else.
+**⚠️ Recorder SD reclaim is SERVER-VERIFIED, never on the `.synced` marker alone (fw ≥1.5.13)**
+- The device is the only copy of a take until it is PROVABLY on the server. `trimPatientSyncedAudio()`
+  in `connectivity.cpp` reclaims the audio of synced takes older than the newest `KEEP_AUDIO_SESSIONS`
+  (=5) — but ONLY after `verifySessionStored()` gets a byte-exact `stored:true` from
+  `GET /api/sessions/verify` (device-api ≥v15: checks the row AND that the storage object really
+  exists). It keeps a `.synced` tombstone (slot stays numbered) and frees only the audio. Any doubt —
+  offline, non-2xx, parse fail, byte mismatch — KEEPS the audio; trim just retries next cycle.
+  `sessionAssembledBytes()` mirrors the server's stored `bytes` exactly (part0 keeps its 44-byte
+  header, later parts stripped). Full deletion stays user-only (`deleteSessionFiles()`, Delete button).
+- **Do NOT free audio on a `.synced` marker alone.** A marker only means "a POST returned 2xx" (or an
+  app-set BLE `mark_synced`), NOT "the audio is durably stored" — the 413-ghost class left markers with
+  no object. The verify gate (row + `objectExists`) is what makes reclaim safe; don't bypass it.
+- **Delete/renumber is crash-safe.** `deleteSession()` shifts later sessions down to keep numbering
+  contiguous; that multi-rename is journaled to NVS (`sate-del`) before it runs and re-driven on boot
+  (`recoverInterruptedDelete()` → `compactPatientDir()` in `setup()`), so a reboot mid-shift heals into
+  contiguous `1..N` instead of leaving a hole that hides every later take. Idempotent + re-runnable.
+- **Auto-resume after reboot** (`maybeResumeRecording()`): **every** take - button-started AND
+  server/app-started (fw >=1.5.16) - resumes into the same session, because segments flush to SD every
+  ~5 s (not once per minute) and an empty `part00` on boot RESTARTS the take instead of deleting it.
+  It needs only local NVS + the SD segments: no Wi-Fi, no server. A `tries` boot-loop guard gives up
+  after two attempts.
+- **The resume runs from `loop()`, NEVER from `setup()` (fw >=1.5.17).** It re-enters the capture,
+  which BLOCKS until Stop, and `connStartNetTask()` lives in `loop()` - so resuming inside `setup()`
+  meant the net task never started and the unit went off the air for the whole take: no heartbeat, no
+  remote `stop`, no serial, unstoppable except at the button or the ~62-min ceiling. A server-started
+  take, with nobody at the device, just goes dark. `setup()` sets a pending flag; `loop()` resumes once
+  the net task is up (or ~8 s in, if offline). This shipped and was caught on the bench - don't undo it.
+  The same rule applies to anything else that blocks for a user-controlled duration.
+- **Remote `stop` (fw >=1.5.15) is latched only while a take is ARMED** (`recTakeArmed`, set before the
+  take's start sequence, cleared when capture returns). Do NOT "drop stale stops" by clearing the flag
+  at take start - that swallows a stop issued during the take's own start (status screen + GUI pump),
+  which is exactly when a resumed take is stopped, and left takes running unbounded (fixed 1.5.18).
+- **A serial DTR/RTS reset cannot reboot a RECORDING device** on the debug build: `Serial` is USB-CDC,
+  its reset is software-handled, and the capture loop never services USB. Use the remote `reboot`
+  command (core-0 net task). Flashing is unaffected - esptool resets through the USB-Serial-JTAG
+  hardware, which works even when the firmware is wedged.
 - **Storage's project-wide file size limit overrides the bucket's** and defaults to 50 MB. A
   full-length take is ~118 MB. It's set to 500 MB now; if big sessions land as rows with
   `process_error: "download failed: Object not found"`, check that first. A swallowed 413 plus a
