@@ -110,7 +110,7 @@ class Debugger:
         root.title("SATE Debugger")
         root.configure(bg=BG)
         root.geometry("1080x720")
-        root.minsize(960, 640)
+        root.minsize(900, 560)
         self._build_login()
         root.after(80, self._poll)
 
@@ -178,12 +178,28 @@ class Debugger:
         self.status = tk.Label(header, text="● no device", bg=BG, fg=INK2, font=("Menlo", 11))
         self.status.pack(side="right")
 
-        body = tk.Frame(r, bg=BG)
-        body.pack(fill="both", expand=True, padx=18, pady=(0, 16))
+        # The panel is taller than most laptop screens once every section is open,
+        # so the whole body scrolls. Without this the firmware buttons and the log
+        # simply fall off the bottom with no way to reach them.
+        outer = tk.Frame(r, bg=BG)
+        outer.pack(fill="both", expand=True, padx=18, pady=(0, 16))
+        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
+        vbar = tk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vbar.set)
+        vbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        self.body_canvas = canvas
+
+        body = tk.Frame(canvas, bg=BG)
+        body_win = canvas.create_window((0, 0), window=body, anchor="nw")
+        body.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        # keep the inner frame as wide as the viewport so nothing is cut off sideways
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(body_win, width=e.width))
+        canvas.bind_all("<MouseWheel>", self._on_wheel)
 
         # ---- LEFT: device / live screen ----
         left = tk.Frame(body, bg=CARD, highlightbackground=HAIR, highlightthickness=1)
-        left.pack(side="left", fill="y")
+        left.pack(side="left", anchor="n")
         pad = tk.Frame(left, bg=CARD)
         pad.pack(fill="both", expand=True, padx=18, pady=16)
         tk.Label(pad, text="SATE RECORDER", bg=CARD, fg=INK2, font=("Menlo", 10, "bold")).pack(anchor="w")
@@ -303,9 +319,12 @@ class Debugger:
         # log
         lc = tk.Frame(right, bg=BG); lc.pack(fill="both", expand=True, pady=(12, 0))
         tk.Label(lc, text="LOG", bg=BG, fg=INK2, font=("Menlo", 10, "bold")).pack(anchor="w")
+        # A fixed height, not expand=True: inside the scrolling canvas the frame has
+        # no height to expand into, so an expanding Text would collapse to nothing.
         self.log = tk.Text(lc, bg=LOGBG, fg=LOGINK, font=("Menlo", 11), wrap="word", relief="flat",
-                           padx=12, pady=10, highlightthickness=1, highlightbackground=HAIR, state="disabled")
-        self.log.pack(fill="both", expand=True)
+                           padx=12, pady=10, highlightthickness=1, highlightbackground=HAIR,
+                           state="disabled", height=16)
+        self.log.pack(fill="x")
         for tag, col in [("head", "#7db3ff"), ("ok", "#4ade80"), ("bad", "#f87171"), ("dim", INK2)]:
             self.log.tag_config(tag, foreground=col)
 
@@ -314,6 +333,19 @@ class Debugger:
         self._refresh_status()
 
     # ======================================================= helpers
+    def _on_wheel(self, e):
+        """Scroll the body, unless the pointer is over the log (it scrolls itself)."""
+        try:
+            w = self.root.winfo_containing(e.x_root, e.y_root)
+        except Exception:  # noqa: BLE001
+            w = None
+        if w is not None and isinstance(w, tk.Text):
+            return
+        try:
+            self.body_canvas.yview_scroll(-1 * int(e.delta), "units")
+        except Exception:  # noqa: BLE001
+            pass
+
     def _log(self, text, tag=None):
         self.log.config(state="normal")
         self.log.insert("end", text + "\n", (tag,) if tag else ())
