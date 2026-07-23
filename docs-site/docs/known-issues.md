@@ -76,6 +76,32 @@ These can lose or mismatch a patient's recording — the worst outcomes.
 | <span class="sate-badge warn">open</span> | Firmware + app stack **two tanh soft-clips** (effective gain 104× not 40×) → harsh distortion | `src/pendant/PendantLink.ts` |
 | <span class="sate-badge warn">open</span> | ~128 ms of every recording's onset dropped by a fixed "drain" read | `SATE_Recorder.ino` (I2S drain) |
 
+## Web app — deep audit 2026-07-23 (41 confirmed, 52-agent adversarial pass)
+
+The five clusters that can lose or mismatch clinical data, ranked:
+
+| Status | Issue | Where |
+|---|---|---|
+| <span class="sate-badge warn">open</span> | **SALT round-trip fabricates word timings and corrupts words.** Any simple-mode or inline edit regenerates ALL word timestamps as an even spread (real ASR timings destroyed, unrecoverable after save), corrupts inflected surface forms (`boxes→boxs`, `running→runing`), applies morphemes to the wrong word via a misaligned index, and silently wipes fillerword / mispronunciation / morpheme-omission annotations — even when the text was not changed | `saltService.ts` (44, 230, 699), `useSegmentOperations.ts:110`, `EditTranscriptPopup.tsx:227` |
+| <span class="sate-badge warn">open</span> | **Stale `window.latestProcessingResults` saves the WRONG transcript onto a new recording** — found independently by three finders; the PatientDetails save flow never clears it, so the mismatch is the *default* after the first save | `useRecordingMetadata.ts:141`, `PatientDetails/index.tsx:164` |
+| <span class="sate-badge warn">open</span> | **Failed save disarms every unsaved-changes guard.** The Save button clears undo history even when the save failed (errors are caught and toast-only), so `beforeunload`, back-confirmation, and sidebar navigation all report "no unsaved changes" — edits silently lost | `ActionButtonsPanel.tsx:80`, `MainApp.tsx:237` |
+| <span class="sate-badge warn">open</span> | **Global Ctrl+Z fires under open editors** — undo shifts segment indices beneath the popup, whose save then overwrites a *different* utterance | `MainContent/index.tsx:101` |
+| <span class="sate-badge warn">open</span> | **Wrong audio under the transcript**: previous recording's audio is kept when the new report's URL fails; signed URLs expire after 1 h with no refresh (player wedges); annotation add/remove mutates shared segments so Cancel discards them without warning; split filters morpheme omissions on the wrong key (`word_index` vs `index`) | `MainApp.tsx:136`, `recordingStorage.ts:86`, `useAnnotations.ts:493`, `segmentOperations.ts:77` |
+
+Also confirmed at high severity: the OTA banner wedges forever in "Rebooting" (offline check
+shadows the failure timeout, `DeviceProvider.tsx:368`), and a failed processing run leaves
+Save a silent no-op forever (stale-closure gate, `useFileUpload.ts:143`).
+
+**23 medium findings** cover: split/merge double-counting or dropping annotation spans,
+pause arrays never re-indexed, VOCD-D computed over maze/filler words (deflates D for
+disfluent speakers), utterance segmentation splitting on `.` inside `Mr.`/`2.5` (deflates
+MLU), SALT export speaker-label collisions (`C` = both Child and Clinician), stale
+cross-account device/subscription state after logout, duplicate Stripe subscriptions on
+plan change, `past_due` subscribers shown as unsubscribed, invite codes reusable on a
+swallowed consumption failure, and delete removing audio *before* the DB row (a failure
+strands a live row pointing at destroyed audio). Full list in the audit run
+(`webapp-audit`, 2026-07-23).
+
 ## Web app
 
 | Status | Issue | Where |
