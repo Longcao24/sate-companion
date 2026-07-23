@@ -141,8 +141,13 @@ def cmd_flash(args: argparse.Namespace) -> int:
     if args.target == "recorder":
         banner()
         info(f"repo: {REPO}")
+        # --debug adds the CDC serial interface so the hwtest harness can read the
+        # firmware log ([MEM] ready, [CONN] uploaded, …). Production builds emit no serial.
+        fqbn = RECORDER_FQBN + (",CDCOnBoot=cdc,USBMode=hwcdc" if args.debug else "")
+        if args.debug:
+            info("debug build (CDCOnBoot=cdc) — serial log enabled for `sate test`")
         if not args.upload_only:
-            rc = _run(["arduino-cli", "compile", "--fqbn", RECORDER_FQBN, "SATE_Recorder"], cwd=REPO)
+            rc = _run(["arduino-cli", "compile", "--fqbn", fqbn, "SATE_Recorder"], cwd=REPO)
             if rc != 0:
                 bad("compile failed."); return rc
             ok("compiled")
@@ -151,7 +156,7 @@ def cmd_flash(args: argparse.Namespace) -> int:
         port = args.port or _auto_port()
         if not port:
             bad("no serial port found — pass --port /dev/cu.usbmodemXXX (see `sate devices`)."); return 2
-        rc = _run(["arduino-cli", "upload", "-p", port, "--fqbn", RECORDER_FQBN, "SATE_Recorder"], cwd=REPO)
+        rc = _run(["arduino-cli", "upload", "-p", port, "--fqbn", fqbn, "SATE_Recorder"], cwd=REPO)
         (ok if rc == 0 else bad)("flashed" if rc == 0 else "upload failed")
         return rc
 
@@ -466,6 +471,7 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("-p", "--port", help="serial port (recorder; auto-detected if omitted)")
     f.add_argument("--compile-only", action="store_true", help="compile, do not upload")
     f.add_argument("--upload-only", action="store_true", help="upload the last build, skip compile")
+    f.add_argument("--debug", action="store_true", help="recorder: build with CDC serial so `sate test` can read the log")
     f.set_defaults(func=cmd_flash)
 
     d = sub.add_parser("devices", help="list connected devices")
