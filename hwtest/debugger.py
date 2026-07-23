@@ -172,6 +172,7 @@ class Debugger:
             ("Diagnose", lambda: self._run(["doctor", "--device"], "Diagnose"), False, False),
             ("Screenshot", self._snap_once, False, False),
             ("Reboot", self._reboot, False, False),
+            ("Log in (SATE)…", self._login_dialog, True, False),
             ("Provision Wi-Fi…", self._provision_dialog, False, False),
             ("SATE credentials…", self._creds_dialog, False, False),
             ("Run tests (sim)", lambda: self._run(["test", "--sim"], "Tests (sim)"), False, False),
@@ -275,6 +276,25 @@ class Debugger:
             return
         _ProvisionDialog(self.root, self._do_provision, (self.cfg.get("server", {}) or {}).get("base_url", ""))
 
+    def _login_dialog(self):
+        _LoginDialog(self.root, self._do_login)
+
+    def _do_login(self, email, password):
+        self._log(f"\nlogging in to SATE as {email} …", "head")
+        self._set_busy(True)
+
+        def work():
+            try:
+                from hwtest import sate_account as A
+                tok = A.login_and_claim(email, password)
+                self.claim_token = tok
+                self.q.put(("log", "  logged in — claim token ready (Provision will register + claim)", "ok"))
+            except Exception as e:  # noqa: BLE001
+                self.q.put(("log", f"  login failed: {e}", "bad"))
+            finally:
+                self.q.put(("done", None, None))
+        threading.Thread(target=work, daemon=True).start()
+
     def _creds_dialog(self):
         _CredsDialog(self.root, self.cfg.get("server", {}) or {}, self._save_creds)
 
@@ -292,7 +312,10 @@ class Debugger:
             self._log(f"could not save config.toml: {e}", "bad")
 
     def _do_provision(self, ssid, pw, server, token):
-        self._log(f"\nprovisioning Wi-Fi over BLE: {ssid}", "head")
+        token = token or self.claim_token          # use the token from Log in if none typed
+        server = server or (self.cfg.get("server", {}) or {}).get("base_url") or DEFAULT_SERVER
+        mode = "register + claim" if token else "change Wi-Fi (keep account)"
+        self._log(f"\nprovisioning Wi-Fi over BLE: {ssid}  [{mode}]", "head")
         self._set_busy(True)
 
         def work():
@@ -304,7 +327,7 @@ class Debugger:
                     if not addr:
                         return {"state": "error", "msg": "no recorder advertising"}
                     async with RecorderBle(addr, log=lambda m: self.q.put(("log", m, "dim"))) as r:
-                        if token and server:
+                        if token:
                             return await r.provision(ssid, pw, server, token)
                         return await r.change_wifi(ssid, pw)
                 res = asyncio.run(go())
@@ -447,6 +470,42 @@ def _toml_dump(cfg: dict) -> str:
             lines.append(f"\n[{sect}]")
             lines += [f"{k} = {val(v)}" for k, v in vals.items()]
     return "\n".join(lines) + "\n"
+
+
+class _LoginDialog(tk.Toplevel):
+    def __init__(self, parent, on_submit):
+        super().__init__(parent)
+        self.title("Log in to SATE")
+        self.configure(bg=CARD)
+        self.on_submit = on_submit
+        self.resizable(False, False)
+        tk.Label(self, text="Your SATE account (same as the app/web). Mints a device claim token.",
+                 bg=CARD, fg=INK2, font=("Menlo", 10)).grid(row=0, column=0, columnspan=2,
+                                                            sticky="w", padx=12, pady=(12, 6))
+        self.vars = {}
+        for i, (label, key, show) in enumerate([("Email", "email", ""), ("Password", "password", "•")], start=1):
+            tk.Label(self, text=label, bg=CARD, fg=INK2, font=("Menlo", 10)).grid(
+                row=i, column=0, sticky="w", padx=12, pady=4)
+            v = tk.StringVar()
+            self.vars[key] = v
+            e = tk.Entry(self, textvariable=v, width=32, show=show, font=("Menlo", 11), relief="flat",
+                         highlightthickness=1, highlightbackground=HAIR)
+            e.grid(row=i, column=1, padx=12, pady=4)
+            if i == 1:
+                e.focus_set()
+        br = tk.Frame(self, bg=CARD)
+        br.grid(row=3, column=0, columnspan=2, pady=12)
+        Btn(br, "Log in", self._go, primary=True).pack(side="left", padx=6)
+        Btn(br, "Cancel", self.destroy).pack(side="left", padx=6)
+        self.bind("<Return>", lambda e: self._go())
+
+    def _go(self):
+        email = self.vars["email"].get().strip()
+        pw = self.vars["password"].get()
+        if not email or not pw:
+            return
+        self.destroy()
+        self.on_submit(email, pw)
 
 
 class _CredsDialog(tk.Toplevel):
