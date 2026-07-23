@@ -49,6 +49,12 @@
 #include "esp_heap_caps.h"
 #include "esp_random.h"
 #include "esp_sleep.h"        // low-battery deep-sleep guard (fw 1.5.3)
+#include "esp_system.h"       // esp_reset_reason(): self-explaining reboots
+#include "esp_ota_ops.h"      // running-slot label in the boot banner / DIAG
+#if __has_include("esp_core_dump.h")
+#include "esp_core_dump.h"    // crash summary (task + PC) after a panic reboot
+#define SATE_HAS_COREDUMP 1
+#endif
 #include "driver/rtc_io.h"    // RTC pull-up so the wake button doesn't float
 
 #include <ArduinoJson.h>
@@ -110,7 +116,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.19";   // record command accepts an exact duration (device stops itself, sample-exact)
+static const char    *FIRMWARE_VERSION  = "1.5.20";   // no-renumber sessions (monotonic, wrap 99) + 55 audited fixes: mark-synced/keep-5, OTA rollback, crash-resume, visible status, PSRAM buffers, DIAG
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -279,7 +285,7 @@ static void recordStopEvent(lv_event_t *e);
 static bool btnPressed(Btn &b);
 static void loadTotalRecordings();
 static void bumpTotalRecordings();
-static void recCrashMark(const char *patientId, uint32_t sessionNum);
+static void recCrashMark(const char *patientId, uint32_t sessionNum, uint32_t pcmCap);
 static void recCrashClear();
 static void updateConnBadge();
 static void hideProgressOverlay();
@@ -303,20 +309,25 @@ static void sessionWavPath(char *out, size_t outSize, const char *dir, uint32_t 
 static void sessionJsonPath(char *out, size_t outSize, const char *dir, uint32_t n);
 static void sessionSyncMarkPath(char *out, size_t outSize, const char *dir, uint32_t n);
 static void sessionPartPath(char *out, size_t outSize, const char *finalWav, int part);
+// Session numbers live in 1..SESSION_NUM_MAX. They are allocated monotonically
+// and NEVER renumbered: a delete removes only that session's own files, so a
+// patient dir holds an arbitrary subset of numbers (holes are normal).
+static const uint32_t SESSION_NUM_MAX = 99;
 static bool sessionExists(const char *dir, uint32_t n);
 static void deleteSessionFiles(const char *dir, uint32_t n);
-static void renameSessionFiles(const char *dir, uint32_t from, uint32_t to);
-static void deleteSession(const char *dir, uint32_t n);
+static void scanSessionNumbers(const char *dir, bool *present);
 static uint32_t findNextSessionIndex(const char *dir);
-static uint32_t sessionCount(const char *dir);
 static void sdRefreshUsage(bool force);
+static void sdInvalidateUsageCache();
 static uint8_t sdUsedPercent();
 static uint64_t sdFreeBytes();
+static bool sdProbe();
+static bool sdRemount();
 static int readBatteryMv();
 static uint8_t batteryPercent();
 static const char *batterySymbol(uint8_t pct);
 static bool isUsbCharging();
-static void enterBatterySleep();
+static void enterBatterySleep(bool quiet = false);
 static void serviceBatteryGuard();
 static void batteryBootGuard();
 static bool isSessionSynced(const char *dir, uint32_t n);
@@ -350,6 +361,7 @@ void sateHookPatientsUpdated();
 void sateHookConnChanged();
 void sateHookRecord();
 void sateHookStop();
+bool sateHookTakeActive();
 void sateHookGuiPump();
 static bool deviceReady();
 static void isrRecBtn();
@@ -368,7 +380,19 @@ void sateHookRecordTimed(uint32_t seconds) { connRecordSecs = seconds; connRecor
 // sequence (mark, status screen, GUI pump), not just the capture loop — a stop that
 // lands in that window used to be dropped, which left a resumed take running for
 // minutes with no way to end it.
-void sateHookStop()            { if (recTakeArmed) connStopReq = true; }
+void sateHookStop()
+{
+  if (recTakeArmed) { connStopReq = true; return; }
+  // Not armed yet: a "stop" batched into the same poll response as a "record"
+  // (SLP tapped Record then Stop inside one ~12 s poll window) arrives before
+  // loop() has even started the take. Cancel the still-queued request instead
+  // of discarding the stop — the recTakeArmed gate alone ate it, leaving an
+  // unattended take running to the 62-minute ceiling.
+  if (connRecordReq) { connRecordReq = false; connRecordSecs = 0; }
+}
+// The net task asks this before anything that would flash + reboot the unit
+// (OTA): a take armed/running on the UI core must never be cut mid-capture.
+bool sateHookTakeActive()      { return recTakeArmed; }
 // sateHookGuiPump() is defined after the Display object below (it needs it).
 
 void sateHookSetActivePatient(const char *id, const char *name, const char *age,
@@ -484,6 +508,26 @@ static void uiResetPointers()
 // Memory telemetry
 // -----------------------------------------------------------------------------
 
+// Human name for esp_reset_reason(): printed at boot and in DIAG so a field
+// reboot separates brownout (dying cell) / panic (fw bug) / task-wdt (wedge) /
+// sw (OTA or remote reboot) at a glance.
+static const char *resetReasonStr(esp_reset_reason_t r)
+{
+  switch (r) {
+    case ESP_RST_POWERON:   return "poweron";
+    case ESP_RST_EXT:       return "ext-pin";
+    case ESP_RST_SW:        return "sw-restart";
+    case ESP_RST_PANIC:     return "panic";
+    case ESP_RST_INT_WDT:   return "int-wdt";
+    case ESP_RST_TASK_WDT:  return "task-wdt";
+    case ESP_RST_WDT:       return "other-wdt";
+    case ESP_RST_DEEPSLEEP: return "deepsleep-wake";
+    case ESP_RST_BROWNOUT:  return "brownout";
+    case ESP_RST_SDIO:      return "sdio";
+    default:                return "unknown";
+  }
+}
+
 static void logHeap(const char *tag)
 {
   Serial.printf(
@@ -597,8 +641,43 @@ static void showStatus(const char *status, const char *hint = "")
 {
   Serial.print("[STATUS] ");
   Serial.println(status);
-  if (statusLabel) lv_label_set_text(statusLabel, status);
-  if (hintLabel)   lv_label_set_text(hintLabel, hint);
+  // No screen builder creates these labels, so build them here the first time
+  // a message is raised on the current screen: a banner card drawn over
+  // whatever is showing. Before this, every status ("SD card full", "Record
+  // failed", the low-battery warning) went only to the debug serial port and
+  // the device looked like it silently did nothing. The next screen rebuild
+  // (lv_obj_clean + uiResetPointers) deletes the card, so a message never
+  // outlives the flow that raised it.
+  if (!statusLabel || !hintLabel) {
+    lv_obj_t *card = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(card, 228, LV_SIZE_CONTENT);
+    lv_obj_align(card, LV_ALIGN_CENTER, 0, 30);
+    lv_obj_set_style_radius(card, 12, 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(COL_TEXT_DARK), 0);
+    lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(card, 0, 0);
+    lv_obj_set_style_pad_all(card, 12, 0);
+    lv_obj_set_style_pad_row(card, 6, 0);
+    lv_obj_set_style_shadow_width(card, 14, 0);
+    lv_obj_set_style_shadow_ofs_y(card, 4, 0);
+    lv_obj_set_style_shadow_opa(card, LV_OPA_30, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+
+    statusLabel = lv_label_create(card);
+    lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(statusLabel, lv_color_hex(0xFFFFFF), 0);
+    lv_label_set_long_mode(statusLabel, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(statusLabel, lv_pct(100));
+
+    hintLabel = lv_label_create(card);
+    lv_obj_set_style_text_color(hintLabel, lv_color_hex(COL_CARD_BORDER), 0);
+    lv_label_set_long_mode(hintLabel, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(hintLabel, lv_pct(100));
+  }
+  lv_label_set_text(statusLabel, status);
+  lv_label_set_text(hintLabel, hint);
+  wakeScreen();   // a message must be readable: undo the idle backlight dim
   for (int i = 0; i < 3; i++) runGui();
 }
 
@@ -763,12 +842,16 @@ static void bumpTotalRecordings()
 // continues the SAME session instead of leaving it for the sync uploader.
 // "tries" is a boot-loop guard: if resuming keeps crashing, we give up after a
 // couple of attempts and let the segments upload as a normal unsynced session.
-static void recCrashMark(const char *patientId, uint32_t sessionNum)
+static void recCrashMark(const char *patientId, uint32_t sessionNum, uint32_t pcmCap)
 {
   g_prefs.begin("sate-rec", false);
   g_prefs.putUChar("active", 1);
   g_prefs.putString("pid", patientId);
   g_prefs.putUInt("sess", sessionNum);
+  // The take's byte cap must survive a reboot: a server-timed take (fw 1.5.19
+  // record_seconds) that crash-resumes with the generic PCM_MAX_BYTES ceiling
+  // would turn a 60-second remote capture into an unattended 62-minute one.
+  g_prefs.putUInt("cap", pcmCap);
   g_prefs.end();
 }
 
@@ -1025,6 +1108,10 @@ void sateHookUploadProgress(int pct)
 void sateHookUploadEnd()
 {
   connUploadUiActive = false;
+  // The upload tail may have trimmed old synced audio (freeSessionAudioKeepMarker
+  // on the net task) - drop the SD usage cache so the Home storage chip and the
+  // "SD card full" record guard see the freed space on their next refresh.
+  sdInvalidateUsageCache();
 }
 
 // Render the upload overlay from the net task's flags. Called every loop() pass
@@ -1220,17 +1307,49 @@ static bool ensureDir(const char *path)
 static bool initSdCard()
 {
   if (!SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0, SD_MMC_D1, SD_MMC_D2, SD_MMC_D3)) {
-    Serial.println("SD_MMC.setPins failed.");
+    Serial.println("[SD] setPins failed");
     return false;
   }
   if (!SD_MMC.begin()) {
-    Serial.println("SD_MMC.begin failed.");
+    Serial.println("[SD] mount failed");
     return false;
   }
-  Serial.printf("SD card size MB: %lu\n", (unsigned long)(SD_MMC.cardSize() / (1024 * 1024)));
+  Serial.printf("[SD] card size %lu MB\n", (unsigned long)(SD_MMC.cardSize() / (1024 * 1024)));
   ensureDir("/sate");
   ensureDir("/sate/patients");
   return true;
+}
+
+// Cheap card-alive probe: the patient root exists from boot, so failing to open
+// it means the SDMMC host has lost the card (nudged socket, brown-out on a
+// write), not "no data yet".
+static bool sdProbe()
+{
+  File d = SD_MMC.open("/sate/patients");
+  if (!d) return false;
+  bool ok = d.isDirectory();
+  d.close();
+  return ok;
+}
+
+// One transient card fault must not disable recording until a power cycle:
+// re-initialise the SDMMC host (pins set at boot persist across end()). Caller
+// MUST hold the SD bus (connSetUiSdBusy(true)) and have seen connNetSdIdle() -
+// re-mounting under an open net-task file handle corrupts that transfer.
+static bool sdRemount()
+{
+  Serial.println("[SD] probe failed - re-mounting card");
+  SD_MMC.end();
+  delay(50);
+  if (!SD_MMC.begin()) {
+    Serial.println("[SD] re-mount failed");
+    return false;
+  }
+  ensureDir("/sate");
+  ensureDir("/sate/patients");
+  sdInvalidateUsageCache();   // stale free-space numbers die with the old mount
+  Serial.println("[SD] re-mount OK");
+  return sdProbe();
 }
 
 // Load /sate/patients.json (array of {patient_id,name,age,session_type,clinician}).
@@ -1244,6 +1363,14 @@ static void loadPatientsFromSd()
   if (err != DeserializationError::Ok) return;
   JsonArray arr = doc.as<JsonArray>();
   if (arr.isNull() || arr.size() == 0) return;
+
+  // The selection is kept by patient ID, not slot: a server roster refresh
+  // (reload_patients / go-online fetch) can reorder or insert rows, and the
+  // old index would silently point the next — possibly remote — take at a
+  // different patient.
+  char selId[20] = "";
+  if (!g_standalonePatient && g_patientCount > 0)
+    snprintf(selId, sizeof(selId), "%s", g_patients[currentPatientIndex].patientId);
 
   int n = 0;
   for (JsonObject p : arr) {
@@ -1259,8 +1386,13 @@ static void loadPatientsFromSd()
   if (n > 0) {
     g_patientCount = n;
     g_standalonePatient = false;   // real roster supersedes the placeholder
-    if (currentPatientIndex >= n) currentPatientIndex = 0;
-    Serial.printf("Loaded %d patient(s) from SD\n", n);
+    int sel = 0;                   // id gone from the roster -> fall back to 0
+    if (selId[0]) {
+      for (int i = 0; i < n; i++)
+        if (!strcmp(g_patients[i].patientId, selId)) { sel = i; break; }
+    }
+    currentPatientIndex = sel;
+    Serial.printf("[SD] loaded %d patient(s)\n", n);
   }
 }
 
@@ -1304,6 +1436,35 @@ static bool sessionExists(const char *dir, uint32_t n)
   return SD_MMC.exists(pp) || SD_MMC.exists(wav) || SD_MMC.exists(mark);
 }
 
+// One directory walk marking every session number present in `dir` (same
+// artifacts sessionExists() accepts: a segment, a legacy merged .wav, or a
+// .synced tombstone). `present` must hold SESSION_NUM_MAX + 1 slots. Numbers
+// are NOT contiguous - a delete leaves a hole - so callers iterate the whole
+// map and skip absent slots instead of stopping at the first gap.
+static void scanSessionNumbers(const char *dir, bool *present)
+{
+  memset(present, 0, SESSION_NUM_MAX + 1);
+  File root = SD_MMC.open(dir);
+  if (!root) return;
+  File e;
+  while ((e = root.openNextFile())) {
+    const char *nm = e.name();               // basename or full path per core
+    const char *base = strrchr(nm, '/');
+    base = base ? base + 1 : nm;
+    if (!strncmp(base, "session_", 8)) {
+      uint32_t n = (uint32_t)strtoul(base + 8, nullptr, 10);
+      const char *sfx = strchr(base + 8, '.');
+      if (n >= 1 && n <= SESSION_NUM_MAX && sfx &&
+          (!strcmp(sfx, ".wav") || !strcmp(sfx, ".synced") ||
+           !strncmp(sfx, ".part", 5))) {
+        present[n] = true;
+      }
+    }
+    e.close();
+  }
+  root.close();
+}
+
 // Remove ALL files of session n (segments, legacy wav, json, .synced marker).
 static void deleteSessionFiles(const char *dir, uint32_t n)
 {
@@ -1321,101 +1482,6 @@ static void deleteSessionFiles(const char *dir, uint32_t n)
   SD_MMC.remove(mk);
 }
 
-// Rename every artifact of session `from` to session `to`. Used to close the
-// gap after a delete so numbering stays contiguous.
-static void renameSessionFiles(const char *dir, uint32_t from, uint32_t to)
-{
-  char fw[160], tw[160], fp[200], tp[200], fj[160], tj[160], fm[160], tm[160];
-  sessionWavPath(fw, sizeof(fw), dir, from);
-  sessionWavPath(tw, sizeof(tw), dir, to);
-  if (SD_MMC.exists(fw)) SD_MMC.rename(fw, tw);
-  for (int k = 0;; k++) {
-    sessionPartPath(fp, sizeof(fp), fw, k);
-    if (!SD_MMC.exists(fp)) break;
-    sessionPartPath(tp, sizeof(tp), tw, k);
-    SD_MMC.rename(fp, tp);
-  }
-  sessionJsonPath(fj, sizeof(fj), dir, from);
-  sessionJsonPath(tj, sizeof(tj), dir, to);
-  if (SD_MMC.exists(fj)) SD_MMC.rename(fj, tj);
-  sessionSyncMarkPath(fm, sizeof(fm), dir, from);
-  sessionSyncMarkPath(tm, sizeof(tm), dir, to);
-  if (SD_MMC.exists(fm)) SD_MMC.rename(fm, tm);
-}
-
-// --- Crash-safe delete/renumber journal -------------------------------------
-// deleteSession() shifts every later session down one slot to keep numbering
-// contiguous. That multi-rename is NOT atomic: a reboot / brownout / watchdog
-// mid-loop leaves a HOLE, and findNextSessionIndex / sessionCount / the pending
-// scan all stop at the first empty slot - so every unsynced take past the hole
-// becomes invisible and never uploads (permanent loss if the patient never
-// records again). So we journal the operation to NVS BEFORE touching the card and
-// re-drive it to completion on the next boot, mirroring the record-resume mark.
-static void delJournalBegin(const char *dir, uint32_t total)
-{
-  g_prefs.begin("sate-del", false);
-  g_prefs.putUChar("active", 1);
-  g_prefs.putString("dir", dir);
-  g_prefs.putUInt("total", total);
-  g_prefs.end();
-}
-
-static void delJournalClear()
-{
-  g_prefs.begin("sate-del", false);
-  g_prefs.putUChar("active", 0);
-  g_prefs.end();
-}
-
-// Close any hole in a patient dir by shifting occupied slots down to a contiguous
-// 1..N (a .synced tombstone counts as occupied - sessionExists checks it). Every
-// rename target is an already-vacated slot, so this is idempotent and safe to
-// re-run if it is itself interrupted (the next boot just continues compacting).
-static void compactPatientDir(const char *dir, uint32_t upTo)
-{
-  uint32_t writeIdx = 1;
-  for (uint32_t r = 1; r <= upTo; r++) {
-    if (!sessionExists(dir, r)) continue;          // empty slot - skip
-    if (r != writeIdx) renameSessionFiles(dir, r, writeIdx);
-    writeIdx++;
-  }
-}
-
-// Called once at boot (after SD is mounted, before maybeResumeRecording): if a
-// delete/renumber was interrupted by a reboot, finish compacting the dir so no
-// take is stranded behind a hole. No-op when the journal is clear.
-static void recoverInterruptedDelete()
-{
-  g_prefs.begin("sate-del", true);
-  bool     active = g_prefs.getUChar("active", 0) == 1;
-  uint32_t total  = g_prefs.getUInt("total", 0);
-  char dir[96] = {0};
-  g_prefs.getString("dir", dir, sizeof(dir));
-  g_prefs.end();
-  if (!active || dir[0] == '\0') return;
-  // `total` is the pre-delete count; a partial down-shift only lowers the highest
-  // occupied slot, so scanning 1..total covers the whole dir. Guard a bogus value.
-  if (total < 1 || total > 9999) total = 9999;
-  compactPatientDir(dir, total);
-  delJournalClear();
-  Serial.printf("[REC] healed interrupted delete in %s (scanned %lu)\n",
-                dir, (unsigned long)total);
-}
-
-// Delete session n and shift every later session down by one, keeping the
-// 1..N numbering contiguous (findNextSessionIndex assumes no gaps). The shift is
-// journaled (above) so a reboot mid-loop is healed on the next boot.
-static uint32_t sessionCount(const char *dir);  // defined below
-static void deleteSession(const char *dir, uint32_t n)
-{
-  uint32_t total = sessionCount(dir);
-  if (n < 1 || n > total) return;
-  delJournalBegin(dir, total);        // journal the renumber BEFORE mutating the card
-  deleteSessionFiles(dir, n);
-  for (uint32_t m = n + 1; m <= total; m++) renameSessionFiles(dir, m, m - 1);
-  delJournalClear();                  // renumber completed cleanly - nothing to heal
-}
-
 // NOTE (1.5.9): nothing deletes a recording automatically any more. The device
 // holds the only copy of a take until the SLP explicitly deletes it from the
 // Sessions screen, so the three old reclaim paths were removed:
@@ -1427,20 +1493,26 @@ static void deleteSession(const char *dir, uint32_t n)
 // take itself now stops cleanly if the card ever does fill (see
 // recordWavStreamToSd). The .synced marker still drives the pending count.
 //
-// Sessions are numbered contiguously from 1; first missing = next free.
+// Session numbers are allocated MONOTONICALLY and a delete never renumbers the
+// survivors (the old down-shift multi-rename could be interrupted mid-loop and,
+// worse, renumbered sessions underneath a live upload - splicing two takes into
+// one server WAV). A number is an identifier, not a dense index: next number =
+// highest existing + 1; past SESSION_NUM_MAX the counter wraps to the LOWEST
+// free number. A .synced tombstone still owns its slot, so a number is reused
+// only after the SLP explicitly deleted that session - which keeps the server's
+// (device_serial, session_number, patient) identity unambiguous. Returns 0 only
+// when all SESSION_NUM_MAX numbers are taken.
 static uint32_t findNextSessionIndex(const char *dir)
 {
-  for (uint32_t i = 1; i <= 9999; i++) {
-    if (!sessionExists(dir, i)) return i;
-  }
+  bool present[SESSION_NUM_MAX + 1];
+  scanSessionNumbers(dir, present);
+  uint32_t highest = 0;
+  for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++)
+    if (present[i]) highest = i;
+  if (highest < SESSION_NUM_MAX) return highest + 1;   // empty dir starts at 1
+  for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++)
+    if (!present[i]) return i;                         // wrap: lowest free slot
   return 0;
-}
-
-// Count of recorded sessions for the current patient.
-static uint32_t sessionCount(const char *dir)
-{
-  uint32_t next = findNextSessionIndex(dir);
-  return (next == 0) ? 9999 : next - 1;
 }
 
 // --- SD card capacity (auto-detected from the mounted card) ----------------
@@ -1466,6 +1538,15 @@ static void sdRefreshUsage(bool force)
   if (used > g_sdTotal) used = g_sdTotal;
   g_sdUsedCache = used;
   g_sdUsedAt    = now;
+}
+
+// Drop the cache so the next sdRefreshUsage(false) rescans immediately. Called
+// after anything frees space (session delete, the net task's synced-audio trim)
+// so "SD card full" clears as soon as the user follows its advice. Safe from
+// either core: a single aligned 32-bit store.
+static void sdInvalidateUsageCache()
+{
+  g_sdUsedAt = 0;
 }
 
 // Percent of the card in use, rounded. Reads the cache (no SD access).
@@ -1596,20 +1677,27 @@ static bool isUsbCharging()
 static const int BAT_CRIT_MV = 3350;   // ~3-5% under load -> sleep to protect cell
 
 // Warn, then deep sleep. Wakes on a RECORD-button press (GPIO2, active LOW) or a
-// 5-min timer; setup()'s boot guard re-checks the cell and only boots normally
-// once it has recovered (been charged).
-static void enterBatterySleep()
+// 1 h timer; setup()'s early timer-wake check re-samples the cell and only boots
+// normally once it has recovered (been charged).
+// quiet=true is the timer-wake re-sleep path: no backlight, no LVGL, no delays -
+// it may run before the display/LVGL are initialised, and the whole point of the
+// wake is one ADC read. The old loud 5-min recheck (full backlight + 6 s guard +
+// 2.6 s warning every wake) averaged ~4 mA and kept draining the cell this sleep
+// exists to protect.
+static void enterBatterySleep(bool quiet)
 {
   recordStopReq = true;                        // abort any capture path cleanly
-  wakeScreen();
-  backlightSet(BL_FULL);
-  showStatus("Pin yeu - hay sac", "Thiet bi tam tat de bao ve pin");
-  pumpGuiMs(2600);
+  if (!quiet) {
+    wakeScreen();
+    backlightSet(BL_FULL);
+    showStatus("Pin yeu - hay sac", "Thiet bi tam tat de bao ve pin");
+    pumpGuiMs(2600);
+  }
   backlightSet(0);                             // screen fully off for the sleep
   rtc_gpio_pullup_en((gpio_num_t)REC_BTN_PIN); // hold the button HIGH while asleep
   rtc_gpio_pulldown_dis((gpio_num_t)REC_BTN_PIN);
   esp_sleep_enable_ext0_wakeup((gpio_num_t)REC_BTN_PIN, 0); // wake on press (LOW)
-  esp_sleep_enable_timer_wakeup(300ULL * 1000000ULL);       // and re-check in 5 min
+  esp_sleep_enable_timer_wakeup(3600ULL * 1000000ULL);      // hourly cell re-check
   esp_deep_sleep_start();                      // never returns
 }
 
@@ -1649,6 +1737,18 @@ static void batteryBootGuard()
   enterBatterySleep();
 }
 
+// --- Audio-path health (fw: dead-mic + I2S-fault detection) ------------------
+// Set when an I2S read returns 0 mid-take (stalled DMA / codec fault). The next
+// take tears the audio path down and re-inits it instead of re-entering the
+// same broken RX channel forever (which used to need a power cycle).
+static bool g_audioFaulted = false;
+// Peak |sample| of the last capture run, written into the session JSON. A dead
+// or muted mic clocks full-length buffers of zeros: without this, a silent
+// 40-minute WAV saved, uploaded, byte-verified and trimmed with nobody the
+// wiser. A live room through the +30 dB PGA sits far above this floor.
+static uint32_t g_lastTakePeak = 0;
+static const uint32_t SILENT_PEAK_ABS = 40;   // 16-bit counts; digital silence only
+
 static bool isSessionSynced(const char *dir, uint32_t n)
 {
   char probe[160];
@@ -1658,10 +1758,11 @@ static bool isSessionSynced(const char *dir, uint32_t n)
 
 static uint32_t countUnsynced(const char *dir)
 {
-  uint32_t total = sessionCount(dir);
+  bool present[SESSION_NUM_MAX + 1];
+  scanSessionNumbers(dir, present);
   uint32_t pending = 0;
-  for (uint32_t i = 1; i <= total; i++) {
-    if (!isSessionSynced(dir, i)) pending++;
+  for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++) {
+    if (present[i] && !isSessionSynced(dir, i)) pending++;
   }
   return pending;
 }
@@ -1717,6 +1818,10 @@ static bool saveMetadataToSd(const char *jsonPath, const char *wavPath,
   file.printf("  \"bit_depth\": %d,\n", AUDIO_BIT_DEPTH);
   file.printf("  \"channels\": %d,\n", AUDIO_CHANNELS);
   file.printf("  \"created_ms_since_boot\": %lu,\n", (unsigned long)millis());
+  // Peak |sample| of the capture (this run only, for a crash-resumed take).
+  // A near-zero value across a full-length take = dead/muted mic; the server
+  // can flag it before the on-device audio is trimmed.
+  file.printf("  \"peak_abs\": %lu,\n", (unsigned long)g_lastTakePeak);
   // Flag offsets (ms from start) marked with the FLAG button during the take.
   file.print("  \"flags_ms\": [");
   for (int i = 0; i < g_flagCount; i++) {
@@ -1871,12 +1976,12 @@ static bool initAudio()
     I2S_STD_SLOT_LEFT
   );
   if (!ok) {
-    Serial.println("Failed to initialize I2S bus.");
+    Serial.println("[AUD] I2S init failed");
     return false;
   }
 
   if (es8311_codec_init() != ESP_OK) {
-    Serial.println("ES8311 init failed.");
+    Serial.println("[AUD] ES8311 codec init failed");
     return false;
   }
   return true;
@@ -1943,6 +2048,16 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
   bool diskFull = false;
   const uint64_t freeAtStart = sdFreeBytes();
 
+  // Cell + signal watch. loop()'s battery guard is blocked for the whole take
+  // (up to ~62 min), so the capture loop samples the cell itself every ~10 s
+  // and ends the take CLEANLY (segments patched + closed) before the cell
+  // collapses mid-write. It also tracks the peak |sample| so a dead/muted mic
+  // is caught during the take, not after the silent WAV synced and trimmed.
+  uint32_t lastBatMs    = millis();
+  int      batLowStreak = 0;
+  bool     batCritical  = false;
+  uint32_t peakAbs      = 0;
+
   // Read the mic in SMALL slices (~32 ms each) rather than one 4 KB block
   // (~128 ms). A short read means we return to service the GUI ~30x/sec, so the
   // on-screen Stop button and the FLAG/REC buttons feel instant instead of
@@ -1955,7 +2070,17 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
     if (want > REC_READ_BYTES) want = REC_READ_BYTES;
 
     size_t got = es8311_i2s.readBytes((char *)audioChunk, want);
-    if (got == 0) { ok = false; break; }
+    if (got == 0) { ok = false; g_audioFaulted = true; break; }
+
+    // Running peak over every sample (~512 int16 per slice - negligible cost).
+    {
+      const int16_t *smp = (const int16_t *)audioChunk;
+      for (size_t i = 0; i < got / 2; i++) {
+        int v = smp[i];
+        if (v < 0) v = -v;
+        if ((uint32_t)v > peakAbs) peakAbs = (uint32_t)v;
+      }
+    }
 
     size_t put = file.write(audioChunk, got);
     // A short write means the card just filled. Keep what's already on disk.
@@ -2021,6 +2146,27 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
       snprintf(big, sizeof(big), "%lu", (unsigned long)elapsed);
       updateProgress((uint16_t)((written * 1000ULL) / pcmTotal), big);
     }
+    if (now - lastBatMs >= 10000) {
+      lastBatMs = now;
+      int mv = readBatteryMv();
+      if (mv >= 0 && mv < BAT_CRIT_MV) {
+        if (++batLowStreak >= 3) {          // ~30 s sustained under the floor
+          batCritical  = true;
+          recordStopReq = true;             // clean stop beats a brownout mid-write
+        } else if (progressSmall) {
+          lv_label_set_text(progressSmall,
+                            LV_SYMBOL_BATTERY_EMPTY "  Low battery - charge soon");
+        }
+      } else {
+        batLowStreak = 0;
+        // Digital silence 15+ s into this run: warn NOW, while the SLP can
+        // still fix the mic, instead of after the silent take synced.
+        if (peakAbs < SILENT_PEAK_ABS && progressSmall &&
+            written - startWritten >= PCM_BYTES_PER_SEC * 15)
+          lv_label_set_text(progressSmall,
+                            LV_SYMBOL_WARNING "  No audio detected - check mic");
+      }
+    }
     lv_timer_handler();   // reads touch + paints; ~30 Hz keeps Stop instant
     // Yield to the scheduler so a multi-minute capture can't starve the idle
     // task (and trip its watchdog) - this is what keeps long records stable.
@@ -2033,6 +2179,7 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
     file.close();
   }
   logHeap("record end");
+  g_lastTakePeak = peakAbs;   // saveMetadataToSd stamps it into the session JSON
 
   // Only a take with NOTHING usable is discarded. A real read/write error that
   // still produced audio keeps that audio: the segments on the card may be the
@@ -2055,16 +2202,34 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
 
   // Tell the SLP the take ended on its own, so a short recording is never a
   // silent surprise. The audio is already safe either way.
-  if (diskFull) {
+  if (batCritical) {
+    showStatus("Battery critically low", "Recording stopped and saved - charge now");
+    pumpGuiMs(1800);
+  } else if (diskFull) {
     showStatus("SD card full", "Recording stopped and saved - free space soon");
     pumpGuiMs(1800);
   } else if (!ok) {
     showStatus("Recording stopped early", "Audio up to this point was saved");
     pumpGuiMs(1800);
+  } else if (written >= pcmTotal && pcmTotal == PCM_MAX_BYTES) {
+    // Hit the ~62-min safety ceiling. The SLP never pressed Stop, so nothing
+    // after this instant is being captured — say so instead of snapping back
+    // to Home as if the take were ended on purpose. (An exact-duration remote
+    // take also exits on written >= pcmTotal; its cap is below PCM_MAX_BYTES,
+    // and stopping there is the requested behaviour, so it stays silent.)
+    showStatus("Recording limit reached", "62 min max - take saved");
+    pumpGuiMs(1800);
+  } else if (peakAbs < SILENT_PEAK_ABS &&
+             written - startWritten >= PCM_BYTES_PER_SEC * 15) {
+    // Whole run was digital silence: the mic/codec path is dead or muted. The
+    // take is still saved and uploaded (never discard possible patient audio),
+    // but the SLP must not walk away believing the sample was captured.
+    showStatus("No audio detected", "Mic may be faulty - take saved, check device");
+    pumpGuiMs(1800);
   }
 
   *outPcmBytes = written;
-  Serial.printf("Recording complete. %d segment(s), %lu PCM bytes (no merge)\n",
+  Serial.printf("[REC] complete: %d segment(s), %lu PCM bytes (no merge)\n",
                 part + 1, (unsigned long)written);
   return true;
 }
@@ -2281,6 +2446,13 @@ static void refreshHomeUpload()
     lv_obj_set_style_bg_color(homeUpDot, lv_color_hex(COL_PRIMARY), 0);
     lv_obj_clear_flag(homeUpBar, LV_OBJ_FLAG_HIDDEN);
     lv_bar_set_value(homeUpBar, pct * 10, LV_ANIM_ON);
+  } else if (connSdFault()) {
+    // The card is refusing reads/writes: pending==0 here is "cannot read", not
+    // "all synced" - never show the reassuring tick over a failed card.
+    lv_obj_add_flag(homeUpBar, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(homeUpText, LV_SYMBOL_WARNING "  SD card error - check card");
+    lv_obj_set_style_text_color(homeUpText, lv_color_hex(COL_REC), 0);
+    lv_obj_set_style_bg_color(homeUpDot, lv_color_hex(COL_REC), 0);
   } else if (pending > 0) {
     lv_obj_add_flag(homeUpBar, LV_OBJ_FLAG_HIDDEN);
     if (online) {
@@ -2562,7 +2734,11 @@ static void showSessionsScreen()
 
   char dir[96];
   patientDirPath(dir, sizeof(dir));
-  uint32_t total = SD_MMC.exists(dir) ? sessionCount(dir) : 0;
+  bool present[SESSION_NUM_MAX + 1] = {false};
+  if (SD_MMC.exists(dir)) scanSessionNumbers(dir, present);
+  uint32_t total = 0;
+  for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++)
+    if (present[i]) total++;
 
   if (total == 0) {
     lv_obj_t *empty = lv_label_create(lv_scr_act());
@@ -2595,7 +2771,12 @@ static void showSessionsScreen()
   sessRowCount = 0;
   snprintf(sessRowPid, sizeof(sessRowPid), "%s", p.patientId);
 
-  for (uint32_t n = total; n >= 1; n--) {
+  for (uint32_t n = SESSION_NUM_MAX; n >= 1; n--) {
+    // Numbers keep holes after a delete - skip the empty slots.
+    if (!present[n]) {
+      if (n == 1) break;   // avoid uint32 underflow
+      continue;
+    }
     // Plain info row (NOT a button): the device has no speaker, so sessions are
     // never played on-device - they only upload to SATE. Tapping the row does
     // nothing; the only control is the trash chip to delete.
@@ -2627,6 +2808,12 @@ static void showSessionsScreen()
 
     lv_obj_t *badge = lv_label_create(row);
     lv_obj_align(badge, LV_ALIGN_RIGHT_MID, -42, 0);
+    // Real status at creation: rows past the live-refresh tracker's cap
+    // (SESS_ROW_MAX) are never repainted, so without this they keep LVGL's
+    // literal "Text" placeholder — hiding an old take's queued/synced state.
+    bool rowSynced = isSessionSynced(dir, n);
+    lv_label_set_text(badge, rowSynced ? LV_SYMBOL_OK " SATE" : "queued");
+    lv_obj_set_style_text_color(badge, lv_color_hex(rowSynced ? COL_OK : COL_WARN), 0);
     if (sessRowCount < SESS_ROW_MAX) {
       sessRowBadge[sessRowCount] = badge;
       sessRowNum[sessRowCount]   = n;
@@ -2795,10 +2982,11 @@ static void runSync()
   patientDirPath(dir, sizeof(dir));
 
   // Sum the duration of what we are about to upload (from each session's WAV).
-  uint32_t total = sessionCount(dir);
+  bool present[SESSION_NUM_MAX + 1];
+  scanSessionNumbers(dir, present);
   uint32_t uploadSec = 0;
-  for (uint32_t n = 1; n <= total; n++) {
-    if (isSessionSynced(dir, n)) continue;
+  for (uint32_t n = 1; n <= SESSION_NUM_MAX; n++) {
+    if (!present[n] || isSessionSynced(dir, n)) continue;
     char wavPath[160];
     sessionWavPath(wavPath, sizeof(wavPath), dir, n);
     File f = SD_MMC.open(wavPath, FILE_READ);
@@ -2842,7 +3030,7 @@ static void runSync()
 
   uint32_t guard = millis() + 120000;   // hard stop so the UI never wedges
   uint32_t pending = startPending;
-  while (pending > 0 && millis() < guard &&
+  while (pending > 0 && (int32_t)(millis() - guard) < 0 &&
          connGetMode() == CONN_WIFI_ONLINE) {
     runGui();
     delay(5);                  // let the net task make progress
@@ -3006,6 +3194,58 @@ static void runRecordSavePlaySession(bool review = true,
   // they don't fight the capture writes (was a big source of begin/stop drag).
   connSetUiSdBusy(true);
 
+  // SD self-heal: a nudged/re-seated card leaves every SD op failing until the
+  // SDMMC host is re-initialised, which used to need a power cycle - the unit
+  // silently could not record while looking perfectly healthy. Probe cheaply;
+  // on failure wait for the net task to leave the card, then re-mount once.
+  if (!sdProbe()) {
+    uint32_t sdGuard = millis() + 8000;
+    while (!connNetSdIdle() && (int32_t)(millis() - sdGuard) < 0) {
+      lv_timer_handler();
+      delay(5);
+    }
+    if (!connNetSdIdle() || !sdRemount()) {
+      connSetUiSdBusy(false);
+      showStatus("SD card error", "Reinsert the card, then try again");
+      pumpGuiMs(1800);
+      showHomeScreen();
+      return;
+    }
+  }
+
+  // A previous take died on an I2S read fault (readBytes returned 0). Nothing
+  // else ever re-inits the audio path, so without this the next RECORD press
+  // re-enters the same broken RX channel and fails identically until a power
+  // cycle. Tear it down and bring it back up before this take arms.
+  if (g_audioFaulted) {
+    es8311_i2s.end();
+    if (initAudio()) {
+      g_audioFaulted = false;
+      Serial.println("[REC] audio path re-initialised after I2S fault");
+    } else {
+      connSetUiSdBusy(false);
+      showStatus("Audio error", "Codec re-init failed - restart the device");
+      pumpGuiMs(1800);
+      showHomeScreen();
+      return;
+    }
+  }
+
+  // Pre-flight cell check: loop()'s battery guard is blocked for the whole take
+  // and a take can run ~62 min. Below the critical floor the cell cannot carry
+  // any useful capture - refuse cleanly now instead of browning out mid-write.
+  // (A plugged-in unit keeps recording: the charger holds the cell up.)
+  {
+    int mv = readBatteryMv();
+    if (mv >= 0 && mv < BAT_CRIT_MV && !isUsbCharging()) {
+      connSetUiSdBusy(false);
+      showStatus("Battery too low", "Charge the device before recording");
+      pumpGuiMs(1600);
+      showHomeScreen();
+      return;
+    }
+  }
+
   char dir[96];
   patientDirPath(dir, sizeof(dir));
   if (!SD_MMC.exists(dir)) SD_MMC.mkdir(dir);
@@ -3040,11 +3280,16 @@ static void runRecordSavePlaySession(bool review = true,
   // "stop" command (fw >=1.5.15). The `tries` boot-loop guard in
   // maybeResumeRecording() still applies. Cleared the instant capture returns.
   recTakeArmed = true;      // from here a remote "stop" belongs to this take
-  recCrashMark(g_patients[currentPatientIndex].patientId, sessionNum);
+  recCrashMark(g_patients[currentPatientIndex].patientId, sessionNum, pcmTotal);
 
   uint32_t pcmBytes = 0;
   bool ok = recordWavStreamToSd(wavPath, &pcmBytes, pcmTotal);
   recTakeArmed = false;
+  // Drop any stop latched in the armed-but-not-capturing tail (ceiling / disk
+  // full / I2S-error exits skip the loop's clear): it belongs to THIS take,
+  // which is already over, and left set it would end the NEXT take at ~32 ms.
+  // Order matters: disarm first so sateHookStop can't re-latch in between.
+  connStopReq = false;
   recCrashClear();   // every take is marked now, so every take clears its mark
 
   if (!ok) {
@@ -3093,9 +3338,11 @@ static void maybeResumeRecording()
   bool     active = g_prefs.getUChar("active", 0) == 1;
   uint8_t  tries  = g_prefs.getUChar("tries", 0);
   uint32_t sess   = g_prefs.getUInt("sess", 0);
+  uint32_t cap    = g_prefs.getUInt("cap", 0);
   char pid[40] = {0};
   g_prefs.getString("pid", pid, sizeof(pid));
   g_prefs.end();
+  if (cap == 0) cap = PCM_MAX_BYTES;   // mark written by older fw carries no cap
 
   // Diagnostics: this path used to be silent, so a take that failed to resume was
   // invisible on the wire. Every branch now says why (grep "[REC] resume").
@@ -3105,6 +3352,15 @@ static void maybeResumeRecording()
   }
   Serial.printf("[REC] resume: interrupted take found - session %lu patient '%s' tries=%u\n",
                 (unsigned long)sess, pid, (unsigned)tries);
+
+  // Unprovisioned boot with a live mark: the reboot came from a factory reset /
+  // server unclaim mid-take. The mark must not survive to fire on a LATER
+  // provisioned boot (it would append a fresh take onto a session that may be
+  // synced by then). The segments still upload as a normal unsynced session.
+  if (!deviceReady()) {
+    Serial.println("[REC] resume: ABORT - device unprovisioned; mark cleared, segments upload via sync");
+    recCrashClear(); return;
+  }
 
   // Boot-loop guard: if resuming has itself crashed the board a couple of times,
   // stop trying. The captured segments still upload as a normal unsynced session.
@@ -3126,13 +3382,45 @@ static void maybeResumeRecording()
   }
   currentPatientIndex = idx;
 
-  char dir[96], wavPath[160], jsonPath[160], part0[200];
+  // Own the SD bus BEFORE touching the session's files or pumping the status
+  // screen: the net task may already be uploading this very session (the sweep
+  // starts the instant Wi-Fi comes up), and if it marks it .synced before the
+  // capture re-arms, every resumed minute is skipped by the pending scan
+  // forever. Setting the flag is asynchronous, so also wait for the positive
+  // net-task acknowledgement, same handshake the delete path uses.
+  connSetUiSdBusy(true);
+  {
+    uint32_t guard = millis() + 120000;   // rides out a final-slice POST (~60 s)
+    while (!connNetSdIdle() && (int32_t)(millis() - guard) < 0) {
+      lv_timer_handler();
+      delay(5);
+    }
+  }
+  if (!connNetSdIdle()) {
+    // Net task never yielded (wedged mid-transfer): never append under a live
+    // upload. Keep the mark - the next boot retries, bounded by the tries guard.
+    Serial.println("[REC] resume: ABORT - net task never released the SD bus");
+    connSetUiSdBusy(false);
+    return;
+  }
+
+  char dir[96], wavPath[160], jsonPath[160], part0[200], mark[160];
   patientDirPath(dir, sizeof(dir));
   sessionWavPath(wavPath, sizeof(wavPath), dir, sess);
   sessionJsonPath(jsonPath, sizeof(jsonPath), dir, sess);
   sessionPartPath(part0, sizeof(part0), wavPath, 0);
+  sessionSyncMarkPath(mark, sizeof(mark), dir, sess);
+  if (SD_MMC.exists(mark)) {
+    // The interrupted part already reached the server (uploaded before this
+    // boot's bus claim, or on a previous boot). Appending would strand the new
+    // audio - the pending scan skips marked sessions - so leave it be.
+    Serial.printf("[REC] resume: ABORT - session %lu already synced; not appending\n", (unsigned long)sess);
+    connSetUiSdBusy(false);
+    recCrashClear(); return;
+  }
   if (!SD_MMC.exists(part0)) {
     Serial.printf("[REC] resume: ABORT - %s missing on the card\n", part0);
+    connSetUiSdBusy(false);
     recCrashClear(); return;
   }
 
@@ -3150,6 +3438,7 @@ static void maybeResumeRecording()
 
   // Refuse to resume onto a (nearly) full card - same rule as starting a take.
   if (sdFreeBytes() < SD_MIN_FREE_BYTES) {
+    connSetUiSdBusy(false);
     recCrashClear();
     showStatus("Recording recovered", "Interrupted take saved - card is full");
     pumpGuiMs(1600);
@@ -3160,15 +3449,17 @@ static void maybeResumeRecording()
   // Tell the SLP the take is continuing and give them a beat to hit Stop.
   recTakeArmed = true;      // arm BEFORE the status screen: the remote stop that
                             // ends this take often arrives during the pump below
-  Serial.printf("[REC] resume session %lu from part %d (%lu bytes already on card)\n",
-                (unsigned long)sess, startPart, (unsigned long)existingBytes);
+  Serial.printf("[REC] resume session %lu from part %d (%lu bytes already on card, cap %lu)\n",
+                (unsigned long)sess, startPart, (unsigned long)existingBytes, (unsigned long)cap);
   showStatus("Resuming recording", "Interrupted take - press RECORD to stop");
   pumpGuiMs(1500);
 
-  connSetUiSdBusy(true);
+  // Resume with the ORIGINAL cap (written is seeded with existingBytes, so the
+  // absolute byte ceiling carries over) - a server-timed take stays timed.
   uint32_t pcmBytes = 0;
-  bool ok = recordWavStreamToSd(wavPath, &pcmBytes, PCM_MAX_BYTES, startPart, existingBytes);
+  bool ok = recordWavStreamToSd(wavPath, &pcmBytes, cap, startPart, existingBytes);
   recTakeArmed = false;
+  connStopReq = false;   // same stale-stop drop as the normal take path above
   recCrashClear();
 
   if (!ok || pcmBytes == 0) {
@@ -3252,6 +3543,16 @@ static void serviceFactoryResetButton()
 
 void setup()
 {
+  // Timer wake from the battery-protect deep sleep: the wake exists ONLY to
+  // re-sample the cell. Decide before the serial delay, screen init or
+  // backlight - a cell still under the floor goes straight back to sleep after
+  // one ADC read, keeping the sleep's ~10 uA promise instead of a full-bright
+  // reboot every recheck. A recovered (charged) cell falls through to boot.
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+    int mv = readBatteryMv();
+    if (mv >= 0 && mv < BAT_CRIT_MV) enterBatterySleep(true);  // never returns
+  }
+
   Serial.begin(SERIAL_BAUD);
   delay(1200);
 
@@ -3259,6 +3560,27 @@ void setup()
   Serial.println("=== SATE Clinical Recorder ===");
   Serial.print("Firmware: ");
   Serial.println(FIRMWARE_VERSION);
+  // Why this boot happened + which OTA slot is running: a panic vs brownout vs
+  // clean power-cycle is the single fact that decides where a field bug lives,
+  // and a slot label of app0 (no ota_1) exposes a huge_app mis-flash instantly.
+  {
+    const esp_partition_t *part = esp_ota_get_running_partition();
+    Serial.printf("[BOOT] reset=%s(%d) slot=%s\n",
+                  resetReasonStr(esp_reset_reason()), (int)esp_reset_reason(),
+                  part ? part->label : "?");
+#if SATE_HAS_COREDUMP
+    // After a panic the stored core dump names the crashing task + PC - the
+    // difference between "the resume path crashed" and "LVGL crashed" without
+    // ever attaching a debugger.
+    if (esp_reset_reason() == ESP_RST_PANIC) {
+      esp_core_dump_summary_t sum;
+      if (esp_core_dump_get_summary(&sum) == ESP_OK) {
+        Serial.printf("[BOOT] crash: task=%s pc=0x%08lx\n",
+                      sum.exc_task, (unsigned long)sum.exc_pc);
+      }
+    }
+#endif
+  }
 
   currentState = BOOTING;
   pinMode(BOOT_BTN_PIN, INPUT_PULLUP); // hold 5 s to factory-reset
@@ -3291,10 +3613,6 @@ void setup()
   }
   loadPatientsFromSd();                   // server/app-pushed list, if any
   loadTotalRecordings();                   // lifetime recording count (NVS) for telemetry
-  // Heal a delete/renumber that a reboot interrupted mid-shift BEFORE anything
-  // reads the session numbering (usage cache, resume, pending scan): otherwise a
-  // hole hides every take past it. No-op unless the delete journal is set.
-  recoverInterruptedDelete();
   sdRefreshUsage(true);                    // prime the usage cache so the first
                                            // record-begin / Home never pays f_getfree
   // A take interrupted by a reboot is resumed below (maybeResumeRecording, after
@@ -3322,15 +3640,25 @@ void setup()
   // roster, the user only sees the onboarding screen.
   if (deviceReady()) {
     showHomeScreen();
-    // Defer resuming an interrupted take to loop(). Doing it HERE would block
-    // setup() inside the capture (it runs until Stop), so connStartNetTask() in
-    // loop() would never run: the unit would record on with no network — no
-    // heartbeat, no remote "stop", unreachable until someone pressed the button.
-    g_resumePending = true;
-    g_bootMs = millis();
   } else {
     showOnboardingScreen();
+    // Booted unprovisioned: any surviving crash-mark predates the factory
+    // reset / unclaim that rebooted us, so it can NEVER be resumed - and if it
+    // lingered, a re-claim could complete before the resume check runs and the
+    // mark would append a new take onto the old (possibly synced) session.
+    // Decide staleness HERE, at boot, where provisioning state is unambiguous.
+    recCrashClear();
   }
+  // Defer resuming an interrupted take to loop(). Doing it HERE would block
+  // setup() inside the capture (it runs until Stop), so connStartNetTask() in
+  // loop() would never run: the unit would record on with no network — no
+  // heartbeat, no remote "stop", unreachable until someone pressed the button.
+  // Armed on EVERY boot, provisioned or not: an unprovisioned boot (factory
+  // reset / server unclaim mid-take) must still consume a stale crash-mark, or
+  // it fires on a LATER provisioned boot and appends a new take onto a session
+  // that may already be synced. maybeResumeRecording() gates on deviceReady().
+  g_resumePending = true;
+  g_bootMs = millis();
   logHeap("ready");
 }
 
@@ -3373,6 +3701,45 @@ static void doScreenDump()
   lv_snapshot_free(snap);
 }
 
+// "DIAG\n" over the debug serial: one-shot dump of everything a bench session
+// starts by asking for - heap/PSRAM, stack high-water of both hot tasks, SD /
+// Wi-Fi / session state, and why the last boot happened. Read-only, no SD I/O.
+static void doDiagDump()
+{
+  static const char *stateNames[] = {
+    "BOOTING", "ONBOARDING", "HOME", "RECORDING", "SAVING_TO_SD", "PLAYING",
+    "SESSIONS", "SYNC", "SYNCING", "RESULTS", "CONNECTION", "ERROR_STATE"
+  };
+  int st = (int)currentState;
+  const char *stName = (st >= 0 && st < (int)(sizeof(stateNames) / sizeof(stateNames[0])))
+                           ? stateNames[st] : "?";
+  const esp_partition_t *part = esp_ota_get_running_partition();
+  Serial.println("[DIAG] ---- state dump ----");
+  Serial.printf("[DIAG] fw=%s up=%lus reset=%s(%d) slot=%s\n",
+                FIRMWARE_VERSION, (unsigned long)(millis() / 1000),
+                resetReasonStr(esp_reset_reason()), (int)esp_reset_reason(),
+                part ? part->label : "?");
+  Serial.printf("[DIAG] heap int free=%u largest=%u min=%u | psram free=%u largest=%u\n",
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+  Serial.printf("[DIAG] stack floor: loop=%u net=%u bytes (never-used minimum)\n",
+                (unsigned)uxTaskGetStackHighWaterMark(NULL),
+                (unsigned)connNetStackHighWater());
+  Serial.printf("[DIAG] ui state=%s ready=%d patient=%s (%d/%d) bat=%dmV\n",
+                stName, (int)deviceReady(),
+                g_patientCount ? g_patients[currentPatientIndex].patientId : "-",
+                currentPatientIndex, g_patientCount, readBatteryMv());
+  Serial.printf("[DIAG] sd used=%llu/%llu MB fault=%d | conn mode=%d '%s' ip=%s pending=%lu upload=%d%%\n",
+                (unsigned long long)(g_sdUsedCache / (1024 * 1024)),
+                (unsigned long long)(g_sdTotal / (1024 * 1024)),
+                (int)connSdFault(), (int)connGetMode(), connStatusText(),
+                connIp(), (unsigned long)connPendingTotal(), connUploadPercent());
+  Serial.println("[DIAG] ---- end ----");
+}
+
 static void serviceSerialScreendump()
 {
   if (!Serial.available()) return;
@@ -3383,6 +3750,7 @@ static void serviceSerialScreendump()
     if (c == '\n' || c == '\r') {
       cmd[ci] = 0;
       if (ci > 0 && strcmp(cmd, "SCREENDUMP") == 0) doScreenDump();
+      else if (ci > 0 && strcmp(cmd, "DIAG") == 0) doDiagDump();
       ci = 0;
     } else if (ci < sizeof(cmd) - 1) {
       cmd[ci++] = c;
@@ -3400,7 +3768,9 @@ void loop()
 
   // Resume an interrupted take once the net task is up (or ~8 s in if we are
   // offline), so the whole resumed take stays reachable by the remote "stop".
-  if (g_resumePending && currentState == HOME &&
+  // An UNPROVISIONED boot never reaches HOME, but must still run this so a
+  // stale crash-mark is cleared (maybeResumeRecording refuses the resume).
+  if (g_resumePending && (currentState == HOME || !deviceReady()) &&
       (connNetTaskStarted() || (millis() - g_bootMs) > 8000)) {
     g_resumePending = false;
     maybeResumeRecording();
@@ -3414,8 +3784,10 @@ void loop()
   // the capture, where the same button is polled to Stop - see recordWavStreamToSd.)
   if (btnPressed(recBtn)) {
     wakeScreen();              // a button press always wakes the screen
-    if (millis() < g_recSettleUntil) {
+    if ((int32_t)(millis() - g_recSettleUntil) < 0) {
       // Stray tap right after a take just ended - ignore (see g_recSettleUntil).
+      // Wrap-safe compare: a settle window armed just before the ~49.7-day
+      // millis() wrap must not latch the button dead until the next wrap.
     } else if (currentState == HOME && deviceReady()) {
       runRecordSavePlaySession();
     } else if (currentState == SESSIONS || currentState == SYNC ||
@@ -3486,26 +3858,41 @@ void loop()
       if (currentState == HOME) showHomeScreen();
       else if (currentState == ONBOARDING && deviceReady()) showHomeScreen();
     }
-    // Remote record (app/server "record" command). Only from Home, with the
-    // recorder fully set up; the capture blocks ~8 s while it streams to SD,
-    // then connNotifyNewSession() uploads it. liveState lets the app show
-    // "recording" while it happens.
+    // Remote record (app/server "record" command). The capture only runs from
+    // Home, but the UI never returns to Home on its own — so navigate there
+    // from any idle sub-screen first. The request is only CONSUMED once it can
+    // actually run: the server has already dequeued the command and never
+    // re-sends it, so consuming it on the Sessions/Sync/Results screen used to
+    // silently drop the take while the app kept showing "idle".
     if (connRecordReq) {
-      connRecordReq = false;
-      uint32_t secs = connRecordSecs;
-      connRecordSecs = 0;
-      // A timed take caps the capture at exactly secs of PCM; untimed runs to
-      // Stop (or the safety cap) as before.
-      uint32_t cap = PCM_MAX_BYTES;
-      if (secs > 0) {
-        uint64_t want = (uint64_t)secs * PCM_BYTES_PER_SEC;
-        if (want < cap) cap = (uint32_t)want;
+      if (currentState == SESSIONS || currentState == SYNC ||
+          currentState == RESULTS || currentState == CONNECTION ||
+          (currentState == ONBOARDING && deviceReady())) {
+        showHomeScreen();
       }
       if (currentState == HOME && deviceReady()) {
+        connRecordReq = false;
+        uint32_t secs = connRecordSecs;
+        connRecordSecs = 0;
+        // A timed take caps the capture at exactly secs of PCM; untimed runs
+        // to Stop (or the safety cap) as before.
+        uint32_t cap = PCM_MAX_BYTES;
+        if (secs > 0) {
+          uint64_t want = (uint64_t)secs * PCM_BYTES_PER_SEC;
+          if (want < cap) cap = (uint32_t)want;
+        }
         connSetLiveState("recording");
         runRecordSavePlaySession(false /*review*/, cap);
         connSetLiveState("idle");
+      } else if (!deviceReady()) {
+        // Unclaimed unit can't record. Drop the request rather than latch it:
+        // a stale record firing whenever the device is finally claimed would
+        // be a take nobody asked for.
+        connRecordReq = false;
+        connRecordSecs = 0;
+        Serial.println("[REC] remote record dropped - device not set up");
       }
+      // else: leave the request latched; retried on the next loop pass.
     }
 
     // Live upload status: drive the always-visible Home footer / Sessions
@@ -3592,36 +3979,47 @@ void loop()
       if (currentState == SESSIONS) {
         char dir[96];
         patientDirPath(dir, sizeof(dir));
-        // Take the SD bus and WAIT for the net task to actually drop its upload
-        // before touching the numbering. deleteSession() renames every later
-        // session down one slot, so session 6 becomes session 5 while the uploader
-        // still believes it is streaming session 5: its next segment open would
-        // read session 6's audio into session 5's upload and the server would
-        // assemble one WAV out of two different recordings. Setting uiSdBusy is
-        // asynchronous - the net task only reacts on its next pass - so poll until
-        // the upload is really down (connUploadProgress() is false once it is).
+        // A delete never renumbers: only session `arg`'s own files go, every
+        // other session keeps its number, so a live upload of a DIFFERENT
+        // session is untouched. Still take the SD bus and WAIT for the net task
+        // to positively acknowledge it is out of ALL its SD work (not just the
+        // upload): removing the very files an open upFile is streaming corrupts
+        // that transfer, and unlinking an open file is undefined on FAT.
+        // connNetSdIdle() is that acknowledgement - it covers the upload
+        // (including the writeSyncMarker + trim tail) and BLE file transfers,
+        // and is raised by the net task BEFORE it re-reads uiSdBusy, so there
+        // is no check-then-act hole.
         //
-        // The wait MUST cover a chunk POST already in flight: the net task can be
-        // blocked inside sendSessionChunk for up to the final-slice timeout (~60 s)
-        // before it loops back and releases upFile. The old 3 s bound expired mid
-        // POST and renumbered underneath a live upload - the exact two-takes-in-one
-        // -WAV corruption above. Bound the wait to the worst-case chunk instead, and
-        // show why the UI is busy. The common case still exits in well under a
-        // second (upload idle or between chunks); only a stalled chunk waits long,
-        // and waiting is correct - the alternative is a corrupted recording.
+        // The wait must ride out a chunk POST already in flight (final-slice
+        // timeout ~60 s) plus trim's verify round trips. If the net task still
+        // has not yielded at the cap, ABORT the delete instead of unlinking
+        // files it may hold open - the user can simply tap Delete again. The
+        // common case exits in well under a second.
         connSetUiSdBusy(true);
-        uint32_t sent, total;
-        if (connUploadProgress(&sent, &total)) {
+        if (!connNetSdIdle()) {
           showStatus("Deleting", "Finishing current sync first...");
         }
-        uint32_t guard = millis() + 65000;   // > final-chunk timeout (~60 s) + margin
-        while (connUploadProgress(&sent, &total) && (int32_t)(millis() - guard) < 0) {
+        uint32_t guard = millis() + 120000;
+        bool netIdle = true;
+        while (!connNetSdIdle()) {
+          if ((int32_t)(millis() - guard) >= 0) { netIdle = false; break; }
           lv_timer_handler();
           delay(5);
         }
-        deleteSession(dir, (uint32_t)arg);
-        connNotifySessionsRenumbered();  // resume point + strikes now point at
-                                         // the wrong session numbers - drop them
+        if (netIdle) {
+          deleteSessionFiles(dir, (uint32_t)arg);
+          // Drop the uploader's memory of this (patient, number) - resume
+          // point, strikes, and any still-latched in-flight upload - BEFORE
+          // the number can be reallocated to a future take.
+          connNotifySessionDeleted(g_patients[currentPatientIndex].patientId,
+                                   (uint32_t)arg);
+          // Space was just freed: rescan now (still holding the SD bus) so the
+          // "SD card full" record guard and the storage chip clear immediately
+          // instead of after the 30 s cache window.
+          sdRefreshUsage(true);
+        } else {
+          Serial.println("[UI] delete aborted - net task never released the SD bus");
+        }
         connSetUiSdBusy(false);   // uploads resume; the aborted one restarts later
         showSessionsScreen();     // rebuild the list from disk
       }

@@ -34,10 +34,22 @@ void        connLoop();              // the net-task body; runs all HTTP/BLE wor
 void        connStartNetTask();
 bool        connNetTaskStarted();    // true once the net task owns connLoop()
 bool        connNetTaskWanted();     // true when going online -> loop() should start it
+// Never-used bytes at the bottom of the net task's stack (0 = not started).
+// For the serial DIAG dump - a shrinking number warns of a looming overflow.
+uint32_t    connNetStackHighWater();
 // Tell the net task the UI core is mid-recording/saving/playback so it pauses its
 // own SD work (uploads/scans) - the SD bus + FATFS lock are shared, and
 // overlapping them makes a take begin/stop/record drag. HTTP polling continues.
 void        connSetUiSdBusy(bool busy);
+// Positive handshake for connSetUiSdBusy: true once the net task is provably
+// out of its SD work (no SD block in progress, no upload latched - including
+// the writeSyncMarker/trim tail). Set uiSdBusy(true) FIRST, then poll this
+// before deleting session files or re-mounting the card.
+bool        connNetSdIdle();
+// Sticky SD trouble seen by the net task (unreadable patient root, or a
+// .synced marker that would not write). Self-clears when the op succeeds
+// again. Render as "SD card error" - never as "all synced".
+bool        connSdFault();
 ConnMode    connGetMode();
 const char *connSerial();            // "SATE-XXXXXX" (from eFuse MAC)
 const char *connMac();               // "AA:BB:CC:DD:EE:FF" Wi-Fi STA MAC
@@ -51,9 +63,10 @@ bool        connUploadingSession(char *pidOut, size_t pidLen, uint32_t *numOut);
 // Percent (0-100) of the in-flight upload, or -1 when idle.
 int         connUploadPercent();
 void        connNotifyNewSession();  // a recording was just saved
-// Sessions were deleted/renumbered on the SD card. Everything the uploader
-// remembers is keyed by session number, so it is all invalid now.
-void        connNotifySessionsRenumbered();
+// A session was deleted on the SD card. Deletes never renumber (numbers keep
+// their holes and are reused only after a delete), so only the uploader's
+// memory of THIS (patient, number) must be dropped before the number is reused.
+void        connNotifySessionDeleted(const char *patientId, uint32_t num);
 
 // Live status for the on-device Connection screen.
 const char *connStatusText();        // e.g. "Connecting to Wi-Fi \"Clinic\"..."
@@ -90,6 +103,9 @@ extern void sateHookConnChanged();     // mode or pending count changed
 extern void sateHookRecord();          // app/server asked for a remote recording
 extern void sateHookRecordTimed(uint32_t seconds);  // …with an exact duration (fw >=1.5.19)
 extern void sateHookStop();            // app/server asked to stop the current take
+// True while a take is armed/running on the UI core. The net task checks it
+// before OTA (defer the flash) and before an OTA-scheduled reboot.
+extern bool sateHookTakeActive();
 // Service the GUI for one tick. Called from inside long blocking connectivity
 // work (e.g. streaming a big upload) so the screen stays responsive.
 extern void sateHookGuiPump();

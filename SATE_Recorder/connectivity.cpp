@@ -19,6 +19,8 @@
 #include "esp_heap_caps.h"
 #include "esp_wifi.h"
 #include "esp_coexist.h"
+#include "esp_ota_ops.h"
+#include "esp_system.h"   // esp_reset_reason(): boot cause for heartbeat + banner
 
 // ---- protocol constants (mirror src/protocol.ts) ---------------------------
 
@@ -40,6 +42,39 @@ static const uint8_t ADV_FLAG_NEEDS_SYNC    = 0x02;
 static const size_t BLE_CHUNK = 180;
 
 // ---- timing -----------------------------------------------------------------
+
+// millis()-wrap-safe deadline test: true once `now` has reached `deadline`.
+// A plain `now > deadline` inverts for the whole wrap window (~49.7 days of
+// uptime), latching timers permanently expired or permanently pending.
+static inline bool timeAfter(uint32_t now, uint32_t deadline)
+{
+  return (int32_t)(now - deadline) >= 0;
+}
+
+// ---- PSRAM placement ---------------------------------------------------------
+// The 2nd TLS handshake (OTA, fresh poll after a drop) needs ~40 KB CONTIGUOUS
+// internal RAM; while recording the largest block was measured at ~51 KB. Every
+// big buffer here that is NOT DMA/ISR-touched therefore lives in PSRAM: static
+// .bss carved out of internal DRAM is exactly the headroom the handshake loses.
+// (ioChunk stays internal: it is the SD/BLE DMA work buffer.)
+static void *psAlloc(size_t n)
+{
+  void *p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM);
+  return p ? p : malloc(n);   // PSRAM missing/full: fall back, never crash
+}
+
+// ArduinoJson allocator backed by PSRAM so the parse churn of every command
+// poll / roster fetch / upload-metadata read stays off the internal heap it
+// used to fragment between boot and record.
+struct PsramAllocator : ArduinoJson::Allocator {
+  void *allocate(size_t n) override { return psAlloc(n); }
+  void  deallocate(void *p) override { free(p); }
+  void *reallocate(void *p, size_t n) override {
+    void *np = heap_caps_realloc(p, n, MALLOC_CAP_SPIRAM);
+    return np ? np : realloc(p, n);
+  }
+};
+static PsramAllocator s_jsonPsram;
 
 static const uint32_t WIFI_BOOT_TIMEOUT_MS  = 18000;
 static const uint32_t WIFI_PROV_TIMEOUT_MS  = 28000;
@@ -98,6 +133,28 @@ static bool     rebootRequested = false;
 static uint32_t rebootAtMs     = 0;
 static bool     factoryResetRequested = false;  // BLE factory_reset op pending
 static uint32_t factoryResetAtMs      = 0;
+// OTA that arrived while a take was live is DEFERRED (never flash + reboot
+// under a capture): the payload is latched here and re-run from connLoop()
+// once the take ends. Lost on reboot - the dashboard re-queues.
+static bool     otaDeferred     = false;
+static char     otaPendUrl[256] = "";
+static char     otaPendVer[32]  = "";
+// The pending reboot was scheduled by a successful OTA flash: hold it while a
+// take is live (a button-started take can begin mid-download on the UI core).
+// A plain remote `reboot` never sets this - it stays the recovery path for a
+// wedged take.
+static bool     rebootHoldForTake = false;
+
+// --- OTA rollback safety -----------------------------------------------------
+// arduino-esp32's initArduino() commits a freshly-flashed image (marks the OTA
+// slot valid) BEFORE setup() even runs, so a bootable-but-wedged build - hangs
+// in setup(), SD/display init blocks, loop() never reached - would be committed
+// forever, with USB reflash the only field recovery. Returning true keeps the
+// image in ESP_OTA_IMG_PENDING_VERIFY; connLoop() commits it only once this
+// build has provably been servicing the device (see the health check there).
+// Until then, a power cycle makes the bootloader roll back to the previous
+// firmware instead of bricking the unit.
+extern "C" bool verifyRollbackLater() { return true; }
 
 // ---- dual-core ---------------------------------------------------------------
 // connLoop() runs on its own task pinned to the OTHER core (see connStartNetTask)
@@ -107,6 +164,12 @@ static uint32_t factoryResetAtMs      = 0;
 // the GUI core reads the count via connPendingTotal() while the net task rewalks.
 static volatile bool forcePollDue = false;        // connSetLiveState() wants an immediate poll
 static volatile bool uiSdBusy    = false;          // UI core is recording/saving/playing -> pause net SD
+// True while connLoop() is inside a block that touches the SD card (pending
+// scans, upload slices + the writeSyncMarker/trim tail, BLE file ops). Raised
+// BEFORE uiSdBusy is re-read, so the UI core gets a race-free handshake instead
+// of check-then-act: it sets uiSdBusy, then waits for connNetSdIdle() - once
+// observed idle, the net task cannot re-enter SD work until uiSdBusy drops.
+static volatile bool netSdBusy   = false;
 static SemaphoreHandle_t pendMux = nullptr;        // serializes scanPending() across cores
 // The net task is NOT started at boot. During provisioning connLoop() runs on the
 // main loop (core 1), exactly like the old single-core SATE_Up, so the heap has
@@ -161,10 +224,13 @@ static NimBLECharacteristic *chData     = nullptr;
 static bool bleInited       = false;
 static volatile bool bleClientConnected = false;
 
-// Control-write reassembly (BLE task writes, connLoop consumes)
-static uint8_t       ctrlAsm[6144];
+// Control-write reassembly (BLE task writes, connLoop consumes). Buffers live
+// in PSRAM (allocated once in connInit): only ever touched from tasks, never
+// DMA/ISR, and 12 KB of internal .bss here starved the TLS handshakes.
+static const size_t  CTRL_BUF_MAX = 6144;
+static uint8_t      *ctrlAsm = nullptr;
 static size_t        ctrlAsmLen = 0;
-static uint8_t       opBuf[6144];
+static uint8_t      *opBuf = nullptr;
 static volatile size_t opLen   = 0;   // >0 means an op is ready
 static portMUX_TYPE  opMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -174,8 +240,9 @@ struct PendingEntry {
   uint32_t num;
   uint32_t bytes;
 };
-static PendingEntry pendTable[64];
-static int          pendCount = 0;
+static const int     PEND_MAX = 64;
+static PendingEntry *pendTable = nullptr;   // PSRAM (connInit); task-only access
+static int           pendCount = 0;
 
 static uint8_t ioChunk[4096]; // connectivity's own SD/BLE work buffer
 
@@ -191,6 +258,12 @@ static char liveState[16] = "idle";
 static int      telBatteryPct = 255;
 static uint32_t telRecordings = 0;
 static int      telBatteryMv  = -1;   // raw cell mV for admin-side calibration (-1 = unknown)
+
+// Why the last boot happened (esp_reset_reason(), captured once in connInit) -
+// rides every heartbeat as &rst= so a field reboot on a PRODUCTION unit (no
+// serial) is diagnosable from the dashboard: brownout = dying cell, panic =
+// firmware bug, task-wdt = wedge, sw = OTA/remote reboot.
+static int      bootResetReason = -1;
 
 static void setStatus(const char *fmt, ...)
 {
@@ -269,61 +342,102 @@ static void sessionPartFile(char *out, size_t n, const char *pid, uint32_t num, 
   sessionPath(out, n, pid, num, ext);
 }
 
+// Session numbers are allocated monotonically by the UI core and NEVER
+// renumbered: a delete removes only that session's own files, so a patient dir
+// holds an arbitrary subset of 1..SESSION_NUM_MAX (the allocator wraps there;
+// holes are normal). Every session walk below must therefore skip holes instead
+// of stopping at the first empty slot - and must not probe every number with
+// SD_MMC.exists() either, so each dir is listed ONCE into this map.
+static const uint32_t SESSION_NUM_MAX = 99;   // keep in sync with the .ino allocator
+
+struct PatientDirScan {
+  bool     audio[SESSION_NUM_MAX + 1];      // segments or a legacy merged .wav
+  bool     mark[SESSION_NUM_MAX + 1];       // .synced marker present
+  uint32_t wavBytes[SESSION_NUM_MAX + 1];   // legacy merged .wav file size
+  uint32_t partBytes[SESSION_NUM_MAX + 1];  // raw sum of all segment file sizes
+};
+
+static void scanPatientDir(const char *pid, PatientDirScan *ps)
+{
+  memset(ps, 0, sizeof(*ps));
+  char path[64];
+  snprintf(path, sizeof(path), "/sate/patients/%s", pid);
+  File d = SD_MMC.open(path);
+  if (!d) return;
+  File e;
+  while ((e = d.openNextFile())) {
+    const char *nm = e.name();               // basename or full path per core
+    const char *base = strrchr(nm, '/');
+    base = base ? base + 1 : nm;
+    if (!strncmp(base, "session_", 8)) {
+      uint32_t n = (uint32_t)strtoul(base + 8, nullptr, 10);
+      const char *sfx = strchr(base + 8, '.');
+      if (n >= 1 && n <= SESSION_NUM_MAX && sfx) {
+        if (!strcmp(sfx, ".synced")) {
+          ps->mark[n] = true;
+        } else if (!strcmp(sfx, ".wav")) {
+          ps->audio[n] = true;
+          ps->wavBytes[n] = (uint32_t)e.size();
+        } else if (!strncmp(sfx, ".part", 5)) {
+          ps->audio[n] = true;
+          ps->partBytes[n] += (uint32_t)e.size();
+        }
+      }
+    }
+    e.close();
+  }
+  d.close();
+}
+
 // True when the pending set may have changed (new recording, a sync, a roster
 // change) and scanPending() must re-walk the SD card. While false, scanPending
 // returns the cached count instead of walking every patient dir - that walk was
 // running every 15 s heartbeat and was the periodic UI hitch.
 static bool pendDirty = true;
 
+// Sticky "the SD card is misbehaving" flag: set when the pending scan cannot
+// open the patient root, or when a .synced marker cannot be written (read-only
+// / failing card). Cleared as soon as the same operation succeeds again. The UI
+// reads it via connSdFault() so a failed card renders as "SD card error", never
+// as the reassuring "all synced" / pending==0.
+static volatile bool sdFaultFlag = false;
+
 // Scan all patient dirs for WAVs without a .synced marker. Cheap no-op when the
 // cached count is still valid. scanPending() wraps this in pendMux so the GUI
 // core and the net task never tear pendTable/pendCount when both walk at once.
 static int scanPendingLocked()
 {
-  if (!pendDirty) return pendCount;
-  pendCount = 0;
+  if (!pendDirty || !pendTable) return pendCount;
   File root = SD_MMC.open("/sate/patients");
-  if (!root) return 0;
+  if (!root) {
+    // Card unreadable: keep the PREVIOUS count/table and stay dirty so the next
+    // call retries. Zeroing pendCount here made a pulled/failed card report
+    // "all synced" while unsynced patient takes still sat on it.
+    sdFaultFlag = true;
+    return pendCount;
+  }
+  sdFaultFlag = false;
+  pendCount = 0;
   File entry;
-  while ((entry = root.openNextFile()) && pendCount < (int)(sizeof(pendTable) / sizeof(pendTable[0]))) {
+  while ((entry = root.openNextFile()) && pendCount < PEND_MAX) {
     if (!entry.isDirectory()) { entry.close(); continue; }
     const char *full = entry.name(); // basename or full path depending on core
     const char *pid = strrchr(full, '/');
     pid = pid ? pid + 1 : full;
-    char wav[160], part0[200], mark[160], pp[200];
-    for (uint32_t i = 1; i <= 9999; i++) {
-      // A session exists if it has segment files (new), a merged .wav (legacy),
-      // OR a .synced marker (its audio was purged after upload but the slot is
-      // still taken). We must check the marker BEFORE deciding we've hit the end
-      // - otherwise a synced+purged session looks like "no session here" and we
-      // stop early, missing every later session. That bug made Home report
-      // "all synced" while a real later recording sat queued and never uploaded.
-      sessionPath(wav, sizeof(wav), pid, i, "wav");
-      sessionPartFile(part0, sizeof(part0), pid, i, 0);
-      sessionPath(mark, sizeof(mark), pid, i, "synced");
-      bool hasWav   = SD_MMC.exists(wav);
-      bool hasParts = SD_MMC.exists(part0);
-      bool hasMark  = SD_MMC.exists(mark);
-      if (!hasWav && !hasParts && !hasMark) break; // nothing in slot i = end
-      if (hasMark) continue;                       // already on the server
-
-      uint32_t bytes = 0;
-      if (hasWav) {
-        File f = SD_MMC.open(wav, FILE_READ);
-        if (f) { bytes = (uint32_t)f.size(); f.close(); }
-      } else {
-        for (int k = 0;; k++) {
-          sessionPartFile(pp, sizeof(pp), pid, i, k);
-          if (!SD_MMC.exists(pp)) break;
-          File f = SD_MMC.open(pp, FILE_READ);
-          if (f) { bytes += (uint32_t)f.size(); f.close(); }
-        }
-      }
+    // Numbers are not contiguous (a delete leaves a hole), so list the dir once
+    // and walk every possible slot: stopping at the first empty number used to
+    // hide every later session - Home reported "all synced" while a real later
+    // recording sat queued and never uploaded.
+    static PatientDirScan ps;   // ~1 KB; serialized by pendMux (see scanPending)
+    scanPatientDir(pid, &ps);
+    for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++) {
+      if (ps.mark[i]) continue;                   // already on the server
+      if (!ps.audio[i]) continue;                 // empty slot
       PendingEntry &pe = pendTable[pendCount++];
       snprintf(pe.patientId, sizeof(pe.patientId), "%s", pid);
       pe.num = i;
-      pe.bytes = bytes;
-      if (pendCount >= (int)(sizeof(pendTable) / sizeof(pendTable[0]))) break;
+      pe.bytes = ps.wavBytes[i] ? ps.wavBytes[i] : ps.partBytes[i];
+      if (pendCount >= PEND_MAX) break;
     }
     entry.close();
   }
@@ -341,23 +455,37 @@ static int scanPending()
   return r;
 }
 
-static void writeSyncMarker(const char *pid, uint32_t num)
+// Returns true only when the marker is durably on the card. A read-only /
+// failing card makes the open (or the write) fail; callers must NOT treat the
+// session as synced then - the marker is what keeps the sweep from re-uploading
+// it forever, and (with the verify gate) what licenses the audio trim.
+static bool writeSyncMarker(const char *pid, uint32_t num)
 {
   char mark[160];
   sessionPath(mark, sizeof(mark), pid, num, "synced");
   File f = SD_MMC.open(mark, FILE_WRITE);
-  if (f) {
-    f.print("synced");
-    f.close();
+  if (!f) {
+    sdFaultFlag = true;
+    Serial.printf("[CONN] writeSyncMarker: cannot create %s\n", mark);
+    return false;
   }
+  size_t put = f.print("synced");
+  f.close();
+  if (put != 6 || !SD_MMC.exists(mark)) {
+    sdFaultFlag = true;
+    Serial.printf("[CONN] writeSyncMarker: short write on %s\n", mark);
+    return false;
+  }
+  sdFaultFlag = false;
   pendDirty = true; // a session just synced - pending count changed
+  return true;
 }
 
 // --- Reclaim SD: keep only the newest N takes' AUDIO per patient -------------
 // Once a take is .synced, its on-device audio is redundant, so a synced take
 // beyond the newest N can have its audio freed to stop the SD filling. We keep
-// the .synced marker as a TOMBSTONE: the slot stays numbered (contiguous), the
-// pending scan still skips it (see scanPendingLocked), and it can be
+// the .synced marker as a TOMBSTONE: the slot keeps its number (so the
+// allocator cannot reuse it), the pending scan still skips it, and it can be
 // re-downloaded/played from the server. UNSYNCED takes are NEVER touched - the
 // device is still their only copy. Full deletion stays user-only
 // (deleteSessionFiles in the .ino, reached only from the Delete button).
@@ -416,14 +544,6 @@ static uint32_t sessionAssembledBytes(const char *pid, uint32_t n)
 // non-2xx, a parse failure, or stored:false all return false -> keep the audio.
 static bool verifySessionStored(const char *pid, uint32_t n, uint32_t bytes);
 
-static bool sessionOccupiedLocal(const char *pid, uint32_t n)
-{
-  char p[200];
-  sessionPath(p, sizeof(p), pid, n, "synced");       // tombstone counts as occupied
-  if (SD_MMC.exists(p)) return true;
-  return sessionHasAudioLocal(pid, n);
-}
-
 // Free a session's AUDIO (every segment part + legacy wav + json) but KEEP its
 // .synced marker so the slot stays numbered and the pending scan is unchanged.
 static void freeSessionAudioKeepMarker(const char *pid, uint32_t n)
@@ -440,19 +560,22 @@ static void freeSessionAudioKeepMarker(const char *pid, uint32_t n)
 }
 
 // After a session in `pid` syncs, free the audio of any SYNCED session older than
-// the newest KEEP_AUDIO_SESSIONS in that patient dir. Numbering is contiguous
-// (tombstones keep it so), so the highest occupied slot is the newest take.
+// the newest KEEP_AUDIO_SESSIONS in that patient dir. Allocation is monotonic
+// (a delete leaves its hole; a number is only reused once its old take is fully
+// gone), so among occupied slots a HIGHER number is a newer take: keep the
+// KEEP_AUDIO_SESSIONS highest occupied slots and consider the rest.
 static void trimPatientSyncedAudio(const char *pid)
 {
-  uint32_t maxN = 0;
-  for (uint32_t i = 1; i <= 9999; i++) {
-    if (!sessionOccupiedLocal(pid, i)) break;         // first empty slot = end
-    maxN = i;
-  }
-  if (maxN <= KEEP_AUDIO_SESSIONS) return;            // nothing beyond the newest N
-  const uint32_t keepFrom = maxN - KEEP_AUDIO_SESSIONS + 1;
+  PatientDirScan ps;
+  scanPatientDir(pid, &ps);
+  uint8_t  occ[SESSION_NUM_MAX];
+  uint32_t cnt = 0;
+  for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++)
+    if (ps.mark[i] || ps.audio[i]) occ[cnt++] = (uint8_t)i;  // tombstone = occupied
+  if (cnt <= KEEP_AUDIO_SESSIONS) return;             // nothing beyond the newest N
   char mark[200];
-  for (uint32_t n = 1; n < keepFrom; n++) {
+  for (uint32_t j = 0; j < cnt - KEEP_AUDIO_SESSIONS; j++) {
+    uint32_t n = occ[j];
     sessionPath(mark, sizeof(mark), pid, n, "synced");
     if (!SD_MMC.exists(mark)) continue;               // not synced -> only copy, keep
     if (!sessionHasAudioLocal(pid, n)) continue;      // already freed
@@ -481,12 +604,11 @@ static void strikeClearAll();
 // Re-upload everything the card still holds: drop the .synced marker of every
 // session that STILL HAS AUDIO, so the sweep picks it up again.
 //
-// Only sessions with audio. A session whose audio an older firmware purged after
-// upload is left alone: its .synced marker is the ONLY thing keeping its slot
-// occupied, and scanPendingLocked() stops at the first slot with no wav, no
-// parts and no marker. Clearing those markers would punch a hole in the
-// numbering and hide every session after it - the exact failure the comment in
-// scanPendingLocked() warns about.
+// Only sessions with audio. A session whose audio was reclaimed after upload is
+// left alone: its .synced marker is a TOMBSTONE that keeps its number occupied,
+// so the allocator cannot hand that number to a new take while the server still
+// stores the old recording under it - and with no audio on the card there is
+// nothing to resend anyway.
 //
 // Re-uploading a session the server already has is safe: /sessions/chunk answers
 // the final slice from the existing row (after confirming its object is really
@@ -505,16 +627,14 @@ static int resyncAll()
     snprintf(pid, sizeof(pid), "%s", p ? p + 1 : full); // copy: name() dies with entry
     entry.close();
 
-    char wav[160], part0[200], mark[160];
-    for (uint32_t i = 1; i <= 9999; i++) {
-      sessionPath(wav, sizeof(wav), pid, i, "wav");
-      sessionPartFile(part0, sizeof(part0), pid, i, 0);
-      sessionPath(mark, sizeof(mark), pid, i, "synced");
-      bool hasWav   = SD_MMC.exists(wav);
-      bool hasParts = SD_MMC.exists(part0);
-      bool hasMark  = SD_MMC.exists(mark);
-      if (!hasWav && !hasParts && !hasMark) break;   // end of this patient
-      if (hasMark && (hasWav || hasParts)) {         // audio still here - resend it
+    // Holes are normal (deletes never renumber) - walk the whole number space
+    // from one directory listing instead of stopping at the first empty slot.
+    PatientDirScan ps;
+    scanPatientDir(pid, &ps);
+    char mark[160];
+    for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++) {
+      if (ps.mark[i] && ps.audio[i]) {               // audio still here - resend it
+        sessionPath(mark, sizeof(mark), pid, i, "synced");
         SD_MMC.remove(mark);
         cleared++;
       }
@@ -561,16 +681,16 @@ class CtrlCB : public NimBLECharacteristicCallbacks {
   void onWrite(NimBLECharacteristic *c, NimBLEConnInfo &) override
   {
     NimBLEAttValue v = c->getValue();
-    if (v.size() < 1) return;
+    if (v.size() < 1 || !ctrlAsm || !opBuf) return;
     uint8_t flag = v.data()[0];
     size_t payload = v.size() - 1;
-    if (ctrlAsmLen + payload <= sizeof(ctrlAsm)) {
+    if (ctrlAsmLen + payload <= CTRL_BUF_MAX) {
       memcpy(ctrlAsm + ctrlAsmLen, v.data() + 1, payload);
       ctrlAsmLen += payload;
     }
     if (flag == FRAME_FINAL) {
       portENTER_CRITICAL(&opMux);
-      if (opLen == 0 && ctrlAsmLen < sizeof(opBuf)) {
+      if (opLen == 0 && ctrlAsmLen < CTRL_BUF_MAX) {
         memcpy(opBuf, ctrlAsm, ctrlAsmLen);
         opBuf[ctrlAsmLen] = '\0';
         opLen = ctrlAsmLen;
@@ -662,9 +782,13 @@ static void bleUpdateAdvertising()
 }
 
 // Send one logical message as [flag][...] packets on a notify characteristic.
-static void notifyFramed(NimBLECharacteristic *ch, const uint8_t *buf, size_t len)
+// Returns false if any packet could not be notified (client gone / TX queue
+// stuck past the retry budget): the message is then INCOMPLETE on the wire and
+// the caller must not act as if it was delivered - dropping a packet silently
+// used to let a truncated session WAV look fully sent to the app.
+static bool notifyFramed(NimBLECharacteristic *ch, const uint8_t *buf, size_t len)
 {
-  if (!ch || !bleClientConnected) return;
+  if (!ch || !bleClientConnected) return false;
   uint8_t pkt[1 + BLE_CHUNK];
   size_t off = 0;
   do {
@@ -673,10 +797,17 @@ static void notifyFramed(NimBLECharacteristic *ch, const uint8_t *buf, size_t le
     pkt[0] = (off + take >= len) ? FRAME_FINAL : FRAME_PARTIAL;
     memcpy(pkt + 1, buf + off, take);
     ch->setValue(pkt, 1 + take);
-    for (int tries = 0; tries < 50 && !ch->notify(); tries++) delay(5);
+    bool sent = false;
+    for (int tries = 0; tries < 50 && !sent; tries++) {
+      if (!bleClientConnected) return false;
+      sent = ch->notify();
+      if (!sent) delay(5);
+    }
+    if (!sent) return false;   // 250 ms of refusals: give up loudly, not silently
     off += take;
     delay(2); // pacing: keep the NimBLE TX queue happy
   } while (off < len);
+  return true;
 }
 
 static void statusNotify(const char *json)
@@ -710,11 +841,35 @@ static WiFiClient s_httpClient;
 static WiFiClientSecure s_httpsClient;   // for Supabase (HTTPS)
 static HTTPClient s_http;
 
+// Body sink for httpJson(): HTTPClient de-chunks straight into the caller's
+// buffer, replacing the per-poll String allocation that churned/fragmented the
+// internal heap (a poll runs every ~12 s, forever). Overflow past the buffer is
+// swallowed (claimed as written) so keep-alive framing stays in sync.
+class BufSink : public Stream {
+public:
+  char  *buf;
+  size_t cap, len = 0;
+  BufSink(char *b, size_t c) : buf(b), cap(c) {}
+  size_t write(const uint8_t *d, size_t n) override {
+    size_t room = (cap > len + 1) ? cap - 1 - len : 0;
+    size_t take = (n < room) ? n : room;
+    if (take) { memcpy(buf + len, d, take); len += take; }
+    return n;                       // always "accepted" - excess is dropped
+  }
+  size_t write(uint8_t b) override { return write(&b, 1); }
+  int    available() override { return 0; }
+  int    read() override { return -1; }
+  int    peek() override { return -1; }
+  void   flush() override {}
+};
+
 static bool httpJson(const char *method, const char *path, const char *body,
                      char *resp, size_t respSize, int *codeOut)
 {
   if (WiFi.status() != WL_CONNECTED) return false;
-  char url[192];
+  // 96 (cfgServer) + up to 320 of path/query (heartbeat now carries rst/up/
+  // heapmin telemetry) - the old 192 was one long device id from truncating.
+  char url[448];
   snprintf(url, sizeof(url), "%s%s", cfgServer, path);
 
   s_http.setReuse(true);          // keep the socket open between calls
@@ -744,13 +899,12 @@ static bool httpJson(const char *method, const char *path, const char *body,
   bool ok = code >= 200 && code < 300;
   if (ok && resp && respSize) {
     // Supabase/Cloudflare returns the body with Transfer-Encoding: chunked (no
-    // Content-Length). getString() de-chunks correctly; a raw stream read would
-    // leave hex chunk-size markers in the buffer and break JSON parsing.
-    String s = s_http.getString();
-    size_t n = s.length();
-    if (n > respSize - 1) n = respSize - 1;
-    memcpy(resp, s.c_str(), n);
-    resp[n] = '\0';
+    // Content-Length). writeToStream() de-chunks correctly (a raw stream read
+    // would leave hex chunk-size markers in the buffer and break JSON parsing)
+    // and lands straight in `resp` - no String heap churn per poll.
+    BufSink sink(resp, respSize);
+    s_http.writeToStream(&sink);
+    resp[sink.len] = '\0';
   }
   s_http.end(); // with reuse(true) this returns the socket to the pool, not close
   return ok;
@@ -771,7 +925,7 @@ static bool verifySessionStored(const char *pid, uint32_t n, uint32_t bytes)
   char resp[128];
   int code = 0;
   if (!httpJson("GET", path, nullptr, resp, sizeof(resp), &code)) return false;
-  JsonDocument doc;
+  JsonDocument doc(&s_jsonPsram);
   if (deserializeJson(doc, resp) != DeserializationError::Ok) return false; // parse fail -> keep
   return doc["stored"].as<bool>() == true;
 }
@@ -795,7 +949,7 @@ static int sendSessionChunk(const char *host, int port, const char *metaQuery,
   // coexistence intermittently stalls for SECONDS even on fast Wi-Fi - that was the
   // "uploading takes minutes". The pooled socket skips the handshake, so a chunk
   // POST is as quick as a poll. The GUI runs on core 1, so no pumping is needed here.
-  char url[640];
+  char url[768];   // must hold hostport + full upMetaQuery + offset/final/total
   bool tls = serverIsSupabase();
   bool defaultPort = (tls && port == 443) || (!tls && port == 80);
   char hostport[110];
@@ -851,7 +1005,7 @@ static bool     upActive = false;
 static bool     upHasFile = false;
 static File     upFile;            // current source file, open across passes
 static int      upRetries = 0, upPort = 80;
-static char     upHost[80], upMetaQuery[512], upPid[24];
+static char     upHost[80], upMetaQuery[576], upPid[24];
 static uint32_t upNum = 0, upStartMs = 0;
 static bool     upLegacy = false;  // single .wav vs segment files
 static int      upSrcIdx = 0, upLastSrc = 0;
@@ -894,6 +1048,43 @@ static bool upResumeMatches(const char *pid, uint32_t num)
   return upResumeOffset > 0 && upResumeNum == num && !strcmp(upResumePid, pid);
 }
 
+// Clear the resume point only when it belongs to THIS session. The slot is
+// global (one stalled session at a time), so an unconditional clear on another
+// session's completion/failure wiped a large stalled take's progress and made
+// the server truncate it back to byte 0 on the next attempt.
+static void upResumeClearIf(const char *pid, uint32_t num)
+{
+  if (upResumeNum == num && !strcmp(upResumePid, pid)) upResumeClear();
+}
+
+// Tear down the in-flight upload without failing the session: close the source
+// file, save the resume point (the sweep continues at the server's offset once
+// conditions allow) and drop the UI overlay. Used whenever the uploader must
+// stop for a reason that is not the session's fault - the UI took the SD bus,
+// Wi-Fi dropped, or the mode left CONN_WIFI_ONLINE (wifi_change). MUST run on
+// the task that owns upFile (the net task); the UI core only requests it via
+// uiSdBusy / upDropReq.
+static void uploadAbortInFlight()
+{
+  if (upHasFile) { upFile.close(); upHasFile = false; }
+  if (!upActive) return;
+  upActive = false;
+  upResumeSave(upPid, upNum, upServerOffset);
+  sateHookUploadEnd();
+}
+
+// ---- deferred abort of an in-flight upload ------------------------------------
+// The UI deleted a session. If the uploader is mid-stream on that exact session
+// it must abandon it - the deleted number can be reallocated to a future take,
+// and a still-latched upload would then splice the NEW take's segments into the
+// server blob of the OLD one. But upFile belongs to the net task (it may be
+// blocked inside a chunk POST when the UI's bounded wait expires), so the UI
+// only REQUESTS the drop; uploadStep() honours it at the top of its next pass,
+// before touching any file.
+static bool     upDropReq = false;
+static char     upDropPid[24] = "";
+static uint32_t upDropNum = 0;
+
 // ---- per-session strikes -----------------------------------------------------
 // The sweep used to always take pendTable[0]. One session that could not upload
 // (missing/zero-length source, or a server that keeps failing it) blocked every
@@ -908,8 +1099,9 @@ struct UploadStrike {
   int      strikes;
   uint32_t retryAt;
 };
-static UploadStrike upStrikes[32];
-static int          upStrikeCount = 0;
+static const int     UP_STRIKE_MAX = 32;
+static UploadStrike *upStrikes = nullptr;   // PSRAM (connInit); net-task only
+static int           upStrikeCount = 0;
 static const int      UPLOAD_MAX_STRIKES   = 3;
 static const uint32_t UPLOAD_PARK_RETRY_MS = 300000; // 5 min
 
@@ -923,9 +1115,10 @@ static UploadStrike *strikeFind(const char *pid, uint32_t num)
 // Count one failure against a session. Returns true once it is parked.
 static bool strikeAdd(const char *pid, uint32_t num)
 {
+  if (!upStrikes) return false;
   UploadStrike *s = strikeFind(pid, num);
   if (!s) {
-    if (upStrikeCount >= (int)(sizeof(upStrikes) / sizeof(upStrikes[0]))) {
+    if (upStrikeCount >= UP_STRIKE_MAX) {
       // Table full: drop the oldest entry rather than stop tracking new failures.
       memmove(&upStrikes[0], &upStrikes[1], sizeof(upStrikes[0]) * (upStrikeCount - 1));
       upStrikeCount--;
@@ -955,6 +1148,19 @@ static void strikeClear(const char *pid, uint32_t num)
 // user pressed sync) so a backlog parked by an old outage retries immediately.
 static void strikeClearAll() { upStrikeCount = 0; }
 
+// Park a session IMMEDIATELY (skip the 3-strike ramp). Used when retrying right
+// away cannot help - e.g. the card refused the .synced marker write, so every
+// retry would re-upload the whole session and fail the marker again.
+static void strikePark(const char *pid, uint32_t num)
+{
+  strikeAdd(pid, num);                    // ensures the entry exists
+  UploadStrike *s = strikeFind(pid, num);
+  if (s) {
+    s->strikes = UPLOAD_MAX_STRIKES;
+    s->retryAt = millis() + UPLOAD_PARK_RETRY_MS;
+  }
+}
+
 // A session is skippable only while parked AND inside its retry cooldown.
 static bool strikeParked(const char *pid, uint32_t num, uint32_t now)
 {
@@ -972,15 +1178,20 @@ static bool beginUpload(const PendingEntry &pe)
   if (WiFi.status() != WL_CONNECTED) return false;
 
   uint32_t sessionNumber = pe.num, sampleRate = 16000;
+  long     peakAbs = -1;     // capture's peak |sample|; -1 = older JSON, omit
   char flagsCsv[300] = "";   // "12000,45000,..." flag offsets (ms) for the query
   char jsonPath[160];
   sessionPath(jsonPath, sizeof(jsonPath), pe.patientId, pe.num, "json");
   File jf = SD_MMC.open(jsonPath, FILE_READ);
   if (jf) {
-    JsonDocument meta;
+    JsonDocument meta(&s_jsonPsram);
     if (deserializeJson(meta, jf) == DeserializationError::Ok) {
-      sessionNumber = meta["session_number"] | pe.num;
+      // pe.num IS the session's identity: writeSyncMarker/verifySessionStored
+      // key off the local slot, so the upload must too. Never prefer the JSON's
+      // session_number - a card renumbered by an older firmware can hold a
+      // stale value there, and uploading under it desyncs marker/verify/server.
       sampleRate    = meta["sample_rate"] | 16000;
+      peakAbs       = meta["peak_abs"] | -1L;   // dead-mic telltale for the server
       // FLAG-button marks, forwarded so the web report can show them. Capped to
       // what fits the query buffer; extras are dropped rather than overflow.
       JsonArrayConst fa = meta["flags_ms"].as<JsonArrayConst>();
@@ -1056,11 +1267,17 @@ static bool beginUpload(const PendingEntry &pe)
     while (pl > 0 && prefix[pl - 1] == '/') prefix[--pl] = '\0'; // trim trailing /
   }
 
+  // peak_abs rides along when the JSON carries it (fw with dead-mic detection):
+  // a near-zero peak on a full-length take lets the dashboard flag a faulty mic
+  // before the on-device audio is trimmed. Unknown params are ignored server-side.
+  char peakParam[24] = "";
+  if (peakAbs >= 0)
+    snprintf(peakParam, sizeof(peakParam), "&peak=%ld", peakAbs);
   snprintf(upMetaQuery, sizeof(upMetaQuery),
            "%s/api/sessions/chunk?device_serial=%s&patient_id=%s"
-           "&session_number=%lu&sample_rate=%lu%s%s",
+           "&session_number=%lu&sample_rate=%lu%s%s%s",
            prefix, serialStr, pe.patientId,
-           (unsigned long)sessionNumber, (unsigned long)sampleRate,
+           (unsigned long)sessionNumber, (unsigned long)sampleRate, peakParam,
            flagsCsv[0] ? "&flags=" : "", flagsCsv);
   snprintf(upPid, sizeof(upPid), "%s", pe.patientId);
   upNum = pe.num;
@@ -1123,6 +1340,29 @@ static void uploadStep()
 {
   if (!upActive) return;
 
+  // A delete on the UI core targeted the session we are streaming: its files
+  // are gone (or going), so abandon the transfer before touching any of them.
+  if (upDropReq) {
+    upDropReq = false;
+    if (upNum == upDropNum && !strcmp(upPid, upDropPid)) {
+      if (upHasFile) { upFile.close(); upHasFile = false; }
+      upActive = false;
+      upFinalAcked = false;
+      // Also drop a resume point for the deleted session: the uiSdBusy abort
+      // path can have saved one AFTER connNotifySessionDeleted() cleared it,
+      // and a stale offset must never be applied to a take that reuses the
+      // number - starting that upload from 0 makes the server truncate its
+      // stale temp blob instead of splicing onto it.
+      if (upResumeNum == upDropNum && !strcmp(upResumePid, upDropPid))
+        upResumeClear();
+      sateHookUploadEnd();
+      setStatus("Online (Wi-Fi) - %s", ipText);
+      Serial.printf("[CONN] upload dropped - %s session %lu was deleted\n",
+                    upPid, (unsigned long)upNum);
+      return;
+    }
+  }
+
   // Open the current source segment if needed.
   if (!upHasFile) {
     char path[200];
@@ -1134,7 +1374,7 @@ static void uploadStep()
       // pending sessions instead of retrying this one forever.
       upActive = false;
       strikeAdd(upPid, upNum);
-      upResumeClear();
+      upResumeClearIf(upPid, upNum);
       sateHookUploadEnd();
       setStatus("Online (Wi-Fi) - %s", ipText);
       Serial.printf("[CONN] upload: cannot open %s\n", path);
@@ -1166,7 +1406,7 @@ static void uploadStep()
       if (code == 409) {
         if (upHasFile) { upFile.close(); upHasFile = false; }
         upActive = false;
-        upResumeClear();
+        upResumeClearIf(upPid, upNum);
         // Strike it too: a restart-from-0 should succeed, so a session that keeps
         // 409ing is broken and must not spin here while others wait.
         strikeAdd(upPid, upNum);
@@ -1218,7 +1458,21 @@ static void uploadStep()
                       upPid, (unsigned long)upNum);
         return;
       }
-      writeSyncMarker(upPid, upNum);
+      if (!writeSyncMarker(upPid, upNum)) {
+        // The server HAS the audio but the card refused the marker (read-only /
+        // dying card). Without a marker the sweep would re-upload this session
+        // forever and starve everything queued behind it: park it hard so the
+        // rest of the backlog drains, do NOT strikeClear, and do NOT trim -
+        // connSdFault() now reports the card so the UI shows "SD card error".
+        // A later successful marker write (or resync) clears the fault.
+        upActive = false;
+        strikePark(upPid, upNum);
+        sateHookUploadEnd();
+        setStatus("SD card not writable - check the card");
+        Serial.printf("[CONN] %s session %lu uploaded but the sync marker FAILED - parked (SD not writable)\n",
+                      upPid, (unsigned long)upNum);
+        return;
+      }
       // Reclaim SD: this take is now durably on the server, so free the audio of
       // SYNCED takes older than the newest KEEP_AUDIO_SESSIONS (the marker stays as
       // a tombstone; unsynced takes are never touched). The just-synced take is the
@@ -1226,14 +1480,13 @@ static void uploadStep()
       //
       // upActive MUST stay true across writeSyncMarker + trimPatientSyncedAudio -
       // both mutate this patient's dir on the card, and the UI's delete guard waits
-      // on connUploadProgress() (= upActive). If we cleared it before the trim (as
-      // this used to), a delete tapped during trim's verify network call would see
-      // "idle", renumber the dir, and slide a DIFFERENT unsynced take into a slot
-      // trim then frees BY NUMBER - deleting an unconfirmed take (permanent loss).
-      // Keep the flag up until the whole SD-reclaim tail is done.
+      // on connNetSdIdle() (netSdBusy || upActive). If we cleared it before the
+      // trim (as this used to), a delete tapped during trim's verify network call
+      // could race trim's own walk of this patient dir. Keep the flag up until the
+      // whole SD-reclaim tail is done.
       trimPatientSyncedAudio(upPid);
       strikeClear(upPid, upNum);
-      upResumeClear();
+      upResumeClearIf(upPid, upNum);
       upActive = false;
       sateHookUploadEnd();
       Serial.printf("[CONN] uploaded %s session %lu (%u bytes) in %lu ms\n",
@@ -1248,9 +1501,12 @@ static void uploadStep()
 
 static void fetchPatients()
 {
-  // static: keeps 2 KB off the shared loop-task stack (connLoop is single-threaded).
-  static char resp[2048];
-  if (!httpJson("GET", "/api/patients", nullptr, resp, sizeof(resp), nullptr)) return;
+  // PSRAM + static pointer: off the shared loop-task stack (connLoop is
+  // single-threaded) AND off the internal heap the TLS handshake needs.
+  static char *resp = (char *)psAlloc(2048);
+  const size_t RESP_MAX = 2048;
+  if (!resp) return;
+  if (!httpJson("GET", "/api/patients", nullptr, resp, RESP_MAX, nullptr)) return;
   File f = SD_MMC.open("/sate/patients.json", FILE_WRITE);
   if (f) {
     f.print(resp);
@@ -1315,48 +1571,128 @@ static void enterWifiOnline()
 // BLE op handling (runs in connLoop)
 // =============================================================================
 
+// 44-byte canonical WAV header for the assembled stream (16 kHz mono S16LE -
+// the only format the capture writes). Matches the .ino's writeWavHeader().
+static void buildWavHeader(uint8_t *h, uint32_t pcmBytes)
+{
+  const uint32_t sampleRate = 16000, byteRate = 32000, fmtSize = 16;
+  const uint16_t audioFormat = 1, channels = 1, blockAlign = 2, bits = 16;
+  uint32_t riffSize = 36 + pcmBytes;
+  memcpy(h + 0,  "RIFF", 4); memcpy(h + 4,  &riffSize, 4);
+  memcpy(h + 8,  "WAVE", 4); memcpy(h + 12, "fmt ", 4);
+  memcpy(h + 16, &fmtSize, 4);    memcpy(h + 20, &audioFormat, 2);
+  memcpy(h + 22, &channels, 2);   memcpy(h + 24, &sampleRate, 4);
+  memcpy(h + 28, &byteRate, 4);   memcpy(h + 32, &blockAlign, 2);
+  memcpy(h + 34, &bits, 2);       memcpy(h + 36, "data", 4);
+  memcpy(h + 40, &pcmBytes, 4);
+}
+
 static void sendSessionOverBle(int tableIdx)
 {
   const PendingEntry &pe = pendTable[tableIdx];
-  char wavPath[160], jsonPath[160];
+  char wavPath[160], jsonPath[160], pp[200];
   sessionPath(wavPath, sizeof(wavPath), pe.patientId, pe.num, "wav");
   sessionPath(jsonPath, sizeof(jsonPath), pe.patientId, pe.num, "json");
 
-  File wf = SD_MMC.open(wavPath, FILE_READ);
-  if (!wf) {
+  // This firmware stores a take as 1-minute part files and NEVER merges them,
+  // so the bridge must assemble the WAV the way the uploader does: one header
+  // for the whole take, then every part's PCM. Opening only the merged
+  // session_NNNN.wav (a legacy-firmware artifact) made every BLE session pull
+  // fail "session not found" - the offline backup path was dead.
+  // Legacy merged .wav wins when present - same precedence as beginUpload()
+  // and sessionAssembledBytes(), so `total` and the stream always agree.
+  bool segmented = false;
+  uint32_t total = 0;
+  if (SD_MMC.exists(wavPath)) {
+    File wf = SD_MMC.open(wavPath, FILE_READ);
+    if (wf) { total = (uint32_t)wf.size(); wf.close(); }
+  } else {
+    sessionPartFile(pp, sizeof(pp), pe.patientId, pe.num, 0);
+    segmented = SD_MMC.exists(pp);
+    if (segmented) total = sessionAssembledBytes(pe.patientId, pe.num);
+  }
+  if (total == 0) {
     statusErr("send_session", "session not found");
     return;
   }
-  size_t total = wf.size();
 
-  // meta = raw contents of the metadata json (or a minimal fallback)
-  char meta[1024] = "{}";
+  // meta = raw contents of the metadata json (or a minimal fallback).
+  // Static PSRAM pointers: connLoop is single-threaded, so this keeps ~2.2 KB
+  // off both the loop-task stack and the internal heap/.bss.
+  const size_t META_MAX = 1024, HEAD_MAX = 1200;
+  static char *meta = (char *)psAlloc(META_MAX);
+  static char *head = (char *)psAlloc(HEAD_MAX);
+  if (!meta || !head) { statusErr("send_session", "no memory"); return; }
+  meta[0] = '{'; meta[1] = '}'; meta[2] = '\0';
   File jf = SD_MMC.open(jsonPath, FILE_READ);
   if (jf) {
-    size_t m = jf.read((uint8_t *)meta, sizeof(meta) - 1);
+    size_t m = jf.read((uint8_t *)meta, META_MAX - 1);
     meta[m] = '\0';
     jf.close();
   }
 
   setStatus("Sending session to app (Bluetooth)...");
-  char head[1200];
   int n = tableIdx + 1;
-  snprintf(head, sizeof(head), "{\"ev\":\"file\",\"n\":%d,\"bytes\":%lu,\"meta\":%s}",
+  snprintf(head, HEAD_MAX, "{\"ev\":\"file\",\"n\":%d,\"bytes\":%lu,\"meta\":%s}",
            n, (unsigned long)total, meta);
   statusNotify(head);
 
-  // Stream the WAV: each 4 KB block is one framed message on CHAR_DATA;
-  // the app concatenates the blocks and rebuilds the file.
-  while (wf.available() && bleClientConnected) {
-    size_t got = wf.read(ioChunk, sizeof(ioChunk));
-    if (!got) break;
-    notifyFramed(chData, ioChunk, got);
+  // Stream the WAV: each 4 KB block is one framed message on CHAR_DATA; the
+  // app concatenates the blocks and rebuilds the file. `sent` counts every
+  // byte actually notified so a dropped packet / lost link can never end in a
+  // file_done claim over a truncated WAV.
+  uint32_t sent = 0;
+  bool txOk = true;
+  if (segmented) {
+    // One assembled header (sized for ALL the PCM), then each part's PCM with
+    // its own per-part header skipped - byte count matches
+    // sessionAssembledBytes(): part0 contributes header+PCM, later parts PCM.
+    uint8_t hdr[44];
+    buildWavHeader(hdr, total > 44 ? total - 44 : 0);
+    txOk = notifyFramed(chData, hdr, sizeof(hdr));
+    if (txOk) sent += sizeof(hdr);
+    for (int k = 0; txOk && bleClientConnected; k++) {
+      sessionPartFile(pp, sizeof(pp), pe.patientId, pe.num, k);
+      if (!SD_MMC.exists(pp)) break;
+      File f = SD_MMC.open(pp, FILE_READ);
+      if (!f) { txOk = false; break; }
+      if (f.size() > 44) {
+        f.seek(44);
+        while (f.available() && bleClientConnected) {
+          size_t got = f.read(ioChunk, sizeof(ioChunk));
+          if (!got) break;
+          if (!notifyFramed(chData, ioChunk, got)) { txOk = false; break; }
+          sent += got;
+        }
+      }
+      f.close();
+    }
+  } else {
+    File wf = SD_MMC.open(wavPath, FILE_READ);
+    if (!wf) {
+      statusErr("send_session", "session not found");
+      return;
+    }
+    while (wf.available() && bleClientConnected) {
+      size_t got = wf.read(ioChunk, sizeof(ioChunk));
+      if (!got) break;
+      if (!notifyFramed(chData, ioChunk, got)) { txOk = false; break; }
+      sent += got;
+    }
+    wf.close();
   }
-  wf.close();
 
-  char done[48];
-  snprintf(done, sizeof(done), "{\"ev\":\"file_done\",\"n\":%d}", n);
-  statusNotify(done);
+  // file_done is a completion CLAIM: only make it when every advertised byte
+  // was notified, so the app never files a partial transfer as the take.
+  if (txOk && bleClientConnected && sent == total) {
+    char done[48];
+    snprintf(done, sizeof(done), "{\"ev\":\"file_done\",\"n\":%d}", n);
+    statusNotify(done);
+  } else {
+    Serial.printf("[CONN] send_session aborted at %lu/%lu bytes\n",
+                  (unsigned long)sent, (unsigned long)total);
+    statusErr("send_session", "transfer interrupted");
+  }
   setStatus("App connected (Bluetooth)");
 }
 
@@ -1419,14 +1755,14 @@ static void handleProvisionTick()
     // Re-issue begin() periodically: under BLE coexistence the first (or second)
     // association attempt is often swallowed even with a correct password, so keep
     // retrying across the whole window instead of giving up after one re-begin.
-    if (millis() > provRetryAt) {
+    if (timeAfter(millis(), provRetryAt)) {
       provRetryAt = millis() + WIFI_PROV_RETRY_MS;
       Serial.println("[CONN] Wi-Fi stalled - retrying begin()");
       WiFi.setSleep(false);          // no modem sleep: don't miss beacons mid-handshake
       WiFi.disconnect(false);
       WiFi.begin(provSsid, provPass);
     }
-    if (millis() > provDeadline) {
+    if (timeAfter(millis(), provDeadline)) {
       char j[176];
       const char *hint = lastWifiReason == 0
           ? "no response from router - is it 2.4 GHz?"
@@ -1451,7 +1787,7 @@ static void handleProvisionTick()
     // single-core SATE_Up: plenty of contiguous RAM for the TLS handshake while BLE
     // stays connected. No BLE teardown needed - the app gets "registered" over its
     // live link. A couple of retries cover a transient coexistence hiccup.
-    if (millis() < regNextTry) return;   // brief backoff between attempts
+    if (!timeAfter(millis(), regNextTry)) return;   // brief backoff between attempts
 
     char body[256];
     snprintf(body, sizeof(body), "{\"serial\":\"%s\",\"claim_token\":\"%s\",\"fw\":\"%s\"}",
@@ -1482,13 +1818,24 @@ static void handleProvisionTick()
       if (code >= 200 && code < 300) {
         JsonDocument doc;
         if (deserializeJson(doc, http.getString()) == DeserializationError::Ok) {
-          snprintf(cfgSsid, sizeof(cfgSsid), "%s", provSsid);
-          snprintf(cfgPass, sizeof(cfgPass), "%s", provPass);
-          snprintf(cfgServer, sizeof(cfgServer), "%s", provServer);
-          snprintf(cfgDeviceId, sizeof(cfgDeviceId), "%s", (const char *)(doc["device_id"] | ""));
-          snprintf(cfgDeviceKey, sizeof(cfgDeviceKey), "%s", (const char *)(doc["device_key"] | ""));
-          saveConfig();
-          ok = true;
+          // A parseable 2xx is NOT success on its own: an error envelope or a
+          // gateway-rewritten body can parse fine and carry no credentials.
+          // Persisting an empty id/key would report "registered" while every
+          // later call hits /api/devices//... unauthenticated, and the next
+          // boot would silently drop back to setup with the day's takes unsynced.
+          const char *did  = doc["device_id"]  | "";
+          const char *dkey = doc["device_key"] | "";
+          if (did[0] && dkey[0]) {
+            snprintf(cfgSsid, sizeof(cfgSsid), "%s", provSsid);
+            snprintf(cfgPass, sizeof(cfgPass), "%s", provPass);
+            snprintf(cfgServer, sizeof(cfgServer), "%s", provServer);
+            snprintf(cfgDeviceId, sizeof(cfgDeviceId), "%s", did);
+            snprintf(cfgDeviceKey, sizeof(cfgDeviceKey), "%s", dkey);
+            saveConfig();
+            ok = true;
+          } else {
+            Serial.printf("[CONN] register 2xx but no device_id/key in body - treating as failure\n");
+          }
         }
       }
       http.end();
@@ -1528,7 +1875,7 @@ static void handleProvisionTick()
 
 static void handleBleOp(const char *json)
 {
-  JsonDocument doc;
+  JsonDocument doc(&s_jsonPsram);
   if (deserializeJson(doc, json) != DeserializationError::Ok) return;
   const char *op = doc["op"] | "";
 
@@ -1657,13 +2004,30 @@ static void handleBleOp(const char *json)
     else statusErr("send_session", "unknown session");
 
   } else if (!strcmp(op, "mark_synced")) {
+    // Resolve the session by IDENTITY (patient_id + session number), never by a
+    // bare table position: the app may send an index from a list that a
+    // device-side delete has since invalidated, and a marker written on the
+    // wrong slot silently drops a real recording from the pending set forever.
+    // Newer apps can pass patient_id/session explicitly; the legacy `n` is
+    // still accepted but is re-validated against the card before marking.
+    const char *xpid = doc["patient_id"] | "";
+    uint32_t    xnum = doc["session"] | 0;
     int n = doc["n"] | 0;
-    if (n >= 1 && n <= pendCount) {
-      writeSyncMarker(pendTable[n - 1].patientId, pendTable[n - 1].num);
+    if (!(xpid[0] && xnum) && n >= 1 && n <= pendCount) {
+      xpid = pendTable[n - 1].patientId;
+      xnum = pendTable[n - 1].num;
+    }
+    if (!(xpid[0] && xnum)) {
+      statusErr("mark_synced", "unknown session");
+    } else if (!sessionHasAudioLocal(xpid, xnum)) {
+      // Stale entry: the session was deleted (or already trimmed) after the app
+      // listed it. Marking now would tombstone an empty/reused slot.
+      statusErr("mark_synced", "session gone");
+    } else if (writeSyncMarker(xpid, xnum)) {
       statusOk("mark_synced");
       sateHookConnChanged();
     } else {
-      statusErr("mark_synced", "unknown session");
+      statusErr("mark_synced", "SD write failed");
     }
 
   } else if (!strcmp(op, "set_patients")) {
@@ -1732,16 +2096,35 @@ static void runRemoteCommand(const char *op)
 // (own buffers, so it is safe to call mid-poll). Body ignored.
 static void pushHeartbeatState()
 {
-  char path[280];
+  char path[320];
   static char tmp[256];
-  snprintf(path, sizeof(path), "/api/devices/%s/commands?pending=%d&state=%s&fw=%s&ota=%s&bat=%d&recs=%lu&mv=%d",
+  snprintf(path, sizeof(path), "/api/devices/%s/commands?pending=%d&state=%s&fw=%s&ota=%s&bat=%d&recs=%lu&mv=%d&rst=%d&up=%lu&heapmin=%u",
            cfgDeviceId, pendCount, liveState, fwVersion, otaPhase,
-           telBatteryPct, (unsigned long)telRecordings, telBatteryMv);
+           telBatteryPct, (unsigned long)telRecordings, telBatteryMv,
+           bootResetReason, (unsigned long)(millis() / 1000),
+           (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
   httpJson("GET", path, nullptr, tmp, sizeof(tmp), nullptr);
 }
 
+// Adapts the global updater to a Stream so HTTPClient::writeToStream() can
+// de-chunk a no-Content-Length firmware download straight into flash (the raw
+// socket carries the chunk framing, which must never reach the OTA slot).
+class UpdateSink : public Stream {
+public:
+  size_t write(const uint8_t *buf, size_t size) override {
+    return Update.write(const_cast<uint8_t *>(buf), size);
+  }
+  size_t write(uint8_t b) override { return Update.write(&b, 1); }
+  int    available() override { return 0; }
+  int    read() override { return -1; }
+  int    peek() override { return -1; }
+  void   flush() override {}
+};
+
 // then reboot into it. Blocking; runs on the connLoop task during a command
-// poll. ESP32 keeps the old slot, so a bad image that fails to boot rolls back.
+// poll. The old slot is kept and the new image boots PENDING_VERIFY: it is
+// committed only after it proves healthy (see verifyRollbackLater above), so a
+// bad OR wedged image rolls back on the next power cycle.
 // `version` is informational: if it equals the running build we skip the flash.
 static void runOtaUpdate(const char *url, const char *version)
 {
@@ -1752,11 +2135,33 @@ static void runOtaUpdate(const char *url, const char *version)
     statusOk("ota");
     return;
   }
+  if (sateHookTakeActive()) {
+    // A take is armed/running on the UI core. Flashing stalls both cores'
+    // cache and the success path reboots - either cuts a live patient
+    // recording. Defer: latch the payload and re-run from connLoop() the
+    // moment the take ends. Nothing is lost server-side even though the
+    // command was already dequeued.
+    snprintf(otaPendUrl, sizeof(otaPendUrl), "%s", url);
+    snprintf(otaPendVer, sizeof(otaPendVer), "%s", version ? version : "");
+    otaDeferred = true;
+    Serial.println("[OTA] deferred - take in progress");
+    snprintf(otaPhase, sizeof(otaPhase), "deferred-rec");
+    pushHeartbeatState();
+    return;
+  }
   Serial.printf("[OTA] start ver=%s url=%s\n", version ? version : "?", url);
   // Report progress/failure reasons via ota phase so the dashboard/DB shows them
   // even when no serial is attached. "dl" = entered, downloading.
   snprintf(otaPhase, sizeof(otaPhase), "dl");
   pushHeartbeatState();
+
+  // err-get-1 root cause: the warm poller keeps s_httpsClient's mbedTLS arena
+  // (~40 KB of internal RAM) resident between polls, and the OTA handshake
+  // below needs a SECOND contiguous ~40 KB a busy heap doesn't have. Close the
+  // pooled socket and free the poller's TLS context first - the next poll
+  // (after the OTA reboot, or after a failed attempt) simply re-handshakes.
+  s_http.end();
+  s_httpsClient.stop();
 
   // Dedicated clients for the OTA download. The poller keeps s_httpsClient in a
   // keep-alive session to the functions host; reusing it for the storage host
@@ -1798,8 +2203,8 @@ static void runOtaUpdate(const char *url, const char *version)
   if (code != HTTP_CODE_OK) {
     statusErr("ota", "http error");
     Serial.printf("[OTA] GET -> %d\n", code);
+    http.end();   // free otaTls's arena BEFORE the heartbeat re-handshakes
     snprintf(otaPhase, sizeof(otaPhase), "err-get%d", code); pushHeartbeatState();
-    http.end();
     return;
   }
 
@@ -1819,13 +2224,26 @@ static void runOtaUpdate(const char *url, const char *version)
   snprintf(otaPhase, sizeof(otaPhase), "updating");
   pushHeartbeatState();
 
-  WiFiClient *stream = http.getStreamPtr();
-  size_t written = Update.writeStream(*stream);
+  size_t written;
+  if (len > 0) {
+    WiFiClient *stream = http.getStreamPtr();
+    written = Update.writeStream(*stream);
+  } else {
+    // No Content-Length (Supabase/Cloudflare serve chunked): writeStream()
+    // would loop on the FULL partition size, stall ~30 s, then abort - OTA
+    // could never succeed - and the raw socket still carries the chunk
+    // framing. Let HTTPClient de-chunk the body straight into the updater;
+    // it returns when the server finishes the stream.
+    UpdateSink sink;
+    int wrote = http.writeToStream(&sink);
+    written = (wrote > 0) ? (size_t)wrote : 0;
+  }
   http.end();
 
-  // With a known length, the write must match it; with unknown length, just
-  // require some bytes. A mismatch is usually a dropped TLS stream.
-  bool shortWrite = (len > 0) ? (written != (size_t)len) : (written == 0);
+  // With a known length, the write must match it; with unknown length, require
+  // some bytes and a clean updater. A mismatch is usually a dropped TLS stream.
+  bool shortWrite = (len > 0) ? (written != (size_t)len)
+                              : (written == 0 || Update.hasError());
   if (shortWrite) {
     statusErr("ota", "short write");
     Serial.printf("[OTA] wrote %u/%d\n", (unsigned)written, len);
@@ -1843,6 +2261,8 @@ static void runOtaUpdate(const char *url, const char *version)
   Serial.println("[OTA] success, rebooting into new image");
   statusOk("ota");
   rebootRequested = true;
+  rebootHoldForTake = true;             // a take that began mid-download must
+                                        // finish before the reboot cuts it
   rebootAtMs = millis() + 600;          // let the ack flush, then boot new image
 }
 
@@ -1850,18 +2270,23 @@ static void runOtaUpdate(const char *url, const char *version)
 // access, so it is cheap enough to run every few seconds for snappy control.
 static void pollCommands()
 {
-  // static resp: keeps 1 KB off the loop-task stack (single-threaded connLoop).
-  char path[280];
-  static char resp[1024];
+  // PSRAM resp: off the loop-task stack (single-threaded connLoop) and off the
+  // internal heap.
+  char path[320];
+  const size_t RESP_MAX = 1024;
+  static char *resp = (char *)psAlloc(RESP_MAX);
+  if (!resp) return;
   // Report fw + ota phase every heartbeat so the dashboard learns the running
   // version (and shows update progress) without a separate endpoint. bat/recs
   // are device telemetry for the admin dashboard (battery %, lifetime count);
   // mv is the raw cell mV for admin-side battery calibration.
-  snprintf(path, sizeof(path), "/api/devices/%s/commands?pending=%d&state=%s&fw=%s&ota=%s&bat=%d&recs=%lu&mv=%d",
+  snprintf(path, sizeof(path), "/api/devices/%s/commands?pending=%d&state=%s&fw=%s&ota=%s&bat=%d&recs=%lu&mv=%d&rst=%d&up=%lu&heapmin=%u",
            cfgDeviceId, pendCount, liveState, fwVersion, otaPhase,
-           telBatteryPct, (unsigned long)telRecordings, telBatteryMv);
-  if (!httpJson("GET", path, nullptr, resp, sizeof(resp), nullptr)) return;
-  JsonDocument doc;
+           telBatteryPct, (unsigned long)telRecordings, telBatteryMv,
+           bootResetReason, (unsigned long)(millis() / 1000),
+           (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+  if (!httpJson("GET", path, nullptr, resp, RESP_MAX, nullptr)) return;
+  JsonDocument doc(&s_jsonPsram);
   if (deserializeJson(doc, resp) != DeserializationError::Ok) return;
   // The ONLY path back to first-time setup: the SLP removed this recorder from
   // their account on the server, so the device row is gone and the heartbeat
@@ -1909,6 +2334,14 @@ static void pollCommands()
 void connInit(const char *fw)
 {
   snprintf(fwVersion, sizeof(fwVersion), "%s", fw);
+  bootResetReason = (int)esp_reset_reason();
+  // Big task-only buffers live in PSRAM (see psAlloc): these four plus the
+  // lazily-allocated ones at their use sites free ~26 KB of internal DRAM for
+  // the TLS handshakes. None are DMA- or ISR-touched.
+  if (!ctrlAsm)   ctrlAsm   = (uint8_t *)psAlloc(CTRL_BUF_MAX);
+  if (!opBuf)     opBuf     = (uint8_t *)psAlloc(CTRL_BUF_MAX);
+  if (!pendTable) pendTable = (PendingEntry *)psAlloc(sizeof(PendingEntry) * PEND_MAX);
+  if (!upStrikes) upStrikes = (UploadStrike *)psAlloc(sizeof(UploadStrike) * UP_STRIKE_MAX);
   if (!pendMux) pendMux = xSemaphoreCreateMutex();
   WiFi.onEvent(onWifiStaDisconnected, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
   WiFi.mode(WIFI_STA); // also powers up the radio so the MAC is readable
@@ -1924,32 +2357,66 @@ void connLoop()
 {
   uint32_t now = millis();
 
-  if (rebootRequested && now > rebootAtMs) {
-    Serial.println("[CONN] rebooting");
-    delay(100);
-    ESP.restart();
+  // Commit a freshly-flashed OTA image only after it has PROVEN itself: this
+  // point means setup() completed, loop() runs and connLoop() is being
+  // serviced - none of the "bootable but wedged" failure modes. Until it
+  // fires, a power cycle rolls back to the previous firmware (the bootloader
+  // marks a PENDING_VERIFY slot aborted). See verifyRollbackLater() above.
+  static bool otaHealthChecked = false;
+  if (!otaHealthChecked && (int32_t)(now - 30000) >= 0) {
+    otaHealthChecked = true;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t st;
+    if (running && esp_ota_get_state_partition(running, &st) == ESP_OK &&
+        st == ESP_OTA_IMG_PENDING_VERIFY) {
+      esp_ota_mark_app_valid_cancel_rollback();
+      Serial.println("[OTA] new image confirmed healthy - rollback cancelled");
+    }
   }
 
-  if (factoryResetRequested && now > factoryResetAtMs) {
+  if (rebootRequested && timeAfter(now, rebootAtMs)) {
+    if (rebootHoldForTake && sateHookTakeActive()) {
+      // The reboot came from an OTA flash and a take started mid-download:
+      // never cut a live capture. Checked every pass - fires once it ends.
+      // (A remote `reboot` command doesn't set the hold: it stays available
+      // as the recovery path for a wedged take.)
+    } else {
+      Serial.println("[CONN] rebooting");
+      delay(100);
+      ESP.restart();
+    }
+  }
+
+  // An OTA deferred mid-take runs the moment the take is over (still online).
+  if (otaDeferred && !sateHookTakeActive() && mode == CONN_WIFI_ONLINE) {
+    otaDeferred = false;
+    runOtaUpdate(otaPendUrl, otaPendVer);
+  }
+
+  if (factoryResetRequested && timeAfter(now, factoryResetAtMs)) {
     connFactoryReset();   // wipes Wi-Fi + account, reboots to first-time setup
   }
 
   // BLE op ready?
-  if (opLen > 0) {
-    static char job[6144];
+  if (opLen > 0 && opBuf) {
+    // PSRAM: task-only scratch; 6 KB of internal .bss was TLS-handshake headroom.
+    static char *job = (char *)psAlloc(CTRL_BUF_MAX);
+    if (!job) { opLen = 0; return; }
     portENTER_CRITICAL(&opMux);
     size_t len = opLen;
     memcpy(job, opBuf, len);
     job[len] = '\0';
     opLen = 0;
     portEXIT_CRITICAL(&opMux);
+    netSdBusy = true;    // BLE ops read/write the card (list/send/mark/set)
     handleBleOp(job);
+    netSdBusy = false;
   }
 
   // Async Wi-Fi scan result collection (started by the scan_wifi op).
   if (scanInProgress) {
     int found = WiFi.scanComplete();
-    bool deadlineHit = now >= scanDeadline;
+    bool deadlineHit = timeAfter(now, scanDeadline);
     if (found == WIFI_SCAN_RUNNING && !deadlineHit) {
       // still scanning; check again next pass
     } else if (found < 1 && !scanRetried) {
@@ -2000,7 +2467,7 @@ void connLoop()
         // the CONN_BLE branch switches to Wi-Fi after it disconnects
         if (bleClientConnected) mode = CONN_BLE_CONNECTED;
         else enterWifiOnline();
-      } else if (now > wifiDeadline) {
+      } else if (timeAfter(now, wifiDeadline)) {
         Serial.println("[CONN] Wi-Fi unavailable -> BLE mode");
         WiFi.disconnect(true);
         enterBleMode();
@@ -2010,6 +2477,10 @@ void connLoop()
     case CONN_WIFI_ONLINE:
       if (WiFi.status() != WL_CONNECTED) {
         Serial.println("[CONN] Wi-Fi lost -> BLE mode");
+        // Never leave the uploader latched across the mode change: a stuck
+        // upActive/upFile froze the full-screen upload overlay for the whole
+        // outage and made every later delete wait out its full guard.
+        uploadAbortInFlight();
         enterBleMode();
         break;
       }
@@ -2017,7 +2488,7 @@ void connLoop()
         forcePollDue = false;
         pollCommands();
       }
-      if (now > nextCmdPoll) {
+      if (timeAfter(now, nextCmdPoll)) {
         nextCmdPoll = now + CMD_POLL_PERIOD_MS;
         pollCommands();          // picks up app commands within ~12 s (runs on the
                                  // net task now, so it no longer freezes the GUI)
@@ -2028,8 +2499,13 @@ void connLoop()
       // drag. HTTP polling above has no SD, so it keeps running - only SD work waits
       // (a few hundred ms, until the take ends), then uploads resume. This restores
       // the old "record, THEN sync" timing without losing dual-core responsiveness.
+      // Raise netSdBusy BEFORE re-reading uiSdBusy so the UI core's handshake
+      // (set uiSdBusy -> wait for connNetSdIdle()) has no check-then-act hole:
+      // if the UI observes netSdBusy false after setting its flag, this task is
+      // guaranteed to see uiSdBusy on its next arrival here and stay out.
+      netSdBusy = true;
       if (!uiSdBusy) {
-        if (now > nextHeartbeat) {
+        if (timeAfter(now, nextHeartbeat)) {
           nextHeartbeat = now + HEARTBEAT_PERIOD_MS;
           scanPending();           // slow: refresh the cached pending count
           // Never sit idle with work pending. The sweep is otherwise only armed by
@@ -2068,23 +2544,24 @@ void connLoop()
         }
       }
       else if (upActive) {
-        // UI core just took the SD bus (record / save / playback). Abort any
-        // in-flight upload HERE, on the net task, so the source file handle is
-        // closed before the UI's 1.5.1 auto-trim deletes/renames sessions.
-        // Otherwise FATFS returns FR_LOCKED on the open file and the "Saving..."
-        // screen hangs. The sweep re-begins this session from the server's known
-        // offset once the UI releases the bus (same path as an upload stall).
-        if (upHasFile) { upFile.close(); upHasFile = false; }
-        upActive = false;
-        // Not a failure - the UI just needs the card. Keep the resume point (so we
-        // continue where we left off) and do NOT strike the session.
-        upResumeSave(upPid, upNum, upServerOffset);
-        sateHookUploadEnd();
+        // UI core just took the SD bus (record / save / playback / delete).
+        // Abort any in-flight upload HERE, on the net task, so the source file
+        // handle is closed before the UI touches session files. Otherwise FATFS
+        // returns FR_LOCKED on the open file and the "Saving..." screen hangs.
+        // Not a failure - the resume point is kept, so the sweep re-begins this
+        // session at the server's offset once the UI releases the bus.
+        uploadAbortInFlight();
       }
+      netSdBusy = false;
       break;
 
     case CONN_BLE_ADV:
     case CONN_BLE_CONNECTED:
+      // The mode can leave CONN_WIFI_ONLINE without net-task teardown (e.g.
+      // connEnterWifiChange() runs on the UI core). A latched upload would
+      // freeze the overlay and stall every later delete - tear it down here,
+      // on the task that owns upFile.
+      if (upActive || upHasFile) uploadAbortInFlight();
       mode = bleClientConnected ? CONN_BLE_CONNECTED : CONN_BLE_ADV;
       if (!bleClientConnected) {
         // Change-Wi-Fi was entered (BOOT-hold / wifi_change) but no app ever
@@ -2105,14 +2582,16 @@ void connLoop()
         }
         // In Change-Wi-Fi mode we deliberately stay on BLE (no auto-reconnect to
         // the OLD network) so the app has a window to push the new credentials.
-        if (!wifiChangeMode && provisioned && now > nextWifiRetry) {
+        if (!wifiChangeMode && provisioned && timeAfter(now, nextWifiRetry)) {
           nextWifiRetry = now + WIFI_RETRY_PERIOD_MS;
           enterWifiTrying(); // BLE keeps advertising during the attempt
           break;
         }
-        if (now > nextAdvRefresh) {
+        if (timeAfter(now, nextAdvRefresh)) {
           nextAdvRefresh = now + ADV_REFRESH_PERIOD_MS;
+          netSdBusy = true;
           scanPending();
+          netSdBusy = false;
           bleUpdateAdvertising();
         }
       }
@@ -2226,18 +2705,44 @@ void connSetUiSdBusy(bool busy)
   uiSdBusy = busy;
 }
 
-// A delete renumbers every later session (session 6 becomes session 5). The
-// uploader's resume point and strike table are both keyed by session number, so
-// after a renumber they silently refer to DIFFERENT audio - a resume would stream
-// the wrong recording into a half-finished upload. Throw both away; the sweep just
-// starts the affected session again from the beginning.
-// Safe to call from the UI core: callers hold the SD bus (connSetUiSdBusy(true)),
-// which keeps the net task out of the upload/sweep block entirely.
-void connNotifySessionsRenumbered()
+// Positive acknowledgement that the net task is OUT of its SD work: not inside
+// an SD block (netSdBusy) and with no upload latched (upActive covers the whole
+// tail through writeSyncMarker + trim). The UI core must set uiSdBusy FIRST and
+// then poll this until true before deleting/re-mounting - a bare
+// connUploadProgress() check was check-then-act and raced the sweep.
+bool connNetSdIdle()
+{
+  return !netSdBusy && !upActive;
+}
+
+// Sticky SD trouble seen by the net task (pending scan could not read the card,
+// or a .synced marker could not be written). Self-clears when the same op
+// succeeds again. The UI renders this as "SD card error" instead of the
+// misleading "all synced" / stale pending count.
+bool connSdFault()
+{
+  return sdFaultFlag;
+}
+
+// A session was deleted on-device. Deletes NEVER renumber: every other session
+// keeps its number, so only the uploader's memory of THIS (patient, number)
+// must go - the number can be handed to a future take once its files are gone,
+// and a stale resume offset, strike, or still-latched in-flight upload would
+// then poison that new take (wrong-offset resume, or two takes spliced into one
+// server WAV). Safe to call from the UI core: callers hold the SD bus
+// (connSetUiSdBusy(true)), which keeps the net task out of the upload/sweep
+// block, and the in-flight upload itself is only FLAGGED here - the net task
+// closes upFile on its own next uploadStep() pass (see upDropReq).
+void connNotifySessionDeleted(const char *patientId, uint32_t num)
 {
   pendDirty = true;
-  upResumeClear();
-  strikeClearAll();
+  if (upResumeNum == num && !strcmp(upResumePid, patientId)) upResumeClear();
+  strikeClear(patientId, num);
+  if (upActive && upNum == num && !strcmp(upPid, patientId)) {
+    snprintf(upDropPid, sizeof(upDropPid), "%s", patientId);
+    upDropNum = num;
+    upDropReq = true;
+  }
 }
 
 void connNotifyNewSession()
@@ -2264,6 +2769,8 @@ static void netTaskFn(void *)
   }
 }
 
+static TaskHandle_t s_netTaskHandle = nullptr;
+
 void connStartNetTask()
 {
   if (g_netStarted) return;            // once only
@@ -2271,7 +2778,14 @@ void connStartNetTask()
   // 16 KB stack: a Supabase TLS handshake (mbedTLS) is stack-heavy; the big I/O
   // buffers are static, so this headroom is for the handshake + JSON parse.
   // Core 0 (PRO_CPU) alongside the Wi-Fi/BT stacks; the Arduino loop is on core 1.
-  xTaskCreatePinnedToCore(netTaskFn, "sateNet", 16384, nullptr, 1, nullptr, 0);
+  xTaskCreatePinnedToCore(netTaskFn, "sateNet", 16384, nullptr, 1, &s_netTaskHandle, 0);
+}
+
+// Never-used bytes at the bottom of the net task's stack (ESP-IDF stacks are
+// byte-granular). 0 = task not started. For the serial DIAG dump.
+uint32_t connNetStackHighWater()
+{
+  return s_netTaskHandle ? (uint32_t)uxTaskGetStackHighWaterMark(s_netTaskHandle) : 0;
 }
 
 // True once the net task owns connLoop(); until then the main loop drives it.

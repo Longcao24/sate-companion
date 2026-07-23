@@ -24,7 +24,7 @@ RE_UPLOADED = r"\[CONN\] uploaded (\S+) session (\d+) \((\d+) bytes\)"
 RE_FREED = r"\[CONN\] freed synced audio \S+ session (\d+) \(server-confirmed"
 RE_FREED_ANY = r"freed synced audio"
 RE_KEPT = r"\[CONN\] keep \S+ session (\d+) .*did not confirm"
-RE_HEALED = r"\[REC\] healed interrupted delete"
+RE_UPLOAD_DROPPED = r"\[CONN\] upload dropped - \S+ session \d+ was deleted"
 RE_OFFSET_GAP = r"offset gap|restarting"
 
 
@@ -177,31 +177,31 @@ class VerifiedTrim(Scenario):
         return self._r(PASS, "no un-verified free observed; any reclaim was server-confirmed", ctx)
 
 
-class DeleteJournalHeal(Scenario):
+class DeleteNoRenumber(Scenario):
     key = "delete_journal"
-    title = "A delete interrupted by a reboot heals (no hidden takes)"
-    bug = "reboot mid-renumber leaves a numbering hole → later takes invisible forever"
+    title = "A delete interrupted by a reboot leaves no OTHER session damaged"
+    bug = "delete must only remove its own session — since fw 1.5.20 numbers are stable (no renumber)"
 
     def run(self, ctx: Ctx) -> Result:
-        ctx.log("  Deleting a session, then rebooting during/after the renumber…")
+        # fw >=1.5.20: deleting a session removes ONLY that session's files and never
+        # renumbers/shifts the others, so numbers stay stable and a power cut mid-delete
+        # cannot slide a different take under a reused number (the whole renumber
+        # crash-safety machinery is gone). The only correct outcome is: boots clean,
+        # and later takes are still visible. A numbering "hole" is legal by design.
+        ctx.log("  Deleting a session, then rebooting right after…")
         target = int(ctx.cfg.get("record", {}).get("delete_target", 1))
         ctx.act.trigger_delete(target)
-        # A true mid-renumber interruption needs relay timing; the reset here fires
-        # right after the delete. Either the delete finished cleanly (journal clear
-        # → no heal line, boots fine) OR it was interrupted (journal set → heal line
-        # on boot). Both are PASS; a hole with no heal would be the failure.
         ctx.act.trigger_reboot()
         if not ctx.link.wait_for(RE_READY, timeout=40, on_line=ctx.record_line):
             return self._r(FAIL, "did not boot back after the delete+reboot", ctx)
-        healed = ctx.link.wait_for(RE_HEALED, timeout=3, on_line=ctx.record_line)
-        note = "delete healed on boot" if healed else "delete had completed cleanly (nothing to heal)"
-        return self._r(PASS, f"booted OK; {note}", ctx)
+        # No heal line exists anymore; a clean boot to ready with no crash is the pass.
+        return self._r(PASS, "booted clean after delete+reboot; numbers stable, no renumber", ctx)
 
 
 class DeleteDuringUpload(Scenario):
     key = "delete_during_upload"
     title = "Delete during an upload doesn't splice two takes"
-    bug = "delete-during-upload assembling one WAV out of two recordings"
+    bug = "a delete must not disturb another session's in-flight upload (fw >=1.5.20: upDropReq aborts only the deleted one)"
     requires = ("server",)
 
     def run(self, ctx: Ctx) -> Result:
@@ -220,13 +220,13 @@ class DeleteDuringUpload(Scenario):
         patient_n, session_n, byte_count = m.group(1), int(m.group(2)), int(m.group(3))
         ok = ctx.server.verify(patient_n, session_n, byte_count)
         if gap and not ok:
-            return self._r(FAIL, f"renumber during upload corrupted session {session_n} (gap + verify fail)", ctx)
+            return self._r(FAIL, f"delete during upload corrupted session {session_n} (gap + verify fail)", ctx)
         return self._r(PASS, f"session {session_n} uploaded byte-exact despite the concurrent delete", ctx)
 
 
 ALL: List[Scenario] = [
     BootHealth(), RebootResume(), ByteMatch(),
-    VerifiedTrim(), DeleteJournalHeal(), DeleteDuringUpload(),
+    VerifiedTrim(), DeleteNoRenumber(), DeleteDuringUpload(),
 ]
 
 

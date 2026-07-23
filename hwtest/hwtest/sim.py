@@ -28,7 +28,6 @@ class SimBackend(Actions, BaseServer):
         self._session = 0
         self._next_session = 1
         self._stored: dict[tuple[str, int], int] = {}
-        self._pending_heal = False
         rec = cfg.get("record", {})
         self._take_bytes = int(rec.get("take_s", 6)) * 32000 + 44
         self._patient = rec.get("patient_id", "Unassigned")
@@ -65,13 +64,9 @@ class SimBackend(Actions, BaseServer):
                 f"[REC] resume session {self._session} from part 0 (32000 bytes already on card)",
                 delay=tail,
             )
-        if self._pending_heal:
-            self._pending_heal = False
-            self.link.push("[REC] healed interrupted delete in /sate/patients/PT (scanned 5)", delay=tail)
+        # fw >=1.5.20: no renumber, no heal line — a delete leaves a legal hole.
 
     def trigger_delete(self, session_number: int) -> None:
-        # Simulate an interrupted renumber that heals on the next boot…
-        self._pending_heal = True
         # …and a concurrent in-flight take finishing byte-exact (no offset gap), so
         # the delete_during_upload scenario has an upload to verify against.
         n, b = self._next_session, self._take_bytes
