@@ -37,6 +37,14 @@ LOGBG = "#0f1420"
 LOGINK = "#d7dde7"
 
 
+# Public client config (same trust level as the app's JS bundle / firmware) — pre-filled
+# so you don't type them. The account claim token still comes from you (or the Supabase MCP).
+DEFAULT_SERVER = "https://zlgdpivcbmaodgokkdvz.supabase.co/functions/v1/device-api"
+DEFAULT_ANON = ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+                "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpsZ2RwaXZjYm1hb2Rnb2trZHZ6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDk3NTY5NTgsImV4cCI6MjA2NTMzMjk1OH0."
+                "x58hiBi5EeRwbedrsrBzRkw7y2tFBw5ztIdmujZoPMQ")
+
+
 def _mix(a, b, t):
     a = a.lstrip("#"); b = b.lstrip("#")
     return "#" + "".join(f"{round(int(a[i:i+2],16)*(1-t)+int(b[i:i+2],16)*t):02x}" for i in (0, 2, 4))
@@ -87,6 +95,13 @@ class Debugger:
         self.mirror_file = Path(__file__).resolve().parent / ".mirror.ppm"
         self._mtime = 0.0
         self._mirror_fails = 0
+        self.claim_token = ""
+        # pre-fill the public server URL + anon key so you don't type them
+        srv = self.cfg.setdefault("server", {})
+        if not srv.get("base_url"):
+            srv["base_url"] = DEFAULT_SERVER
+        if not srv.get("anon_key"):
+            srv["anon_key"] = DEFAULT_ANON
         self._build()
         self.root.after(80, self._poll)
         self._log("SATE Debugger ready. Plug in the recorder (debug build) and hit Diagnose.", "head")
@@ -472,27 +487,88 @@ class _ProvisionDialog(tk.Toplevel):
         self.configure(bg=CARD)
         self.on_submit = on_submit
         self.resizable(False, False)
+        self._q = queue.Queue()
+
+        top = tk.Frame(self, bg=CARD)
+        top.grid(row=0, column=0, columnspan=2, sticky="ew", padx=12, pady=(12, 4))
+        Btn(top, "Scan networks (BLE)", self._scan, primary=True).pack(side="left")
+        self._status = tk.Label(top, text="the recorder scans Wi-Fi and lists them — you just pick + type the password",
+                                bg=CARD, fg=INK2, font=("Menlo", 9), wraplength=280, justify="left")
+        self._status.pack(side="left", padx=8)
+
+        self.netbox = tk.Listbox(self, height=5, width=42, font=("Menlo", 11), relief="flat",
+                                 highlightthickness=1, highlightbackground=HAIR, activestyle="none",
+                                 selectbackground=_mix(CARD, ACCENT, 0.18))
+        self.netbox.grid(row=1, column=0, columnspan=2, padx=12, pady=4, sticky="ew")
+        self.netbox.bind("<<ListboxSelect>>", self._pick)
+
         rows = [("Wi-Fi SSID", "ssid", ""), ("Wi-Fi password", "pw", ""),
-                ("device-api URL (register only)", "server", server_prefill),
-                ("claim token (register only)", "token", "")]
+                ("device-api URL", "server", server_prefill or DEFAULT_SERVER),
+                ("claim token (register)", "token", "")]
         self.vars = {}
-        for i, (label, key, default) in enumerate(rows):
+        for i, (label, key, default) in enumerate(rows, start=2):
             tk.Label(self, text=label, bg=CARD, fg=INK2, font=("Menlo", 10)).grid(
-                row=i, column=0, sticky="w", padx=12, pady=(10 if i == 0 else 4, 2))
+                row=i, column=0, sticky="w", padx=12, pady=3)
             v = tk.StringVar(value=default)
             self.vars[key] = v
-            show = "•" if key == "pw" else ""
-            tk.Entry(self, textvariable=v, width=34, show=show, font=("Menlo", 11),
-                     relief="flat", highlightthickness=1, highlightbackground=HAIR).grid(
-                row=i, column=1, padx=12, pady=(10 if i == 0 else 4, 2))
+            tk.Entry(self, textvariable=v, width=34, show="•" if key == "pw" else "",
+                     font=("Menlo", 11), relief="flat", highlightthickness=1,
+                     highlightbackground=HAIR).grid(row=i, column=1, padx=12, pady=3)
         br = tk.Frame(self, bg=CARD)
-        br.grid(row=len(rows), column=0, columnspan=2, pady=12)
+        br.grid(row=len(rows) + 2, column=0, columnspan=2, pady=12)
         Btn(br, "Provision", self._go, primary=True).pack(side="left", padx=6)
         Btn(br, "Cancel", self.destroy).pack(side="left", padx=6)
+        self.after(120, self._poll)
+
+    def _scan(self):
+        self._status.config(text="scanning over BLE… (~20s)")
+        self.netbox.delete(0, "end")
+
+        def work():
+            try:
+                import asyncio
+                from hwtest.recorder_ble import RecorderBle
+                async def go():
+                    addr = await RecorderBle.find("SATE-", timeout=10)
+                    if not addr:
+                        return None
+                    async with RecorderBle(addr) as r:
+                        return await r.scan_wifi(timeout=25)
+                self._q.put(asyncio.run(go()))
+            except Exception as e:  # noqa: BLE001
+                self._q.put(e)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _poll(self):
+        try:
+            while True:
+                item = self._q.get_nowait()
+                if isinstance(item, Exception):
+                    self._status.config(text=f"scan failed: {item}")
+                elif item is None:
+                    self._status.config(text="no recorder in BLE/setup mode")
+                else:
+                    ssids = sorted({n.get("ssid", "") for n in item if n.get("ssid")})
+                    for s in ssids:
+                        self.netbox.insert("end", s)
+                    self._status.config(text=f"{len(ssids)} network(s) — click one, then type the password")
+        except queue.Empty:
+            pass
+        try:
+            self.after(150, self._poll)
+        except tk.TclError:
+            pass
+
+    def _pick(self, _e):
+        sel = self.netbox.curselection()
+        if sel:
+            self.vars["ssid"].set(self.netbox.get(sel[0]))
 
     def _go(self):
         v = {k: self.vars[k].get().strip() for k in self.vars}
         if not v["ssid"]:
+            self._status.config(text="pick a network (or type an SSID) first")
             return
         self.destroy()
         self.on_submit(v["ssid"], v["pw"], v["server"], v["token"])
