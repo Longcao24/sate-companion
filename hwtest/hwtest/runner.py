@@ -36,6 +36,10 @@ def build_context(cfg: dict, *, sim: bool, log: Callable[[str], None],
         prompt_wait=float(acfg.get("prompt_wait_s", 6)),
         log=log,
         prompt_fn=prompt_fn,
+        base_url=svcfg.get("base_url", ""),
+        device_id=svcfg.get("device_id", "") or svcfg.get("device_serial", ""),
+        access_token=svcfg.get("access_token", ""),
+        anon_key=svcfg.get("anon_key", ""),
     )
     return Ctx(link=link, server=server, act=act, cfg=cfg, log=log)
 

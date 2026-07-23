@@ -87,6 +87,7 @@ class Debugger:
         self.email = ""
         self.serial = ""
         self.device_key = ""
+        self.device_id = ""
         self.ack = threading.Event()
         self._pending_title = ""
         self._mirror_fails = 0
@@ -332,6 +333,7 @@ class Debugger:
                     if (res or {}).get("state") != "registered":
                         self.q.put(("log", f"  ✗ {(res or {}).get('state')} {(res or {}).get('msg', '')}", "bad")); return
                     dev_id = res.get("device_id", "")
+                    self.device_id = dev_id
                     self.device_key = ("key-" + dev_id) if dev_id else ""
                     self.q.put(("log", f"  ✓ connected — registered + claimed (device_id={dev_id}, ip={res.get('ip', '?')})", "ok"))
                 else:
@@ -339,7 +341,7 @@ class Debugger:
                     if not self.serial:
                         self.serial = (self.cfg.get("server", {}) or {}).get("device_serial") or ""
                     if self.serial:
-                        self.device_key, _ = A.device_key_for(self.access_token, self.serial)
+                        self.device_key, self.device_id = A.device_key_for(self.access_token, self.serial)
                     if ssid and addr:
                         async def chg():
                             async with RecorderBle(addr, log=lambda m: self.q.put(("log", m, "dim"))) as r:
@@ -347,17 +349,21 @@ class Debugger:
                         r2 = asyncio.run(chg())
                         self.q.put(("log", f"  Wi-Fi → {r2.get('state')}", "ok" if r2.get("state") == "wifi_saved" else "bad"))
 
-                # write creds so the tests can run
+                # write creds so the tests can run (incl. automatic remote recording)
                 srv = self.cfg.setdefault("server", {})
                 if self.device_key:
                     srv["device_key"] = self.device_key
                 if self.serial:
                     srv["device_serial"] = self.serial
+                if self.device_id:
+                    srv["device_id"] = self.device_id
+                srv["access_token"] = self.access_token
+                self.cfg.setdefault("actions", {})["record_mode"] = "remote"
                 try:
                     (Path(__file__).resolve().parent / "config.toml").write_text(_toml_dump(self.cfg))
                 except Exception:  # noqa: BLE001
                     pass
-                self.q.put(("log", "  ✓ device ready to test", "ok"))
+                self.q.put(("log", "  ✓ device ready — recordings will run automatically (except reboot-resume)", "ok"))
             except Exception as e:  # noqa: BLE001
                 self.q.put(("log", f"  connect failed: {e}", "bad"))
             finally:
@@ -435,15 +441,22 @@ class Debugger:
     def _run_tests_inproc(self, keys=None, sim=False):
         if self.busy:
             return
-        # for real server scenarios, make sure we have the device key from the account
-        if not sim and not (self.cfg.get("server", {}) or {}).get("device_key") and self.access_token and self.serial:
-            from hwtest import sate_account as A
-            try:
-                self.device_key, _ = A.device_key_for(self.access_token, self.serial)
-                if self.device_key:
-                    self.cfg.setdefault("server", {})["device_key"] = self.device_key
-            except Exception:  # noqa: BLE001
-                pass
+        # enable automatic remote recording when logged in: fetch the device key/id
+        # from the account and set record_mode=remote (reboot_resume still prompts).
+        if not sim and self.access_token:
+            srv = self.cfg.setdefault("server", {})
+            srv["access_token"] = self.access_token
+            if self.serial and not srv.get("device_id"):
+                from hwtest import sate_account as A
+                try:
+                    dk, did = A.device_key_for(self.access_token, self.serial)
+                    if dk:
+                        srv["device_key"] = self.device_key = dk
+                    if did:
+                        srv["device_id"] = self.device_id = did
+                except Exception:  # noqa: BLE001
+                    pass
+            self.cfg.setdefault("actions", {})["record_mode"] = "remote"
         self._set_busy(True)
         self._clear_results()
         self._log(f"\nRunning {'simulator' if sim else 'recording'} tests…", "head")
