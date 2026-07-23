@@ -52,6 +52,33 @@ def claim_token(access_token: str, *, anon: str = ANON_KEY, device_api: str = DE
     return tok
 
 
+def _get(url: str, headers: dict) -> object:
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:200]
+        raise RuntimeError(f"{e.code}: {detail}") from None
+
+
+def list_devices(access_token: str, *, anon: str = ANON_KEY, device_api: str = DEVICE_API) -> list:
+    """The account's claimed devices (sate_devices rows)."""
+    d = _get(f"{device_api}/api/devices",
+             {"Authorization": f"Bearer {access_token}", "apikey": anon})
+    return d if isinstance(d, list) else []
+
+
+def device_key_for(access_token: str, serial: str) -> tuple:
+    """Find an already-claimed device by serial → (device_key, device_id). None if not found."""
+    for row in list_devices(access_token):
+        cand = {str(row.get(k, "")) for k in ("id", "serial", "device_serial", "name")}
+        if serial and serial in cand:
+            dev_id = row.get("id") or row.get("device_id") or serial
+            return "key-" + str(dev_id), str(dev_id)
+    return None, None
+
+
 def login_and_claim(email: str, password: str) -> str:
     """Convenience: email + password → a fresh device claim token."""
     return claim_token(login(email, password))

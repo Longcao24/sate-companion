@@ -381,46 +381,72 @@ class Debugger:
                 from hwtest import sate_account as A
                 from hwtest.recorder_ble import RecorderBle
 
-                # 1/4 — log in + mint claim token
-                stage("[1/4] Logging in + minting claim token…")
-                token = A.login_and_claim(email, pw)
-                self.claim_token = token
-                self.q.put(("log", "  ✓ claim token ready", "ok"))
-
-                # 2/4 — provision Wi-Fi + register/claim (also read the serial)
+                # 1 — log in
+                stage("[1/4] Logging in…")
+                access = A.login(email, pw)
+                self.q.put(("log", "  ✓ logged in", "ok"))
                 server = (self.cfg.get("server", {}) or {}).get("base_url") or DEFAULT_SERVER
-                stage(f"[2/4] Provisioning Wi-Fi ({ssid}) + register…")
 
-                async def prov():
-                    addr = await RecorderBle.find("SATE-", timeout=10)
+                # 2 — peek over BLE: serial + is it already claimed?
+                async def peek():
+                    addr = await RecorderBle.find("SATE-", timeout=8)
                     if not addr:
-                        return None, {"state": "error", "msg": "no recorder in BLE/setup mode"}
-                    async with RecorderBle(addr, log=lambda m: self.q.put(("log", m, "dim"))) as r:
+                        return None, None, None
+                    async with RecorderBle(addr) as r:
                         info = await r.read_info()
-                        res = await r.provision(ssid, wifipw, server, token)
-                        return info, res
+                        return addr, info.get("serial"), info.get("provisioned")
+                addr, serial, provisioned = asyncio.run(peek())
+                device_key = None
 
-                info, res = asyncio.run(prov())
-                if not res or res.get("state") != "registered":
-                    self.q.put(("log", f"  ✗ provisioning ended in '{(res or {}).get('state')}' "
-                                       f"{(res or {}).get('msg', '')}", "bad"))
-                    return
-                dev_id = res.get("device_id", "")
-                serial = (info or {}).get("serial", "")
-                self.q.put(("log", f"  ✓ registered + claimed  device_id={dev_id}  ip={res.get('ip', '?')}", "ok"))
+                if addr and provisioned is False:
+                    # UNCLAIMED → mint a claim token + provision (register + claim)
+                    stage(f"[2/4] Unclaimed device — provisioning Wi-Fi ({ssid}) + register…")
+                    token = A.claim_token(access)
+                    async def prov():
+                        async with RecorderBle(addr, log=lambda m: self.q.put(("log", m, "dim"))) as r:
+                            return await r.provision(ssid, wifipw, server, token)
+                    res = asyncio.run(prov())
+                    if (res or {}).get("state") != "registered":
+                        self.q.put(("log", f"  ✗ provisioning ended in '{(res or {}).get('state')}' "
+                                           f"{(res or {}).get('msg', '')}", "bad"))
+                        return
+                    dev_id = res.get("device_id", "")
+                    device_key = ("key-" + dev_id) if dev_id else None
+                    self.q.put(("log", f"  ✓ registered + claimed  device_id={dev_id}  ip={res.get('ip', '?')}", "ok"))
+                else:
+                    # ALREADY CLAIMED (or online, not in BLE setup mode) → do NOT re-claim
+                    stage("[2/4] Device already claimed — skipping register/claim…")
+                    if not serial:
+                        serial = (self.cfg.get("server", {}) or {}).get("device_serial") or ""
+                    if serial:
+                        device_key, _ = A.device_key_for(access, serial)
+                        self.q.put(("log", f"  ✓ found {serial} in your account — using its key" if device_key
+                                    else f"  ! {serial} not in this account (claimed elsewhere?)",
+                                    "ok" if device_key else "bad"))
+                    else:
+                        self.q.put(("log", "  ! couldn't read the serial (device online, not in BLE mode) — "
+                                           "set it in SATE credentials", "bad"))
+                    if ssid and addr:     # optional: move to a new network, keeping the account
+                        stage(f"[2/4] change_wifi → {ssid} (keeps account)…")
+                        async def chg():
+                            async with RecorderBle(addr, log=lambda m: self.q.put(("log", m, "dim"))) as r:
+                                return await r.change_wifi(ssid, wifipw)
+                        r2 = asyncio.run(chg())
+                        self.q.put(("log", f"  change_wifi → {r2.get('state')}",
+                                    "ok" if r2.get("state") == "wifi_saved" else "bad"))
 
-                # 3/4 — write server creds so the tests can run server scenarios
-                stage("[3/4] Device online — configuring test credentials…")
+                # 3 — write test creds
+                stage("[3/4] Configuring test credentials…")
                 srv = self.cfg.setdefault("server", {})
-                if dev_id:
-                    srv["device_key"] = "key-" + dev_id
+                if device_key:
+                    srv["device_key"] = device_key
                 if serial:
                     srv["device_serial"] = serial
                 try:
                     (Path(__file__).resolve().parent / "config.toml").write_text(_toml_dump(self.cfg))
                 except Exception:  # noqa: BLE001
                     pass
-                time.sleep(6)     # let the device join Wi-Fi + reach the server
+                time.sleep(4)
 
                 # 4/4 — run the scenarios (with the live screen mirror)
                 if run_tests:
@@ -818,8 +844,8 @@ class _E2EDialog(tk.Toplevel, _WifiScanMixin):
     def _go(self):
         val = lambda k: self.vars[k].get() if k in ("password", "wifipw") else self.vars[k].get().strip()
         email, pw, ssid, wifipw = val("email"), val("password"), val("ssid"), val("wifipw")
-        if not (email and pw and ssid):
-            self._status.config(text="need email, password, and a Wi-Fi network")
+        if not (email and pw):
+            self._status.config(text="need email + password (Wi-Fi only if the device isn't claimed yet)")
             return
         run_tests = self.run_tests.get()
         self.destroy()
