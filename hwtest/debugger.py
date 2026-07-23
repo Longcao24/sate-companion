@@ -118,10 +118,11 @@ class Debugger:
         tk.Label(pad, text="SATE Debugger", bg=CARD, fg=INK, font=("Helvetica Neue", 20, "bold")).pack()
         tk.Label(pad, text="Log in with your SATE account", bg=CARD, fg=INK2,
                  font=("Menlo", 11)).pack(pady=(4, 18))
+        acct = self.cfg.get("account", {}) or {}     # default creds from git-ignored config.toml
         self._login_vars = {}
         for label, key, show in [("Email", "email", ""), ("Password", "password", "•")]:
             tk.Label(pad, text=label, bg=CARD, fg=INK2, font=("Menlo", 10)).pack(anchor="w")
-            v = tk.StringVar(); self._login_vars[key] = v
+            v = tk.StringVar(value=str(acct.get(key, ""))); self._login_vars[key] = v
             e = tk.Entry(pad, textvariable=v, width=30, show=show, font=("Menlo", 12), relief="flat",
                          highlightthickness=1, highlightbackground=HAIR)
             e.pack(fill="x", pady=(2, 12), ipady=4)
