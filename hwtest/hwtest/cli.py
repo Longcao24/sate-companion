@@ -464,6 +464,99 @@ def _grep_version(path: Path, const: str) -> str | None:
 
 
 # ---------------------------------------------------------------- arg parsing
+def cmd_provision(args: argparse.Namespace) -> int:
+    banner()
+    try:
+        import asyncio
+        from hwtest.recorder_ble import RecorderBle
+    except ImportError:
+        bad("bleak not installed — `pip install bleak`"); return 1
+
+    if args.wifi and ":" in args.wifi:
+        ssid, pw = args.wifi.split(":", 1)
+    else:
+        ssid, pw = args.ssid, args.password
+    if not ssid or pw is None:
+        bad("need Wi-Fi creds: --wifi \"SSID:PASSWORD\"  (or --ssid + --password)"); return 2
+    if args.claim_token and not args.server:
+        bad("--claim-token also needs --server (the device-api base URL)"); return 2
+
+    async def go() -> int:
+        addr = args.address or await RecorderBle.find("SATE-", timeout=10)
+        if not addr:
+            bad("no recorder advertising over BLE — it must be in BLE/setup mode (offline)"); return 1
+        info(f"connecting to {addr} …")
+        async with RecorderBle(addr, log=print) as r:
+            ident = await r.read_info()
+            info(f"device: {ident.get('serial')}  fw {ident.get('fw')}  provisioned={ident.get('provisioned')}")
+            if args.claim_token:
+                info(f"provisioning + claiming to {args.server}  (Wi-Fi: {ssid})")
+                res = await r.provision(ssid, pw, args.server, args.claim_token)
+            else:
+                info(f"change_wifi — joining {ssid} (keeps the account)")
+                res = await r.change_wifi(ssid, pw)
+        st = res.get("state")
+        if st in ("registered", "wifi_saved"):
+            ok(green(f"success: {st}") + (f"  ip={res['ip']}" if res.get("ip") else ""))
+            return 0
+        bad(f"provisioning ended in '{st}'  {res.get('msg', '')}")
+        return 1
+
+    try:
+        return asyncio.run(go())
+    except Exception as e:  # noqa: BLE001
+        bad(f"provisioning failed: {e}"); return 1
+
+
+# state a serial log line implies — for the live monitor / desktop mirror
+def _derive_state(line: str, cur: str) -> str:
+    l = line.lower()
+    if "record" in l and "start" in l: return "RECORDING"
+    if "[rec]" in l and "record" in l: return "RECORDING"
+    if "uploaded" in l or "uploadstep" in l or "upload " in l: return "UPLOADING"
+    if "play start" in l: return "PLAYBACK"
+    if "[mem] ready" in l: return "HOME"
+    if "ble mode" in l or "ble advertising" in l: return "BLE / OFFLINE"
+    if "factory reset" in l: return "RESET"
+    return cur
+
+
+def cmd_monitor(args: argparse.Namespace) -> int:
+    from hwtest.link import SerialLink
+    port = args.port or _auto_port()
+    if not port:
+        bad("no serial port — plug in the recorder or pass --port"); return 2
+    banner()
+    info(f"live monitor on {port}" + (f" for {args.seconds:g}s" if args.seconds else " — Ctrl-C to stop"))
+    print(dim("  mirrors what the recorder is doing from its serial log\n"))
+    try:
+        link = SerialLink(port)
+    except Exception as e:  # noqa: BLE001
+        bad(f"could not open {port}: {e}"); return 1
+    if args.reset:
+        link.reset()
+    import time
+    state = "?"
+    end = (time.monotonic() + args.seconds) if args.seconds else None
+    try:
+        while end is None or time.monotonic() < end:
+            ln = link.readline(1.0)
+            if ln is None:
+                continue
+            new = _derive_state(ln, state)
+            if new != state:
+                state = new
+                color = {"RECORDING": red, "UPLOADING": cyan, "HOME": green,
+                         "PLAYBACK": yellow, "BLE / OFFLINE": yellow}.get(state, bold)
+                print(bold("  >> STATE: ") + color(state))
+            print(dim("    │ ") + ln)
+    except KeyboardInterrupt:
+        print(dim("\n  stopped"))
+    finally:
+        link.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="sate",
@@ -502,6 +595,21 @@ def build_parser() -> argparse.ArgumentParser:
     doc.add_argument("--name", help="BLE name filter for the pendant probe (default: SATE)")
     doc.add_argument("--seconds", type=float, default=15.0, help="how long to read the boot log / scan (default: 15)")
     doc.set_defaults(func=cmd_doctor)
+    pr = sub.add_parser("provision", help="push Wi-Fi to the recorder over BLE (register/claim or change-wifi)")
+    pr.add_argument("--wifi", help='Wi-Fi as "SSID:PASSWORD"')
+    pr.add_argument("--ssid", help="Wi-Fi SSID (alternative to --wifi)")
+    pr.add_argument("--password", help="Wi-Fi password (alternative to --wifi)")
+    pr.add_argument("--server", help="device-api base URL (required with --claim-token)")
+    pr.add_argument("--claim-token", help="account claim token → provision + register; omit to just change Wi-Fi")
+    pr.add_argument("--address", help="BLE address (auto-found if omitted)")
+    pr.set_defaults(func=cmd_provision)
+
+    mon = sub.add_parser("monitor", help="mirror the recorder's live state from its serial log")
+    mon.add_argument("-p", "--port", help="serial port (auto-detected if omitted)")
+    mon.add_argument("--reset", action="store_true", help="reset the board first to capture the boot sequence")
+    mon.add_argument("--seconds", type=float, default=0.0, help="stop after N seconds (default: run until Ctrl-C)")
+    mon.set_defaults(func=cmd_monitor)
+
     sub.add_parser("gui", help="launch the native test window").set_defaults(func=cmd_gui)
     sub.add_parser("dashboard", help="launch the browser test dashboard").set_defaults(func=cmd_dashboard)
     sub.add_parser("version", help="show CLI + firmware versions").set_defaults(func=cmd_version)
