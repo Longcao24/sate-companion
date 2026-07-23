@@ -103,6 +103,22 @@ peripheral, which works even when the firmware is wedged.
 - **Pendant** — tested over **BLE** (the Mac acts as the BLE central, the app's
   role): connect, send `0x01/0x00/0x02`, measure the PCM stream + battery.
 
+## What has to be plugged in
+
+Every recorder scenario asserts on the firmware's **own serial log**, so the board
+must be connected over **USB** — that is the only way the harness sees `[MEM] ready`,
+`[REC] resume …` or `[CONN] uploaded …`. Commands go out over Wi-Fi, but the evidence
+comes back over the wire.
+
+| What you want to run | USB cable | Device on Wi-Fi | Signed-in account |
+|---|---|---|---|
+| `sate test --sim` (harness self-test) | no | no | no |
+| Recorder scenarios | **yes** | **yes** (remote record/stop/reboot + `/sessions/verify`) | **yes** |
+| Screen mirror / `sate screenshot` | **yes** (debug build) | no | no |
+| Remote control on its own (record/stop/reboot) | no | **yes** | **yes** |
+| Flashing | **yes** | no | no |
+| Pendant scenarios | no (BLE) | no | no |
+
 ## Setup
 
 ```bash
@@ -122,15 +138,17 @@ sate test                 # recorder, all scenarios
 sate test -t pendant      # pendant over BLE
 sate test --sim           # self-test the harness, no board
 sate test --only byte_match,reboot_resume   # a subset
-sate gui                  # native window (or double-click "SATE Hardware Test.app")
+sate gui                  # native window (plain suite runner)
 sate dashboard            # browser dashboard
-sate debug                # the desktop Debugger app (screen mirror + remote control)
+sate debug                # the desktop Debugger app (or double-click "SATE Debugger.app")
 ```
 
 ## The desktop Debugger app
 
-A native window (`sate debug`, or `python3 hwtest/debugger.py`) built for bench work
-rather than CI. It opens on a **login page** — everything after it uses the real
+A native window for bench work rather than CI — launch it with `sate debug`, by
+double-clicking **`SATE Debugger.app`** (run `hwtest/build_app.command` once to build
+it and drop a copy on the Desktop), or with `python3 hwtest/debugger.py`. It opens on
+a **login page** — everything after it uses the real
 clinician session, the same way the mobile app does — and then shows the device
 screen mirrored live on the left with the controls on the right:
 

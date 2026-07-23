@@ -67,16 +67,19 @@ serial appears (see repo `CLAUDE.md`). The harness resets the board by pulsing
 
 ## Easiest: double-click
 
-- **`SATE Hardware Test.app`** — double-click in Finder → opens the test window.
+- **`SATE Debugger.app`** — double-click in Finder → opens the Debugger window.
   (First launch only: if macOS says "unidentified developer", right-click → Open →
   Open.) The app is git-ignored; on a fresh checkout run **`build_app.command`** once
-  to (re)create it.
-- **`start.command`** — same thing without the app icon (opens via Terminal). First
+  to (re)create it — it builds the app here and drops a copy on the Desktop.
+- **`debug.command`** — same thing without the app icon (opens via Terminal). First
   run sets up a private `.venv` and installs deps (~1 min); after that it's instant.
 
-Then pick a device (Recorder / Pendant) and click **Run (sim)** to try it with no
-board, or **Run (hardware)** for a real device. Everything below is the manual /
-CLI path.
+The Debugger opens on a **login page**: sign in with the SLP account, the same way
+the mobile app does. Everything after that — remote record/stop/reboot, the scenario
+suite, firmware flashing — runs against the device on that account.
+
+`gui.py` (the older Run-sim / Run-hardware window) and `dashboard.py` still exist for
+a plain suite run. Everything below is the manual / CLI path.
 
 ## Run — two devices, two transports
 
