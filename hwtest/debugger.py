@@ -183,7 +183,9 @@ class Debugger:
         # simply fall off the bottom with no way to reach them.
         outer = tk.Frame(r, bg=BG)
         outer.pack(fill="both", expand=True, padx=18, pady=(0, 16))
-        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0)
+        # yscrollincrement=1 makes yview_scroll(N, "units") mean N *pixels*, so both
+        # trackpad and wheel scrolling are smooth instead of jumping by lines.
+        canvas = tk.Canvas(outer, bg=BG, highlightthickness=0, yscrollincrement=1)
         vbar = tk.Scrollbar(outer, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=vbar.set)
         vbar.pack(side="right", fill="y")
@@ -195,7 +197,14 @@ class Debugger:
         body.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         # keep the inner frame as wide as the viewport so nothing is cut off sideways
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(body_win, width=e.width))
+        # Tk 9 on macOS delivers two-finger trackpad scrolling as <TouchpadScroll>
+        # (with a packed dx/dy delta) — <MouseWheel> only fires for an actual wheel.
+        # Bind both, or the trackpad silently does nothing.
         canvas.bind_all("<MouseWheel>", self._on_wheel)
+        try:
+            canvas.bind_all("<TouchpadScroll>", self._on_touchpad)
+        except tk.TclError:
+            pass  # Tk 8.x: no such event; <MouseWheel> covers the trackpad there
 
         # ---- LEFT: device / live screen ----
         left = tk.Frame(body, bg=CARD, highlightbackground=HAIR, highlightthickness=1)
@@ -333,18 +342,41 @@ class Debugger:
         self._refresh_status()
 
     # ======================================================= helpers
-    def _on_wheel(self, e):
-        """Scroll the body, unless the pointer is over the log (it scrolls itself)."""
+    def _pointer_over_log(self, e):
         try:
             w = self.root.winfo_containing(e.x_root, e.y_root)
         except Exception:  # noqa: BLE001
-            w = None
-        if w is not None and isinstance(w, tk.Text):
-            return
+            return False
+        return w is not None and isinstance(w, tk.Text)
+
+    def _scroll_px(self, dy_px):
         try:
-            self.body_canvas.yview_scroll(-1 * int(e.delta), "units")
+            self.body_canvas.yview_scroll(-int(dy_px), "units")  # units == pixels
         except Exception:  # noqa: BLE001
             pass
+
+    def _on_wheel(self, e):
+        """A real mouse wheel. Windows reports multiples of 120; macOS small ints."""
+        if self._pointer_over_log(e):
+            return
+        d = int(e.delta)
+        if abs(d) >= 120:
+            d //= 120
+        self._scroll_px(d * 24)
+
+    def _on_touchpad(self, e):
+        """Tk 9 two-finger trackpad scroll: %D packs dx in the high 16 bits and dy
+        (signed) in the low 16. tk::PreciseScrollDeltas is Tk's own unpacker."""
+        if self._pointer_over_log(e):
+            return
+        try:
+            dx, dy = self.root.tk.call("::tk::PreciseScrollDeltas", e.delta)
+            self._scroll_px(int(dy))
+        except Exception:  # noqa: BLE001
+            # fallback: unpack by hand
+            d = int(e.delta)
+            lo = d & 0xFFFF
+            self._scroll_px(lo - 0x10000 if lo >= 0x8000 else lo)
 
     def _log(self, text, tag=None):
         self.log.config(state="normal")
