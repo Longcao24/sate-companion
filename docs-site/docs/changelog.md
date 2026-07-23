@@ -10,11 +10,11 @@ relevant table on every release. Versions are independent per component (the
 recorder firmware, the app, and the web app do **not** share a number).
 
 <div class="badge-row">
-<span class="sate-badge">recorder 1.5.18</span>
+<span class="sate-badge">recorder 1.5.19</span>
 <span class="sate-badge">pendant 1.0.0</span>
 <span class="sate-badge">app 0.1.0</span>
 <span class="sate-badge">web 1.5.9</span>
-<span class="sate-badge">device-api v15</span>
+<span class="sate-badge">device-api v17</span>
 </div>
 
 ```mermaid
@@ -24,18 +24,18 @@ timeline
   2026-06 to 07 : 1.5.0 SLP UI + telemetry : 1.5.1-1.5.8 battery/mic/loudness
   2026-07 : 1.5.9 device-holds-only-copy : 1.5.12 reclaim keep-newest-5
   2026-07-22 : 1.5.13 server-verified trim + auto-resume + crash-safe delete : 1.5.14 screen mirror
-  2026-07-23 : 1.5.15 remote stop : 1.5.16 remote takes resume : 1.5.17 resume keeps the network up : 1.5.18 stop never swallowed
+  2026-07-23 : 1.5.15 remote stop : 1.5.16 remote takes resume : 1.5.17 resume keeps the network up : 1.5.18 stop never swallowed : 1.5.19 exact-duration takes
 ```
 
 ## Where each version is defined (source of truth)
 
 | Component | Field / source of truth | Current |
 |---|---|---|
-| Recorder firmware | `SATE_Recorder/SATE_Recorder.ino` → `FIRMWARE_VERSION` | **1.5.18** |
+| Recorder firmware | `SATE_Recorder/SATE_Recorder.ino` → `FIRMWARE_VERSION` | 1.5.18 |
 | Pendant firmware | `SATE_Pendant/SATE_Pendant.ino` → `FIRMWARE_VERSION` (added 2026-07-22) | **1.0.0** |
 | Mobile app | `app.json` `version` (+ `package.json`) | **0.1.0** |
 | Web app | `react_app_sate-ui_update/package.json` `version` | **1.5.9** |
-| Backend (`device-api`) | in-comment `[vNN]` header of `.../functions/device-api/index.ts` | **v15** |
+| Backend (`device-api`) | in-comment `[vNN]` header of `.../functions/device-api/index.ts` | **v17** |
 
 :::note Pendant version field (new)
 `SATE_Pendant.ino` now has a `FIRMWARE_VERSION` constant (`1.0.0`, added 2026-07-22)
@@ -55,7 +55,8 @@ can read/verify what's flashed. The device already ships a `BLEDfu` OTA service.
 
 | Version | Date | Notes |
 |---|---|---|
-| **1.5.18** | 2026-07-23 | **A remote `stop` issued while a take is starting is no longer swallowed.** Take start cleared `connStopReq` outright to drop a stale stop, which also threw away a stop that arrived during the take's own start sequence — the status screen and its ~1.5 s GUI pump. A resumed take, which is stopped from the server the moment it is noticed, hit that window every time and then ran on for minutes with nothing able to end it (observed: 4.5 minutes, `part 6`, 8.6 MB). A stop is now latched only while a take is *armed* — set before the start sequence, cleared when capture returns — so it can never go stale and never be dropped. Full hands-off suite green on hardware: `boot_health`, `reboot_resume`, `byte_match`, `verified_trim`. |
+| **1.5.19** | 2026-07-23 | **A remote `record` command may carry an exact duration** (`{op:"record", seconds:N}`, device-api ≥v17). The device caps the capture at exactly N seconds of PCM and stops **itself** — sample-exact. Before this, timed tests raced a `stop` through the poll channel and every take came out 3–12 s long (measured +7.9 s on a 60 s take); verified on hardware: a requested 30 s take produced 960,044 bytes = 30 × 32000 + 44, exactly 30.0 s. |
+| 1.5.18 | 2026-07-23 | **A remote `stop` issued while a take is starting is no longer swallowed.** Take start cleared `connStopReq` outright to drop a stale stop, which also threw away a stop that arrived during the take's own start sequence — the status screen and its ~1.5 s GUI pump. A resumed take, which is stopped from the server the moment it is noticed, hit that window every time and then ran on for minutes with nothing able to end it (observed: 4.5 minutes, `part 6`, 8.6 MB). A stop is now latched only while a take is *armed* — set before the start sequence, cleared when capture returns — so it can never go stale and never be dropped. Full hands-off suite green on hardware: `boot_health`, `reboot_resume`, `byte_match`, `verified_trim`. |
 | 1.5.17 | 2026-07-23 | **Resume runs from `loop()`, not `setup()` — fixes a device that goes dark after a mid-take reboot.** `maybeResumeRecording()` blocks inside the capture until Stop, so calling it at the end of `setup()` meant `loop()` never ran and `connStartNetTask()` never started: the unit recorded on with **no heartbeat, no remote `stop`, and no serial** — unreachable until someone pressed the button or the ~62-min ceiling hit. Latent before 1.5.16 (only button takes resumed, and an operator was there to stop them); 1.5.16 made *every* take resume, which exposed it. The resume now waits for the net task (or ~8 s if offline), so a resumed take stays controllable for its whole length. Verified on hardware: `[CONN] Online` → `[REC] resume session 24 from part 1 (321536 bytes already on card)` → remote `stop` accepted. |
 | 1.5.16 | 2026-07-23 | **Remote takes auto-resume after a reboot.** `recCrashMark()` now marks *every* take crash-resumable (was on-device/`review` takes only), so a server/app-started recording interrupted by a brownout continues instead of ending early — from local NVS + the SD segments alone, **no Wi-Fi or server needed**. Added `[REC] resume …` diagnostics: the resume path was previously silent, so a failed resume was invisible; every branch now logs why (incl. the boot-loop guard, missing patient, missing `part00`). |
 | 1.5.15 | 2026-07-23 | **Remote `stop` command.** A server/app-started take could previously only be ended at the device (or by the ~62-min ceiling) — `REMOTE_RECORD_SECONDS` was declared but never used, so a remote take ran unbounded. `stop` ends the take exactly like the RECORD button. Verified on hardware: rescued a unit stuck recording (`state: recording → idle`). |
@@ -100,7 +101,9 @@ could not. See [Architecture → Who triggers what](architecture).
 
 | Version | Date | Notes |
 |---|---|---|
-| **v15** | 2026-07-22 | `GET /sessions/verify` (device-key, read-only) · `storeSessionRecord` idempotency probe (dedup a re-uploaded take) · `publishFirmware` validation (semver + `0xE9` magic + size). |
+| **v17** | 2026-07-23 | `record` command carries `{seconds}` → heartbeat delivers `record_seconds`; the firmware (≥1.5.19) stops the take itself, sample-exact. |
+| v16 | 2026-07-23 | `GET /sessions/upload-progress` — live byte count of an in-flight chunked upload (sums the `_tmp` part objects; 10-min activity filter so orphaned parts don't read as uploading; user-authed, read-only). Feeds the live pipeline map. |
+| v15 | 2026-07-22 | `GET /sessions/verify` (device-key, read-only) · `storeSessionRecord` idempotency probe (dedup a re-uploaded take) · `publishFirmware` validation (semver + `0xE9` magic + size). |
 | v14 | — | Async processing state machine on `sate_device_sessions.status` (`queued→processing→done\|error`, `attempts`) · `POST /sessions/:id/retry`. Processing moved to the container; `process-device-session` became a 200 no-op. |
 | v12 | — | `/sessions/chunk` stores each slice as its own part and stitches on final (was quadratic) · accepts `&total=` from firmware ≥1.5.9 and rejects a size mismatch. |
 

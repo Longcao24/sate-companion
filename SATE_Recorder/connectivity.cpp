@@ -1884,11 +1884,18 @@ static void pollCommands()
   // OTA payload (url + target version) rides alongside the command list, since
   // WiFi commands are plain strings. An "ota" command consumes it.
   JsonObjectConst ota = doc["ota"].as<JsonObjectConst>();
+  // [fw 1.5.19] A record command may carry an exact duration. The device stops
+  // the take ITSELF at N seconds of PCM (byte-exact cap on the capture loop) —
+  // callers no longer race a "stop" through the poll channel (+3-12 s of slop).
+  uint32_t recSecs = doc["record_seconds"] | 0;
   for (JsonVariant v : doc["commands"].as<JsonArray>()) {
     const char *op = v.as<const char *>();
     if (op && !strcmp(op, "ota")) {
       if (!ota.isNull()) runOtaUpdate(ota["url"] | "", ota["version"] | "");
       else               statusErr("ota", "no payload");
+    } else if (op && !strcmp(op, "record") && recSecs > 0) {
+      Serial.printf("[CONN] remote command: record (%lus exact)\n", (unsigned long)recSecs);
+      sateHookRecordTimed(recSecs);
     } else {
       runRemoteCommand(op);
     }

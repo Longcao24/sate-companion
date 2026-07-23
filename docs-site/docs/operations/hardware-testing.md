@@ -212,14 +212,34 @@ Cloudflare processor Worker → pipeline counts (queued / processing / error —
 only visibility into the self-hosted AI service; a growing queue means it is down)
 → the device's own heartbeat. Non-zero exit if a critical tier is down.
 
-### `sate pipeline` — the live map
+### `sate pipeline` — the live architecture map
 
-A desktop window (also in the Debugger: **Live pipeline view**) that draws the
-eight hops as an animated flow — completed segments green, the current hop pulsing
-with a travelling dot — plus the in-flight take's live elapsed time and a history
-table of past runs (queue wait / processing / total, with running averages).
-Polls the same rows as the web app every 2 s. **Run pipeline test** inside the
-window records 8 s remotely and lets you watch the take travel the map in realtime.
+A desktop window (also in the Debugger: **Live pipeline view**) drawn as the real
+system architecture: Recorder (and the dimmed Pendant/Plaud→Mobile path) →
+**Supabase** container (device-api · Storage · Postgres queue) → **Cloudflare**
+cf-processor → **AI /process** → finalize → Web frontend. Everything on it is
+**server truth**:
+
+- the flow lights up only for a take that provably exists (device heartbeat or a
+  server row) — idle never fakes green, and the gap between the device finishing
+  and the row landing displays as *upload*, not *done*;
+- **upload progress is real**: `GET /api/sessions/upload-progress` (device-api
+  ≥v16) sums the in-flight `_tmp` chunk objects, so the map shows
+  `▲ s39 · 12 parts · 4.1 MB on server · 0.9 MB/s` while the WAV is travelling
+  (orphaned parts older than 10 minutes are filtered out);
+- the session being processed is **named at its node** (`s39 · demo · 0.96 MB`),
+  with per-stage elapsed ticking live;
+- every tier carries a **health dot** re-probed every ~12 s (green/amber/red), so
+  a down tier is visible on the same map as the flow;
+- a failing poll is announced (`POLL FAILING — data is 30s stale`) instead of
+  silently rendering yesterday's state.
+
+**Run pipeline test** takes a tester-set duration — `45`, `1:30`, `5m`/`5p` — and
+the recorder records **exactly** that long: the `record` command carries
+`{seconds}` (device-api ≥v17) and the firmware (≥1.5.19) caps the capture at that
+many seconds of PCM, sample-exact. When the row lands, the map verifies the audio
+length against the target ((bytes−44)/32000) and shows ✓/⚠. Verified on
+hardware: a 30 s request produced exactly 960,044 bytes = 30.0 s.
 
 ## Flashing an older firmware — `sate firmware` / `--version`
 

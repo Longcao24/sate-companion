@@ -117,11 +117,27 @@ class ByteMatch(Scenario):
     requires = ("server",)
 
     def run(self, ctx: Ctx) -> Result:
+        import time as _t
+        # The device DROPS a remote record while it is busy finishing/uploading the
+        # previous scenario's take ("[CONN] cannot begin ... skipping") — wait for a
+        # quiet line-free window first, then retry once if the start doesn't land.
+        ctx.log("  Waiting for the device to go quiet (previous upload draining)…")
+        quiet_end = _t.monotonic() + 90
+        quiet = 0.0
+        while _t.monotonic() < quiet_end and quiet < 6.0:
+            line = ctx.link.readline(1.0)
+            if line:
+                ctx.record_line(line)
+                quiet = 0.0
+            else:
+                quiet += 1.0
         ctx.log("  Recording a short take and letting it upload…")
         ctx.act.trigger_record()
-        if not ctx.link.wait_for(RE_REC_START, timeout=20, on_line=ctx.record_line):
-            return self._r(FAIL, "device never reported 'record start'", ctx)
-        import time as _t
+        if not ctx.link.wait_for(RE_REC_START, timeout=25, on_line=ctx.record_line):
+            ctx.log("  no start seen — the command may have been dropped; retrying once…")
+            ctx.act.trigger_record()
+            if not ctx.link.wait_for(RE_REC_START, timeout=25, on_line=ctx.record_line):
+                return self._r(FAIL, "device never reported 'record start' (after retry)", ctx)
         _t.sleep(float(ctx.cfg.get("record", {}).get("take_s", 6)))
         ctx.act.trigger_stop()
         m = ctx.link.wait_for(RE_UPLOADED, timeout=120, on_line=ctx.record_line)

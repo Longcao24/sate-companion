@@ -493,21 +493,32 @@ def cmd_e2e(args: argparse.Namespace) -> int:
 
     take_s = float(getattr(args, "take", 0) or cfg.get("record", {}).get("take_s", 8))
 
-    # 1) record
-    cmd("record")
-    mark("record", "remote RECORD queued")
+    # 1) record — fw >=1.5.19 stops ITSELF at exactly take_s (sample-exact cap),
+    #    so the duration check below is meaningful. No stop race.
+    def cmd_body(body):
+        req = urllib.request.Request(
+            f"{base}/api/devices/{device_id}/commands",
+            data=_json.dumps(body).encode(), method="POST",
+            headers={"Authorization": f"Bearer {tok}", "apikey": A.ANON_KEY,
+                     "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=20):
+            pass
+    cmd_body({"op": "record", "seconds": int(take_s)})
+    mark("record", f"remote RECORD queued — device records EXACTLY {take_s:.0f}s by itself")
     end = time.time() + 40
     while time.time() < end and dev_state() != "recording":
         time.sleep(2)
     if dev_state() != "recording":
         bad("device never started recording (heartbeat state stayed idle).")
         return 1
-    info(f"          recording — capturing {take_s:.0f}s of audio…")
-    time.sleep(take_s)
-
-    # 2) stop → upload
-    cmd("stop")
-    mark("upload", "remote STOP queued — device finalizes + uploads over HTTPS")
+    info(f"          recording — the device caps the take at {take_s:.0f}s of PCM…")
+    end = time.time() + take_s + 60
+    while time.time() < end and dev_state() == "recording":
+        time.sleep(3)
+    if dev_state() == "recording":
+        warn("still recording past the cap — sending a safety stop")
+        cmd("stop")
+    mark("upload", "take ended — device finalizes + uploads over HTTPS")
 
     # 3) the row appears (Storage + DB)
     row = None
@@ -559,10 +570,13 @@ def cmd_e2e(args: argparse.Namespace) -> int:
     print(f"  storage      : {'byte-verified' if verified else 'NOT verified'}")
     print(f"  queue wait   : {qw}")
     print(f"  processing   : {pr}   (cf-processor + AI + finalize)")
+    audio_s = max(0.0, (final.bytes - 44) / 32000.0)
+    dur_ok = abs(audio_s - take_s) <= max(2.0, take_s * 0.05)
+    print(f"  audio length : {audio_s:.1f}s vs requested {take_s:.0f}s  {'✓ exact' if dur_ok else '✗ OFF'}")
     print(f"  recording row: {'yes — ' + str(final.recording_id) if final.recording_id else 'none (no_text takes have none)'}")
     print(f"  wall clock   : {total:.1f}s from RECORD to the end")
     print()
-    passed = final.status == "done" and verified
+    passed = final.status == "done" and verified and dur_ok
     if passed:
         ok("E2E PASSED — the audio travelled recorder → Supabase → Cloudflare → AI → done.")
         return 0

@@ -110,7 +110,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.18";   // a remote stop issued while a take is starting is no longer swallowed
+static const char    *FIRMWARE_VERSION  = "1.5.19";   // record command accepts an exact duration (device stops itself, sample-exact)
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -358,6 +358,11 @@ static void isrFlagBtn();
 void sateHookPatientsUpdated() { connPatientsReq = true; }
 void sateHookConnChanged()     { connStateReq = true; }
 void sateHookRecord()          { connRecordReq = true; }
+// [fw 1.5.19] Timed remote take: capture exactly `seconds` of PCM and stop by
+// itself (byte-exact cap on the capture loop). Racing a remote "stop" through
+// the poll channel added 3-12 s of slop on every timed test.
+static volatile uint32_t connRecordSecs = 0;
+void sateHookRecordTimed(uint32_t seconds) { connRecordSecs = seconds; connRecordReq = true; }
 // Only latch a stop while a take is armed, so a stop that arrives with nothing to
 // stop cannot sit around and kill the NEXT take. Armed covers the whole start
 // sequence (mark, status screen, GUI pump), not just the capture loop — a stop that
@@ -3487,9 +3492,18 @@ void loop()
     // "recording" while it happens.
     if (connRecordReq) {
       connRecordReq = false;
+      uint32_t secs = connRecordSecs;
+      connRecordSecs = 0;
+      // A timed take caps the capture at exactly secs of PCM; untimed runs to
+      // Stop (or the safety cap) as before.
+      uint32_t cap = PCM_MAX_BYTES;
+      if (secs > 0) {
+        uint64_t want = (uint64_t)secs * PCM_BYTES_PER_SEC;
+        if (want < cap) cap = (uint32_t)want;
+      }
       if (currentState == HOME && deviceReady()) {
         connSetLiveState("recording");
-        runRecordSavePlaySession(false /*review*/); // runs until Stop is tapped
+        runRecordSavePlaySession(false /*review*/, cap);
         connSetLiveState("idle");
       }
     }

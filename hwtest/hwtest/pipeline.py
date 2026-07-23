@@ -26,6 +26,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -80,6 +81,7 @@ class SessionState:
     attempts: int
     device_serial: str = ""
     row_id: str = ""
+    patient_id: str = ""
 
     @property
     def stage(self) -> str:
@@ -126,10 +128,11 @@ def _row_to_state(x: dict) -> SessionState:
         attempts=int(x.get("attempts") or 0),
         device_serial=str(x.get("device_serial") or ""),
         row_id=str(x.get("id") or ""),
+        patient_id=str(x.get("patient_id") or ""),
     )
 
 
-_SELECT = ("select=id,session_number,bytes,status,created_at,processing_started_at,"
+_SELECT = ("select=id,session_number,patient_id,bytes,status,created_at,processing_started_at,"
            "processed_at,recording_id,process_error,attempts,device_serial,processed")
 
 
@@ -177,7 +180,14 @@ def snapshot(token: str, device_serial: str, limit: int = 12) -> Snapshot:
     except Exception:  # noqa: BLE001
         pass
     hist = recent_sessions(token, device_serial, limit)
-    active = next((s for s in hist if s.status in ("queued", "processing")), None)
+    # A row wedged in queued/processing for ages (the dead-AI / edge-kill class)
+    # must not hijack the live view forever: only rows with activity in the last
+    # 30 minutes count as "in flight". Stale ones still show in history.
+    now = time.time()
+    def _fresh(s):
+        ref = s.started or s.created or 0
+        return (now - ref) < 1800
+    active = next((s for s in hist if s.status in ("queued", "processing") and _fresh(s)), None)
     return Snapshot(device_state=dev_state, active=active, history=hist)
 
 
@@ -208,5 +218,77 @@ def watch(token: str, device_serial: str, session_number: int, *,
     raise TimeoutError(f"session {session_number} never appeared on the server")
 
 
-__all__ = ["STAGES", "STAGE_KEYS", "SessionState", "Snapshot",
+PROCESSOR_URL = "https://sate-processor.longcao.workers.dev"
+
+
+def upload_progress(token: str, base_url: str, device_serial: str) -> dict:
+    """Live bytes of an IN-FLIGHT chunked upload (device-api >=v16).
+
+    Mid-upload the session row does not exist yet — the only server-side truth is
+    the _tmp part objects, which the edge fn sums for us. Returns
+    {"uploading": bool, "uploads": [{patient_id, session_number, parts, bytes}]}.
+    """
+    req = urllib.request.Request(
+        f"{base_url}/api/sessions/upload-progress?device_serial={urllib.parse.quote(device_serial)}",
+        headers={"Authorization": f"Bearer {token}", "apikey": A.ANON_KEY,
+                 "User-Agent": "sate-pipeline"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.loads(r.read().decode())
+
+
+def probe_tiers(token: str, base_url: str, device_serial: str) -> dict:
+    """Light health probe per infrastructure tier — feeds the live map's dots.
+
+    Returns {tier: "ok" | "warn" | "down"} for: recorder (heartbeat), api
+    (device-api), db (REST), storage, worker (Cloudflare), ai (queue heuristic —
+    the only visibility we have into the self-hosted AI service).
+    """
+    out = {}
+    hdr = {"Authorization": f"Bearer {token}", "apikey": A.ANON_KEY,
+           "User-Agent": "sate-pipeline"}
+
+    def _try(name, fn):
+        try:
+            out[name] = fn() or "ok"
+        except Exception:  # noqa: BLE001
+            out[name] = "down"
+
+    def _status(url, headers=None, method="GET", accept=(200,)):
+        req = urllib.request.Request(url, headers=headers or {}, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    _try("db", lambda: "ok" if _status(
+        A.SUPABASE_URL + "/rest/v1/sate_device_sessions?select=id&limit=1", hdr) == 200 else "down")
+    _try("api", lambda: "ok" if _status(f"{base_url}/api/devices", hdr) == 200 else "down")
+    _try("storage", lambda: "ok" if _status(
+        A.SUPABASE_URL + "/storage/v1/object/public/firmware/_probe",
+        {"User-Agent": "sate-pipeline"}) in (200, 400, 404) else "down")
+    _try("worker", lambda: "ok" if _status(
+        PROCESSOR_URL + "/health", {"User-Agent": "sate-pipeline"}) == 200 else "down")
+
+    def _ai():
+        # queue piling up = the AI endpoint is unreachable/slow
+        req = urllib.request.Request(
+            A.SUPABASE_URL + "/rest/v1/sate_device_sessions?select=id&status=eq.queued",
+            headers={**hdr, "Prefer": "count=exact", "Range": "0-0"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            cr = r.headers.get("Content-Range", "/0")
+            queued = int(cr.split("/")[-1]) if "/" in cr else 0
+        return "down" if queued > 8 else ("warn" if queued > 3 else "ok")
+    _try("ai", _ai)
+
+    def _rec():
+        for d in A.list_devices(token):
+            if str(d.get("serial", "")) == device_serial:
+                return "ok" if d.get("online") else "down"
+        return "down"
+    _try("recorder", _rec)
+    return out
+
+
+__all__ = ["STAGES", "STAGE_KEYS", "SessionState", "Snapshot", "probe_tiers", "upload_progress",
            "recent_sessions", "session_by_number", "snapshot", "watch"]

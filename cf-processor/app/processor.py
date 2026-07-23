@@ -12,7 +12,7 @@ wall-clock limit). Each iteration:
      the recording). No-speech takes are finalized as no_text.
   4. on any failure -> fail_session() (marks 'error', NEVER deletes device audio).
 
-The AI call uses no read timeout on purpose: a 32-min take can transcribe for
+The AI call uses a 1-hour read ceiling (AI_READ_TIMEOUT_S): a 32-min take can transcribe for
 minutes and that is fine here.
 """
 
@@ -29,6 +29,13 @@ FINALIZE_URL = os.environ.get("FINALIZE_URL", "")
 STUCK_MINUTES = int(os.environ.get("STUCK_MINUTES", "45"))
 MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "10"))
+# Ceiling on how long ONE AI read may hang. The old value was None (unbounded,
+# deliberate for long takes) — but if the AI service accepts the connection and
+# then never responds, the single worker thread wedges FOREVER: the 45-min
+# watchdog requeues the JOB, yet no worker is free to claim it until the
+# container recycles. 1 h comfortably covers the longest possible take (~62 min
+# of audio) while guaranteeing the worker always comes back.
+AI_READ_TIMEOUT_S = int(os.environ.get("AI_READ_TIMEOUT_S", "3600"))
 WORKER_ID = os.environ.get("WORKER_ID", "cf-container-1")
 
 _JSON_HEADERS = {
@@ -108,7 +115,7 @@ def download_wav(path):
         r = requests.get(
             f"{SUPABASE_URL}/storage/v1/object/device-sessions/{path}",
             headers=_STORAGE_HEADERS,
-            timeout=(30, None),  # no read timeout: large files
+            timeout=(30, 900),   # 15-min read ceiling: large files, but never a wedged worker
         )
     except requests.RequestException as e:
         raise Transient(f"download network error: {e}")
@@ -135,8 +142,9 @@ def call_ai(file_name, data):
     files = {"audio_file": (file_name, data, "audio/wav")}
     form = {"device": "cuda", "pause_threshold": "0.25"}
     try:
-        # (connect timeout, read timeout=None) — hold the long transcription.
-        r = requests.post(AI_PROCESS_URL, files=files, data=form, headers={"Accept": "application/json"}, timeout=(30, None))
+        # (connect 30 s, read AI_READ_TIMEOUT_S) — hold a long transcription, but
+        # never hang the only worker forever on a dead-but-connected AI service.
+        r = requests.post(AI_PROCESS_URL, files=files, data=form, headers={"Accept": "application/json"}, timeout=(30, AI_READ_TIMEOUT_S))
     except requests.RequestException as e:
         # ngrok down / connection reset / read failure — worth a retry.
         raise Transient(f"AI network error: {e}")
