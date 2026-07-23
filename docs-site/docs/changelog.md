@@ -10,7 +10,7 @@ relevant table on every release. Versions are independent per component (the
 recorder firmware, the app, and the web app do **not** share a number).
 
 <div class="badge-row">
-<span class="sate-badge">recorder 1.5.13</span>
+<span class="sate-badge">recorder 1.5.14</span>
 <span class="sate-badge">pendant 1.0.0</span>
 <span class="sate-badge">app 0.1.0</span>
 <span class="sate-badge">web 1.5.9</span>
@@ -30,7 +30,7 @@ timeline
 
 | Component | Field / source of truth | Current |
 |---|---|---|
-| Recorder firmware | `SATE_Recorder/SATE_Recorder.ino` → `FIRMWARE_VERSION` | **1.5.13** |
+| Recorder firmware | `SATE_Recorder/SATE_Recorder.ino` → `FIRMWARE_VERSION` | **1.5.14** |
 | Pendant firmware | `SATE_Pendant/SATE_Pendant.ino` → `FIRMWARE_VERSION` (added 2026-07-22) | **1.0.0** |
 | Mobile app | `app.json` `version` (+ `package.json`) | **0.1.0** |
 | Web app | `react_app_sate-ui_update/package.json` `version` | **1.5.9** |
@@ -54,7 +54,8 @@ can read/verify what's flashed. The device already ships a `BLEDfu` OTA service.
 
 | Version | Date | Notes |
 |---|---|---|
-| **1.5.13** | 2026-07-22 | **Server-verified trim** (`GET /api/sessions/verify` before freeing SD audio) · reboot **auto-resume** of a local take (~5 s flush + restart empty `part00`) · **crash-safe delete/renumber** (NVS journal + boot heal). Source only — no GitHub release cut yet. |
+| **1.5.14** | 2026-07-22 | **On-demand screen mirror**: a `SCREENDUMP` serial command base64-streams one RGB565 `lv_snapshot` of the active screen. **DEBUG (USB-CDC) builds only** (gated on `ARDUINO_USB_CDC_ON_BOOT`), never auto-fires, refuses while recording; production carries none of the code. Powers `sate screenshot` / the desktop Debugger app. |
+| 1.5.13 | 2026-07-22 | **Server-verified trim** (`GET /api/sessions/verify` before freeing SD audio) · reboot **auto-resume** of a local take (~5 s flush + restart empty `part00`) · **crash-safe delete/renumber** (NVS journal + boot heal). Source only — no GitHub release cut yet. |
 | 1.5.12 | 2026-07-21 | Sketch restructure + full hardware doc refresh; bounded reclaim `trimPatientSyncedAudio` (keep newest 5 synced sessions per patient). |
 | 1.5.9 | 2026-07 | Reclaim policy change: device holds the only copy until user delete (the three old auto-purge paths removed). |
 | 1.5.5 – 1.5.8 | 2026-07-01 | Battery calibration, Wi-Fi TX power, mic gain, loudness. |

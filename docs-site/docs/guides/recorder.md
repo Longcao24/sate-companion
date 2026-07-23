@@ -8,9 +8,9 @@ sidebar_position: 1
 Internal engineering reference for the **SATE Clinical Recorder** — the handheld ESP32-S3
 speech-capture device. This page is grounded in the source under `SATE_Recorder/`
 (`SATE_Recorder.ino`, `connectivity.cpp/.h`, `display.cpp`, `es8311.cpp`). The details
-below are current as of **firmware 1.5.13** (`FIRMWARE_VERSION` in `SATE_Recorder.ino`).
+below are current as of **firmware 1.5.14** (`FIRMWARE_VERSION` in `SATE_Recorder.ino`).
 
-<div class="badge-row"><span class="sate-badge">Firmware 1.5.13</span><span class="sate-badge">ESP32-S3</span><span class="sate-badge">16 MB flash / 8 MB PSRAM</span></div>
+<div class="badge-row"><span class="sate-badge">Firmware 1.5.14</span><span class="sate-badge">ESP32-S3</span><span class="sate-badge">16 MB flash / 8 MB PSRAM</span></div>
 
 > Companion references: `doc/02-firmware.md` (architecture), `doc/07-runbook.md`
 > (build/flash/OTA), root `hardware.md` (pin map + RAM budget). Where they disagree with
@@ -439,7 +439,7 @@ hooks (`sateHook*`); `loop()` renders. Upload progress is likewise flag-driven
 
 ## 7. Configuration
 
-### Mandatory flash config (verified fw 1.5.12/1.5.13)
+### Mandatory flash config (verified fw 1.5.12–1.5.14)
 
 ```
 esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi
@@ -471,7 +471,7 @@ needs.
 
 | Constant | Value | File |
 |---|---|---|
-| `FIRMWARE_VERSION` | `"1.5.13"` | `SATE_Recorder.ino` |
+| `FIRMWARE_VERSION` | `"1.5.14"` | `SATE_Recorder.ino` |
 | `AUDIO_SAMPLE_RATE` | 16000 | `SATE_Recorder.ino` |
 | `AUDIO_BIT_DEPTH` / `AUDIO_CHANNELS` | 16 / 1 (mono) | `SATE_Recorder.ino` |
 | `SEGMENT_SECONDS` | 60 (1-min segments) | `SATE_Recorder.ino` |
