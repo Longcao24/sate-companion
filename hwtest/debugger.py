@@ -80,10 +80,13 @@ class Debugger:
         self.busy = False                # a serial action is running
         self.mirror_on = False
         self.screen_img = None           # keep a ref (Tk GC)
-        self.port = (self.cfg.get("serial", {}) or {}).get("port") or C._auto_port() or ""
+        cfgport = (self.cfg.get("serial", {}) or {}).get("port")
+        # prefer a port that actually exists (config can be stale after a USB renumber)
+        self.port = cfgport if (cfgport and Path(cfgport).exists()) else (C._auto_port() or cfgport or "")
         self.action_btns: list[Btn] = []
         self.mirror_file = Path(__file__).resolve().parent / ".mirror.ppm"
         self._mtime = 0.0
+        self._mirror_fails = 0
         self._build()
         self.root.after(80, self._poll)
         self._log("SATE Debugger ready. Plug in the recorder (debug build) and hit Diagnose.", "head")
@@ -155,6 +158,7 @@ class Debugger:
             ("Screenshot", self._snap_once, False, False),
             ("Reboot", self._reboot, False, False),
             ("Provision Wi-Fi…", self._provision_dialog, False, False),
+            ("SATE credentials…", self._creds_dialog, False, False),
             ("Run tests (sim)", lambda: self._run(["test", "--sim"], "Tests (sim)"), False, False),
             ("Run tests (hw)", lambda: self._run(["test", "--only", "boot_health", "--mirror", str(self.mirror_file)], "boot_health"), False, False),
             ("Flash DEBUG", lambda: self._confirm_flash(True), True, False),
@@ -254,7 +258,23 @@ class Debugger:
     def _provision_dialog(self):
         if self.busy:
             return
-        _ProvisionDialog(self.root, self._do_provision)
+        _ProvisionDialog(self.root, self._do_provision, (self.cfg.get("server", {}) or {}).get("base_url", ""))
+
+    def _creds_dialog(self):
+        _CredsDialog(self.root, self.cfg.get("server", {}) or {}, self._save_creds)
+
+    def _save_creds(self, vals):
+        srv = self.cfg.setdefault("server", {})
+        for k in ("base_url", "anon_key", "device_key", "device_serial"):
+            if vals.get(k) is not None:
+                srv[k] = vals[k]
+        self.claim_token = vals.get("claim_token", "")
+        try:
+            cfgpath = Path(__file__).resolve().parent / "config.toml"
+            cfgpath.write_text(_toml_dump(self.cfg))
+            self._log("SATE credentials saved to config.toml (tests + provisioning will use them)", "ok")
+        except Exception as e:  # noqa: BLE001
+            self._log(f"could not save config.toml: {e}", "bad")
 
     def _do_provision(self, ssid, pw, server, token):
         self._log(f"\nprovisioning Wi-Fi over BLE: {ssid}", "head")
@@ -304,10 +324,18 @@ class Debugger:
             return
         threading.Thread(target=self._capture_to_screen, daemon=True).start()
 
+    def _resolve_port(self):
+        if self.port and Path(self.port).exists():
+            return self.port
+        p = C._auto_port()
+        if p:
+            self.port = p
+        return self.port
+
     def _capture_to_screen(self):
-        port = self.port or C._auto_port()
+        port = self._resolve_port()
         if not port:
-            self.q.put(("log", "no serial port for screenshot", "bad")); return
+            self.q.put(("mirror_fail", "no serial port", None)); return
         try:
             w, h, rgb = C.capture_screen(port, timeout=10)
             ppm = Path(__file__).resolve().parent / ".screen.ppm"
@@ -315,8 +343,9 @@ class Debugger:
                 f.write(b"P6\n%d %d\n255\n" % (w, h))
                 f.write(rgb)
             self.q.put(("screen", str(ppm), None))
+            self._mirror_fails = 0
         except Exception as e:  # noqa: BLE001
-            self.q.put(("log", f"screenshot: {e}", "bad"))
+            self.q.put(("mirror_fail", str(e), None))
 
     def _save_png(self):
         if self.busy:
@@ -339,6 +368,14 @@ class Debugger:
                         self.screen.config(image=img, text="", width=img.width(), height=img.height())
                     except Exception as e:  # noqa: BLE001
                         self._log(f"render failed: {e}", "bad")
+                elif kind == "mirror_fail":
+                    self._mirror_fails += 1
+                    if self._mirror_fails == 1:
+                        self._log(f"mirror: {a}", "bad")
+                    if self._mirror_fails >= 3 and self.mirror_on:
+                        self.mirror_on = False
+                        self.mirror_btn.lbl.config(text="Mirror ▶")
+                        self._log("mirror paused — capture failing (check the port, or flash a --debug build)", "dim")
                 elif kind == "done":
                     self._set_busy(False)
         except queue.Empty:
@@ -381,15 +418,62 @@ def _confirm(root, title, msg):
     return messagebox.askyesno(title, msg, parent=root)
 
 
+def _toml_dump(cfg: dict) -> str:
+    """Minimal TOML writer for the flat config structure the app manages."""
+    def val(v):
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, (int, float)):
+            return str(v)
+        return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
+    lines = [f"{k} = {val(v)}" for k, v in cfg.items() if not isinstance(v, dict)]
+    for sect, vals in cfg.items():
+        if isinstance(vals, dict):
+            lines.append(f"\n[{sect}]")
+            lines += [f"{k} = {val(v)}" for k, v in vals.items()]
+    return "\n".join(lines) + "\n"
+
+
+class _CredsDialog(tk.Toplevel):
+    def __init__(self, parent, server, on_submit):
+        super().__init__(parent)
+        self.title("SATE credentials")
+        self.configure(bg=CARD)
+        self.on_submit = on_submit
+        self.resizable(False, False)
+        rows = [("device-api base URL", "base_url"), ("Supabase anon key", "anon_key"),
+                ("device key (SATE-xxxx)", "device_key"), ("device serial", "device_serial"),
+                ("claim token (for register)", "claim_token")]
+        tk.Label(self, text="Used by Run tests (server scenarios) and Provision + register.",
+                 bg=CARD, fg=INK2, font=("Menlo", 10)).grid(row=0, column=0, columnspan=2,
+                                                            sticky="w", padx=12, pady=(12, 6))
+        self.vars = {}
+        for i, (label, key) in enumerate(rows, start=1):
+            tk.Label(self, text=label, bg=CARD, fg=INK2, font=("Menlo", 10)).grid(
+                row=i, column=0, sticky="w", padx=12, pady=3)
+            v = tk.StringVar(value=str(server.get(key, "")))
+            self.vars[key] = v
+            tk.Entry(self, textvariable=v, width=40, font=("Menlo", 11), relief="flat",
+                     highlightthickness=1, highlightbackground=HAIR).grid(row=i, column=1, padx=12, pady=3)
+        br = tk.Frame(self, bg=CARD)
+        br.grid(row=len(rows) + 1, column=0, columnspan=2, pady=12)
+        Btn(br, "Save", self._go, primary=True).pack(side="left", padx=6)
+        Btn(br, "Cancel", self.destroy).pack(side="left", padx=6)
+
+    def _go(self):
+        self.on_submit({k: self.vars[k].get().strip() for k in self.vars})
+        self.destroy()
+
+
 class _ProvisionDialog(tk.Toplevel):
-    def __init__(self, parent, on_submit):
+    def __init__(self, parent, on_submit, server_prefill=""):
         super().__init__(parent)
         self.title("Provision Wi-Fi (BLE)")
         self.configure(bg=CARD)
         self.on_submit = on_submit
         self.resizable(False, False)
         rows = [("Wi-Fi SSID", "ssid", ""), ("Wi-Fi password", "pw", ""),
-                ("device-api URL (register only)", "server", ""),
+                ("device-api URL (register only)", "server", server_prefill),
                 ("claim token (register only)", "token", "")]
         self.vars = {}
         for i, (label, key, default) in enumerate(rows):
