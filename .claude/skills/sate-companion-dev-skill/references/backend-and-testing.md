@@ -52,15 +52,22 @@ splicing, verified trim, crash-safe delete, or OTA. The `hwtest/` harness (Pytho
 resets the board over serial, drives record/reboot/delete, and asserts on both the firmware log
 and the bytes the server stored (`GET /sessions/verify`).
 
+Use the `sate` CLI (`pip install -e hwtest`, or run in place with `./hwtest/sate`):
+
 ```bash
-cd hwtest
-python3 run.py --sim                            # self-test the harness, no hardware
-python3 run.py --config config.toml             # recorder over USB serial
-python3 run.py --target pendant --config config.toml
-python3 run.py --list                           # list scenarios
-python3 gui.py                                  # native window
-python3 dashboard.py                            # browser dashboard
+sate test --sim                # self-test the harness, no hardware
+sate test                      # recorder over USB serial
+sate test -t pendant           # pendant over BLE
+sate test --only byte_match    # a subset of scenarios
+sate doctor --device           # reset the board + diagnose real hardware faults
+sate flash recorder            # build + flash (auto-detects the port)
+sate gui                       # native window   |   sate dashboard = browser
 ```
+
+`sate doctor --device` resets the board, reads the boot log, and reports real faults (no
+serial output, crash/panic/brownout, SD init failure, ES8311 audio failure, PSRAM not
+detected, setup never reaching `[MEM] ready`, unclaimed/failing registration). The raw
+`python3 hwtest/run.py …` entry points still work.
 
 Log tags the harness asserts on: `[MEM] ready`, `[CONN] resume … session …`,
 `[CONN] uploaded … (N bytes)`, `[REC] healed interrupted delete`. See `hwtest/README.md`.

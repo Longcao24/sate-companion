@@ -39,7 +39,7 @@ shared BLE radio, hang the AI pipeline, or lose a patient's recording.
 | **Run / deploy the web app** | `cd react_app_sate-ui_update && npm run dev`; `npm run build` before `git subtree push … webapp <branch>`. |
 | **Deploy backend edge fns** | `supabase functions deploy <fn> --no-verify-jwt`. Never `verify_jwt:true`. See `references/backend-and-testing.md`. |
 | **Touch the AI pipeline** | Keep the long call in `cf-processor` (container); `process-device-session` stays a 200 no-op. `references/backend-and-testing.md`. |
-| **Verify a firmware change** | Run the `hwtest/` harness on a real board (`python3 run.py --config config.toml`). Never ship firmware unverified. |
+| **Verify a firmware change** | Run the `hwtest/` harness on a real board (`sate test`), and diagnose faults with `sate doctor --device`. Never ship firmware unverified. |
 | **Edit / deploy the docs** | `cd docs-site && npm start`; `npm run deploy:cf`. Keep line numbers OUT of published docs. |
 | **Anything touching Plaud / BLE / audio integrity** | STOP and read `references/safety-invariants.md` + `CLAUDE.md` first — these are the brick / data-loss paths. |
 
@@ -93,13 +93,18 @@ supabase functions deploy mint-plaud-token --no-verify-jwt
 ```
 The long AI call lives in `cf-processor/` (Cloudflare container), triggered via the Worker `/tick` (kept warm by `pg_cron`); it pulls the WAV from Storage itself. `process-device-session` must stay a 200 no-op in prod — do NOT deploy the repo copy, which still processes.
 
-**Hardware-in-the-loop tests (run before any firmware release):**
+**Hardware testing + flashing — the `sate` CLI** (`pip install -e hwtest`, or `./hwtest/sate`):
 ```bash
-cd hwtest && python3 run.py --sim            # self-test, no hardware
-python3 run.py --config config.toml          # recorder over USB serial
-python3 run.py --target pendant --config config.toml
-python3 gui.py                               # native window   |   python3 dashboard.py = browser
+sate test --sim              # self-test the harness, no hardware
+sate test                    # recorder over USB serial
+sate test -t pendant         # pendant over BLE
+sate doctor --device         # reset the board + diagnose real hardware faults
+sate flash recorder          # build + flash the recorder (auto-detects the port)
+sate flash pendant           # build + flash the pendant (Seeed core)
+sate devices --ble           # list serial ports + scan the pendant
+sate gui                     # native window   |   sate dashboard = browser
 ```
+Run before ANY firmware release. Exits non-zero on any fault (CI / pre-flash gate).
 
 **Docs site:**
 ```bash

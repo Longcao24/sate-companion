@@ -3,6 +3,17 @@
 Real commands for every component. Line-precise detail and the long-form recipe are in
 `CLAUDE.md` and `doc/07-runbook.md`.
 
+**Quick path — the `sate` CLI** (`pip install -e hwtest`, or `./hwtest/sate`):
+
+```bash
+sate flash recorder     # build + flash the recorder (auto-detects the port)
+sate flash pendant      # build + flash the pendant (Seeed core)
+sate doctor --device    # diagnose a board before/after flashing
+```
+
+`sate flash` wraps the exact `arduino-cli` / `flash_xiao.sh` invocations below; use those
+directly when you need finer control (compile-only, a specific port, the release image).
+
 ## Recorder firmware (ESP32-S3)
 
 Folder name matches the `.ino`, so it builds in place — no temp copy.
