@@ -18,7 +18,7 @@ RE_READY = r"\[MEM\]\s+ready"
 RE_CRASH = r"Guru Meditation|panic'ed|abort\(\)|assert failed|Backtrace:|CORRUPT HEAP"
 RE_REC_START = r"\[MEM\]\s+record start"
 RE_RESUME = r"\[CONN\] resume \S+ session (\d+) at"
-RE_UPLOADED = r"\[CONN\] uploaded \S+ session (\d+) \((\d+) bytes\)"
+RE_UPLOADED = r"\[CONN\] uploaded (\S+) session (\d+) \((\d+) bytes\)"
 RE_FREED = r"\[CONN\] freed synced audio \S+ session (\d+) \(server-confirmed"
 RE_FREED_ANY = r"freed synced audio"
 RE_KEPT = r"\[CONN\] keep \S+ session (\d+) .*did not confirm"
@@ -113,10 +113,10 @@ class ByteMatch(Scenario):
         m = ctx.link.wait_for(RE_UPLOADED, timeout=120, on_line=ctx.record_line)
         if not m:
             return self._r(FAIL, "no '[CONN] uploaded … (N bytes)' within 120s — upload never completed", ctx)
-        session_n, byte_count = int(m.group(1)), int(m.group(2))
+        patient_n, session_n, byte_count = m.group(1), int(m.group(2)), int(m.group(3))
         # Ground truth: the server confirms this exact byte count is durably stored
         # (row + storage object) — the same check the device uses before trim.
-        ok = ctx.server.verify(ctx.patient_id(), session_n, byte_count)
+        ok = ctx.server.verify(patient_n, session_n, byte_count)
         if not ok:
             return self._r(
                 FAIL,
@@ -187,8 +187,8 @@ class DeleteDuringUpload(Scenario):
         m = ctx.link.wait_for(RE_UPLOADED, timeout=float(rec.get("upload_wait_s", 120)), on_line=ctx.record_line)
         if not m:
             return self._r(SKIP, "no upload completed in the window — re-run with a take mid-upload", ctx)
-        session_n, byte_count = int(m.group(1)), int(m.group(2))
-        ok = ctx.server.verify(ctx.patient_id(), session_n, byte_count)
+        patient_n, session_n, byte_count = m.group(1), int(m.group(2)), int(m.group(3))
+        ok = ctx.server.verify(patient_n, session_n, byte_count)
         if gap and not ok:
             return self._r(FAIL, f"renumber during upload corrupted session {session_n} (gap + verify fail)", ctx)
         return self._r(PASS, f"session {session_n} uploaded byte-exact despite the concurrent delete", ctx)

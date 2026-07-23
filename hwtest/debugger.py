@@ -229,8 +229,11 @@ class Debugger:
         add(row, "Live status", self._refresh_status)
 
         # 2) TEST — record & verify (mobile-app step 2)
+        AUTO = ["boot_health", "byte_match", "verified_trim"]      # hands-off (remote record)
+        MANUAL = ["reboot_resume", "delete_journal", "delete_during_upload"]  # need a button / screen tap
         f = section("2 · TEST RECORDING")
-        add(f, "▶  Run recording tests", lambda: self._run_tests_inproc(None, sim=False), primary=True, wide=True)
+        add(f, "▶  Run automatic tests", lambda: self._run_tests_inproc(AUTO, sim=False), primary=True, wide=True)
+        add(f, "Manual tests (press RECORD / delete on device)…", lambda: self._run_tests_inproc(MANUAL, sim=False), wide=True)
         row = tk.Frame(ap, bg=CARD); row.pack(fill="x")
         add(row, "Try in simulator", lambda: self._run_tests_inproc(None, sim=True))
         add(row, "Take screenshot", self._snap_once)
