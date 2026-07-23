@@ -191,10 +191,15 @@ Durable lessons — check the ones relevant to what you're touching. Version num
 - **Do NOT free audio on a `.synced` marker alone.** A marker only means "a POST returned 2xx" (or an
   app-set BLE `mark_synced`), NOT "the audio is durably stored" — the 413-ghost class left markers with
   no object. The verify gate (row + `objectExists`) is what makes reclaim safe; don't bypass it.
-- **Delete/renumber is crash-safe.** `deleteSession()` shifts later sessions down to keep numbering
-  contiguous; that multi-rename is journaled to NVS (`sate-del`) before it runs and re-driven on boot
-  (`recoverInterruptedDelete()` → `compactPatientDir()` in `setup()`), so a reboot mid-shift heals into
-  contiguous `1..N` instead of leaving a hole that hides every later take. Idempotent + re-runnable.
+- **Sessions are NEVER renumbered (fw ≥1.5.20).** Numbers are allocated **monotonically and wrap at 99**
+  (to the lowest free `1..99`); a hole is legal. `deleteSession()` removes ONLY that session's own files
+  and shifts nothing. The old renumber machinery is GONE — no `sate-del` NVS journal, no
+  `recoverInterruptedDelete()`/`compactPatientDir()`/`renameSessionFiles()`. This deliberately killed the
+  biggest critical cluster (renumber-under-a-live-upload splicing two takes, trash-tap-after-renumber
+  deleting the wrong take, power-cut-mid-renumber slot reuse). A delete defers-and-drops only the uploader
+  if it is latched on that exact session (`upDropReq`); any other session's upload is untouched. Every scan
+  iterates the directory — do NOT reintroduce code that assumes contiguous `1..N` or renumbers. See
+  agent-memory `no-renumber-sessions`.
 - **Auto-resume after reboot** (`maybeResumeRecording()`): **every** take - button-started AND
   server/app-started (fw >=1.5.16) - resumes into the same session, because segments flush to SD every
   ~5 s (not once per minute) and an empty `part00` on boot RESTARTS the take instead of deleting it.

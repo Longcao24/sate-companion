@@ -32,6 +32,20 @@ pie showData
 
 These can lose or mismatch a patient's recording — the worst outcomes.
 
+:::tip Recorder firmware — 55 audited defects fixed in fw 1.5.20 (2026-07-23)
+An 84-agent adversarial audit of the recorder firmware found 55 confirmed defects
+(12 critical); all are fixed in **fw 1.5.20**, re-verified (56 verdicts, 0 still-broken),
+compiles clean. Highlights: **sessions no longer renumber** (monotonic, wrap at 99 — this
+removed the whole renumber-during-delete critical cluster); **keep-newest-5 / mark-synced
+audited end to end** (an unsynced take is never freed; a synced one only after server
+byte-verification); OTA rollback restored + err-get-1 fixed; crash-resume no longer strands
+resumed minutes; on-device error messages made visible (they rendered to labels that were
+never created); dead-mic silence detection; every `millis()` deadline made wrap-safe; the
+BLE bridge can finally stream a recording; `esp_reset_reason()` on boot + heartbeat + a
+serial `DIAG` dump; ~26.7 KB moved to PSRAM (internal RAM 31%→24%). **On-hardware `sate ci`
+gate pending a USB replug.**
+:::
+
 | Status | Issue | Where |
 |---|---|---|
 | <span class="sate-badge ok">fixed</span> | Delete-during-upload could splice **two takes into one WAV** (3 s guard vs 60 s chunk) — now waits for the upload + trim tail | `SATE_Recorder.ino`, `connectivity.cpp` |
