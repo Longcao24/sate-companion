@@ -97,6 +97,7 @@ class Debugger:
         self._mirror_fails = 0
         self.claim_token = ""
         self.ack = threading.Event()     # bench-prompt gate ("Press RECORD → Done")
+        self._pending_title = ""         # scenario currently running (for the results panel)
         # pre-fill the public server URL + anon key so you don't type them
         srv = self.cfg.setdefault("server", {})
         if not srv.get("base_url"):
@@ -189,6 +190,13 @@ class Debugger:
         grid.columnconfigure(0, weight=1)
         grid.columnconfigure(1, weight=1)
 
+        # results panel — a PASS/FAIL chip per scenario, filled live
+        rc = tk.Frame(right, bg=BG)
+        rc.pack(fill="x", pady=(12, 0))
+        tk.Label(rc, text="RESULTS", bg=BG, fg=INK2, font=("Menlo", 10, "bold")).pack(anchor="w")
+        self.results_frame = tk.Frame(rc, bg=BG)
+        self.results_frame.pack(fill="x")
+
         # bench prompt (shown when a scenario needs you, e.g. "Press RECORD")
         self.prompt_frame = tk.Frame(right, bg="#fff7e6", highlightbackground=WARNC, highlightthickness=1)
         self.prompt_msg = tk.Label(self.prompt_frame, text="", bg="#fff7e6", fg="#7a4b00",
@@ -246,6 +254,32 @@ class Debugger:
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _clear_results(self):
+        self._pending_title = ""
+        for w in self.results_frame.winfo_children():
+            w.destroy()
+
+    def _add_result(self, title, status):
+        colors = {"PASS": OKC, "FAIL": BADC, "ERROR": "#7c3aed", "SKIP": WARNC}
+        c = colors.get(status, INK2)
+        row = tk.Frame(self.results_frame, bg=CARD, highlightbackground=HAIR, highlightthickness=1)
+        row.pack(fill="x", pady=2)
+        tk.Label(row, text=status, bg=CARD, fg=c, font=("Menlo", 10, "bold"), width=6).pack(side="left", padx=(8, 4), pady=5)
+        tk.Label(row, text=title, bg=CARD, fg=INK, font=("Helvetica Neue", 11), anchor="w",
+                 wraplength=500, justify="left").pack(side="left", fill="x", expand=True, pady=5)
+
+    def _scan_result(self, line):
+        """Watch the scenario log stream to fill the results panel live."""
+        import re
+        s = line.strip()
+        if s.startswith("── "):
+            self._pending_title = s[3:].strip()
+            return
+        m = re.match(r"→\s+(PASS|FAIL|SKIP|ERROR):", s)
+        if m and self._pending_title:
+            self._add_result(self._pending_title, m.group(1))
+            self._pending_title = ""
+
     def _ack(self):
         self.ack.set()
 
@@ -262,6 +296,7 @@ class Debugger:
         if self.busy:
             return
         self._set_busy(True)
+        self._clear_results()
         self._log(f"\n$ tests {'(sim)' if sim else '(hardware)'} — {', '.join(keys) if keys else 'all scenarios'}", "head")
         cfg = dict(self.cfg)
         port = self._resolve_port()
@@ -390,6 +425,7 @@ class Debugger:
                 # 4/4 — run the scenarios (with the live screen mirror)
                 if run_tests:
                     stage("[4/4] Running scenarios — press RECORD on the device when the prompt asks…")
+                    self.q.put(("clear_results", None, None))
                     from hwtest.runner import run as _run_scn
                     tcfg = dict(self.cfg)
                     port = self._resolve_port()
@@ -540,6 +576,7 @@ class Debugger:
                 if kind == "log":
                     self._log("  " + a if not a.startswith("[") and not a.startswith("$") else a, b)
                     self._scan_state(a)
+                    self._scan_result(a)
                 elif kind == "screen":
                     try:
                         img = tk.PhotoImage(file=a)
@@ -547,6 +584,8 @@ class Debugger:
                         self.screen.config(image=img, text="", width=img.width(), height=img.height())
                     except Exception as e:  # noqa: BLE001
                         self._log(f"render failed: {e}", "bad")
+                elif kind == "clear_results":
+                    self._clear_results()
                 elif kind == "prompt":
                     self._show_prompt(a)
                 elif kind == "mirror_fail":
