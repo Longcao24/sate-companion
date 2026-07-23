@@ -38,3 +38,6 @@ supabase/.temp/
 # Arduino build outputs
 SATE_Recorder/build*/
 hwtest/.venv/
+hwtest/.mirror.ppm
+hwtest/.screen.ppm
+hwtest/*.ppm

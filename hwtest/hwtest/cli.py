@@ -144,7 +144,7 @@ def cmd_test(args: argparse.Namespace) -> int:
         cfg.setdefault("record", {}).update({"take_s": 1, "resume_hold_s": 0,
                                              "trim_watch_s": 0.3, "gap_wait_s": 0.3,
                                              "upload_wait_s": 3, "delete_target": 1})
-    results = run(cfg, keys, sim=args.sim, color=_USE_COLOR)
+    results = run(cfg, keys, sim=args.sim, color=_USE_COLOR, mirror=getattr(args, "mirror", None))
     return 1 if any(r.status in ("FAIL", "ERROR") for r in results) else 0
 
 
@@ -436,6 +436,14 @@ def cmd_gui(args: argparse.Namespace) -> int:
     return _run([sys.executable, str(REPO / "hwtest" / "gui.py")], cwd=REPO / "hwtest")
 
 
+def cmd_debug(args: argparse.Namespace) -> int:
+    cfg = REPO / "hwtest" / "config.toml"
+    argv = [sys.executable, str(REPO / "hwtest" / "debugger.py")]
+    if cfg.exists():
+        argv += ["--config", str(cfg)]
+    return _run(argv, cwd=REPO / "hwtest")
+
+
 def cmd_dashboard(args: argparse.Namespace) -> int:
     return _run([sys.executable, str(REPO / "hwtest" / "dashboard.py")], cwd=REPO / "hwtest")
 
@@ -593,34 +601,23 @@ def _rgb565_to_rgb888(buf: bytes, swap: bool) -> bytes:
     return bytes(out)
 
 
-def cmd_screenshot(args: argparse.Namespace) -> int:
+def capture_screen(port: str, timeout: float = 12.0) -> tuple[int, int, bytes]:
+    """Send SCREENDUMP over serial and return (w, h, rgb888). Raises RuntimeError.
+    Reusable by the CLI and the desktop debugger. Does NOT reset the board."""
     import base64
     import re
     import time
-    banner()
-    port = args.port or _auto_port()
-    if not port:
-        bad("no serial port — plug in the recorder (debug build) or pass --port"); return 2
-    try:
-        import serial
-    except ImportError:
-        bad("pyserial not installed — `pip install pyserial`"); return 1
-
-    info(f"requesting a screen dump from {port} …")
-    try:
-        ser = serial.Serial(port, 115200, timeout=0.3)
-    except Exception as e:  # noqa: BLE001
-        bad(f"could not open {port}: {e}"); return 1
+    import serial
+    ser = serial.Serial(port, 115200, timeout=0.3)
     try:
         ser.reset_input_buffer()
-        ser.write(b"SCREENDUMP\n")         # NOTE: does not reset the board — captures the live screen
-        deadline = time.monotonic() + args.timeout
+        ser.write(b"SCREENDUMP\n")
+        deadline = time.monotonic() + timeout
         buf = b""
         w = h = 0
         swap = False
         b64_lines: list[str] = []
-        collecting = False
-        began = False
+        collecting = began = False
         b64_re = re.compile(r"^[A-Za-z0-9+/=]+$")
         while time.monotonic() < deadline:
             buf += ser.read(4096)
@@ -630,11 +627,11 @@ def cmd_screenshot(args: argparse.Namespace) -> int:
                 if not s:
                     continue
                 if s.startswith("[SCREENSHOT-ERR"):
-                    bad(f"device refused: {s}"); return 1
+                    raise RuntimeError(f"device refused: {s}")
                 m = re.search(r"\[SCREENSHOT-BEGIN w=(\d+) h=(\d+).*swap=(\d+)", s)
                 if m:
                     w, h, swap = int(m.group(1)), int(m.group(2)), m.group(3) == "1"
-                    collecting, began = True, True
+                    collecting = began = True
                     continue
                 if "[SCREENSHOT-END]" in s:
                     collecting = False
@@ -644,19 +641,33 @@ def cmd_screenshot(args: argparse.Namespace) -> int:
             if began and not collecting:
                 break
         if not began:
-            bad("no screenshot response — is this a --debug build? (production has no screendump)")
-            return 1
+            raise RuntimeError("no screenshot response — is this a --debug build? (production has no screendump)")
         data = base64.b64decode("".join(b64_lines), validate=False)
         want = w * h * 2
         if len(data) < want:
-            warn(f"got {len(data)} of {want} bytes — padding (a log line may have interleaved)")
             data = data + b"\x00" * (want - len(data))
-        rgb = _rgb565_to_rgb888(data[:want], swap)
-        _write_png(args.output, w, h, rgb)
-        ok(green(f"saved {w}×{h} screenshot → {args.output}"))
-        return 0
+        return w, h, _rgb565_to_rgb888(data[:want], swap)
     finally:
         ser.close()
+
+
+def cmd_screenshot(args: argparse.Namespace) -> int:
+    banner()
+    port = args.port or _auto_port()
+    if not port:
+        bad("no serial port — plug in the recorder (debug build) or pass --port"); return 2
+    try:
+        import serial  # noqa: F401
+    except ImportError:
+        bad("pyserial not installed — `pip install pyserial`"); return 1
+    info(f"requesting a screen dump from {port} …")
+    try:
+        w, h, rgb = capture_screen(port, args.timeout)
+    except Exception as e:  # noqa: BLE001
+        bad(str(e)); return 1
+    _write_png(args.output, w, h, rgb)
+    ok(green(f"saved {w}×{h} screenshot → {args.output}"))
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -675,6 +686,7 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--sim", action="store_true", help="run against the in-memory device (no hardware)")
     t.add_argument("--only", help="comma-separated scenario keys")
     t.add_argument("-l", "--list", action="store_true", help="list scenarios and exit")
+    t.add_argument("--mirror", help="write a screen snapshot to this file between scenarios (for the desktop app)")
     t.set_defaults(func=cmd_test)
 
     f = sub.add_parser("flash", help="build + flash firmware")
@@ -718,6 +730,7 @@ def build_parser() -> argparse.ArgumentParser:
     mon.add_argument("--seconds", type=float, default=0.0, help="stop after N seconds (default: run until Ctrl-C)")
     mon.set_defaults(func=cmd_monitor)
 
+    sub.add_parser("debug", help="launch the native Debugger app (screen mirror + actions)").set_defaults(func=cmd_debug)
     sub.add_parser("gui", help="launch the native test window").set_defaults(func=cmd_gui)
     sub.add_parser("dashboard", help="launch the browser test dashboard").set_defaults(func=cmd_dashboard)
     sub.add_parser("version", help="show CLI + firmware versions").set_defaults(func=cmd_version)
