@@ -510,7 +510,23 @@ class Debugger:
 
     def _probe_status(self):
         port = self._resolve_port()
-        self.q.put(("info", f"port {port or '—'}", None))
+        # Pick the device up from the account/config straight away, so the panel
+        # shows it and every remote button works without a Connect run first.
+        self._ensure_device_id()
+        fw = state = ""
+        if self.access_token and self.serial:
+            try:
+                from hwtest import sate_account as A
+                for d in A.list_devices(self.access_token):
+                    if str(d.get("serial", "")) == self.serial:
+                        fw = str(d.get("fw") or "")
+                        state = ("online · " + str(d.get("state") or "idle")) if d.get("online")                             else "offline"
+                        break
+            except Exception:  # noqa: BLE001
+                pass
+        if self.serial:
+            self.q.put(("serial", self.serial, state or "unknown"))
+        self.q.put(("info", f"fw {fw or '—'}  ·  port {port or '—'}", None))
 
     # ---- results / prompt ----
     def _clear_results(self):
@@ -708,14 +724,39 @@ class Debugger:
         threading.Thread(target=work, daemon=True).start()
 
     def _ensure_device_id(self):
-        """Resolve this bench device's device-api id from the signed-in account."""
-        if self.device_id or not (self.access_token and self.serial):
+        """Resolve the bench device without requiring the Connect dialog first.
+
+        The device is usually ALREADY claimed to the account, so requiring a
+        Connect run before any remote button worked was wrong. Resolution order:
+        1. whatever this session already resolved;
+        2. config.toml [server] device_id / device_serial;
+        3. the signed-in account's device list — if exactly one (non-protected)
+           device is claimed, that is the bench device.
+        """
+        if self.device_id:
             return self.device_id
+        srv = self.cfg.get("server", {}) or {}
+        if srv.get("device_id"):
+            self.device_id = str(srv["device_id"])
+            self.serial = self.serial or str(srv.get("device_serial", ""))
+            self.device_key = str(srv.get("device_key") or ("key-" + self.device_id))
+            return self.device_id
+        if not self.access_token:
+            return ""
         try:
             from hwtest import sate_account as A
-            dk, did = A.device_key_for(self.access_token, self.serial)
-            self.device_key = dk or self.device_key
-            self.device_id = did or self.device_id
+            if self.serial:
+                dk, did = A.device_key_for(self.access_token, self.serial)
+                if did:
+                    self.device_key, self.device_id = dk, did
+                    return self.device_id
+            devs = [d for d in A.list_devices(self.access_token)
+                    if str(d.get("serial", "")).upper() not in self.PROTECTED_SERIALS]
+            if len(devs) == 1:
+                d = devs[0]
+                self.device_id = str(d.get("id") or d.get("device_id") or "")
+                self.serial = str(d.get("serial") or d.get("device_serial") or d.get("name") or "")
+                self.device_key = "key-" + self.device_id if self.device_id else ""
         except Exception:  # noqa: BLE001
             pass
         return self.device_id
@@ -921,6 +962,10 @@ class Debugger:
                 elif kind == "log":
                     self._log("  " + a if not a.startswith(("[", "$", "══")) else a, b)
                     self._scan_state(a); self._scan_result(a)
+                elif kind == "serial":
+                    self.serial_lbl.config(text=a)
+                    on = b.startswith("online")
+                    self.dev_state.config(text=("● " + b), fg=(OKC if on else WARNC))
                 elif kind == "fwlist":
                     self._show_fw_list(a)
                 elif kind == "info":
