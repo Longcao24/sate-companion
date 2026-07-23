@@ -96,6 +96,7 @@ class Debugger:
         self._mtime = 0.0
         self._mirror_fails = 0
         self.claim_token = ""
+        self.ack = threading.Event()     # bench-prompt gate ("Press RECORD → Done")
         # pre-fill the public server URL + anon key so you don't type them
         srv = self.cfg.setdefault("server", {})
         if not srv.get("base_url"):
@@ -169,14 +170,15 @@ class Debugger:
         grid = tk.Frame(ap, bg=CARD)
         grid.pack(fill="x")
         actions = [
+            ("▶  Run E2E", self._e2e_dialog, True, False),
             ("Diagnose", lambda: self._run(["doctor", "--device"], "Diagnose"), False, False),
             ("Screenshot", self._snap_once, False, False),
             ("Reboot", self._reboot, False, False),
             ("Log in (SATE)…", self._login_dialog, True, False),
             ("Provision Wi-Fi…", self._provision_dialog, False, False),
             ("SATE credentials…", self._creds_dialog, False, False),
-            ("Run tests (sim)", lambda: self._run(["test", "--sim"], "Tests (sim)"), False, False),
-            ("Run tests (hw)", lambda: self._run(["test", "--only", "boot_health", "--mirror", str(self.mirror_file)], "boot_health"), False, False),
+            ("Run tests (sim)", lambda: self._run_tests_inproc(None, sim=True), False, False),
+            ("Run tests (hw)", lambda: self._run_tests_inproc(None, sim=False), False, False),
             ("Flash DEBUG", lambda: self._confirm_flash(True), True, False),
             ("Flash prod", lambda: self._confirm_flash(False), False, True),
         ]
@@ -186,6 +188,13 @@ class Debugger:
             self.action_btns.append(b)
         grid.columnconfigure(0, weight=1)
         grid.columnconfigure(1, weight=1)
+
+        # bench prompt (shown when a scenario needs you, e.g. "Press RECORD")
+        self.prompt_frame = tk.Frame(right, bg="#fff7e6", highlightbackground=WARNC, highlightthickness=1)
+        self.prompt_msg = tk.Label(self.prompt_frame, text="", bg="#fff7e6", fg="#7a4b00",
+                                   font=("Menlo", 11), wraplength=520, justify="left")
+        self.prompt_msg.pack(side="left", padx=12, pady=8)
+        Btn(self.prompt_frame, "Done ▸", self._ack, primary=True).pack(side="right", padx=10, pady=8)
 
         # log console
         lc = tk.Frame(right, bg=BG)
@@ -237,6 +246,49 @@ class Debugger:
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _ack(self):
+        self.ack.set()
+
+    def _show_prompt(self, msg):
+        if msg:
+            self.prompt_msg.config(text=msg)
+            self.prompt_frame.pack(fill="x", pady=(10, 0))
+        else:
+            self.prompt_frame.pack_forget()
+
+    def _run_tests_inproc(self, keys=None, sim=False):
+        """Run scenarios IN-PROCESS so bench prompts ('Press RECORD') surface as a
+        button and the screen mirrors between scenarios via the shared serial link."""
+        if self.busy:
+            return
+        self._set_busy(True)
+        self._log(f"\n$ tests {'(sim)' if sim else '(hardware)'} — {', '.join(keys) if keys else 'all scenarios'}", "head")
+        cfg = dict(self.cfg)
+        port = self._resolve_port()
+        if port and not sim:
+            cfg["serial"] = {**cfg.get("serial", {}), "port": port}
+        if sim:
+            cfg["record"] = {**cfg.get("record", {}), "take_s": 1, "resume_hold_s": 0,
+                             "trim_watch_s": 0.3, "gap_wait_s": 0.3, "upload_wait_s": 3, "delete_target": 1}
+
+        def worker():
+            from hwtest.runner import run
+            def log_fn(l):
+                self.q.put(("log", l, None))
+            def prompt_fn(msg):
+                self.q.put(("prompt", msg, None))
+                self.ack.clear()
+                self.ack.wait()
+                self.q.put(("prompt", None, None))
+            try:
+                run(cfg, keys, sim=sim, log=log_fn, color=False, prompt_fn=prompt_fn,
+                    mirror=None if sim else str(self.mirror_file))
+            except Exception as e:  # noqa: BLE001
+                self.q.put(("log", f"[harness error] {e}", "bad"))
+            finally:
+                self.q.put(("done", None, None))
+        threading.Thread(target=worker, daemon=True).start()
+
     def _reboot(self):
         if self.busy:
             return
@@ -275,6 +327,95 @@ class Debugger:
         if self.busy:
             return
         _ProvisionDialog(self.root, self._do_provision, (self.cfg.get("server", {}) or {}).get("base_url", ""))
+
+    def _e2e_dialog(self):
+        if self.busy:
+            return
+        _E2EDialog(self.root, self._run_e2e, (self.cfg.get("server", {}) or {}).get("base_url") or DEFAULT_SERVER)
+
+    def _run_e2e(self, email, pw, ssid, wifipw, run_tests):
+        self._log("\n══════════ E2E FLOW ══════════", "head")
+        self._set_busy(True)
+
+        def stage(msg, tag="head"):
+            self.q.put(("log", msg, tag))
+
+        def work():
+            try:
+                import asyncio
+                from hwtest import sate_account as A
+                from hwtest.recorder_ble import RecorderBle
+
+                # 1/4 — log in + mint claim token
+                stage("[1/4] Logging in + minting claim token…")
+                token = A.login_and_claim(email, pw)
+                self.claim_token = token
+                self.q.put(("log", "  ✓ claim token ready", "ok"))
+
+                # 2/4 — provision Wi-Fi + register/claim (also read the serial)
+                server = (self.cfg.get("server", {}) or {}).get("base_url") or DEFAULT_SERVER
+                stage(f"[2/4] Provisioning Wi-Fi ({ssid}) + register…")
+
+                async def prov():
+                    addr = await RecorderBle.find("SATE-", timeout=10)
+                    if not addr:
+                        return None, {"state": "error", "msg": "no recorder in BLE/setup mode"}
+                    async with RecorderBle(addr, log=lambda m: self.q.put(("log", m, "dim"))) as r:
+                        info = await r.read_info()
+                        res = await r.provision(ssid, wifipw, server, token)
+                        return info, res
+
+                info, res = asyncio.run(prov())
+                if not res or res.get("state") != "registered":
+                    self.q.put(("log", f"  ✗ provisioning ended in '{(res or {}).get('state')}' "
+                                       f"{(res or {}).get('msg', '')}", "bad"))
+                    return
+                dev_id = res.get("device_id", "")
+                serial = (info or {}).get("serial", "")
+                self.q.put(("log", f"  ✓ registered + claimed  device_id={dev_id}  ip={res.get('ip', '?')}", "ok"))
+
+                # 3/4 — write server creds so the tests can run server scenarios
+                stage("[3/4] Device online — configuring test credentials…")
+                srv = self.cfg.setdefault("server", {})
+                if dev_id:
+                    srv["device_key"] = "key-" + dev_id
+                if serial:
+                    srv["device_serial"] = serial
+                try:
+                    (Path(__file__).resolve().parent / "config.toml").write_text(_toml_dump(self.cfg))
+                except Exception:  # noqa: BLE001
+                    pass
+                time.sleep(6)     # let the device join Wi-Fi + reach the server
+
+                # 4/4 — run the scenarios (with the live screen mirror)
+                if run_tests:
+                    stage("[4/4] Running scenarios — press RECORD on the device when the prompt asks…")
+                    from hwtest.runner import run as _run_scn
+                    tcfg = dict(self.cfg)
+                    port = self._resolve_port()
+                    if port:
+                        tcfg["serial"] = {**tcfg.get("serial", {}), "port": port}
+
+                    def log_fn(l):
+                        self.q.put(("log", l, None))
+
+                    def prompt_fn(msg):
+                        self.q.put(("prompt", msg, None))
+                        self.ack.clear()
+                        self.ack.wait()
+                        self.q.put(("prompt", None, None))
+
+                    _run_scn(tcfg, None, sim=False, log=log_fn, color=False,
+                             prompt_fn=prompt_fn, mirror=str(self.mirror_file))
+                    self.q.put(("log", "══════ E2E COMPLETE ══════", "ok"))
+                else:
+                    self.q.put(("log", "══ E2E COMPLETE — device online (tests skipped) ══", "ok"))
+            except Exception as e:  # noqa: BLE001
+                self.q.put(("log", f"E2E failed: {e}", "bad"))
+            finally:
+                self.q.put(("done", None, None))
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _login_dialog(self):
         _LoginDialog(self.root, self._do_login)
@@ -406,6 +547,8 @@ class Debugger:
                         self.screen.config(image=img, text="", width=img.width(), height=img.height())
                     except Exception as e:  # noqa: BLE001
                         self._log(f"render failed: {e}", "bad")
+                elif kind == "prompt":
+                    self._show_prompt(a)
                 elif kind == "mirror_fail":
                     self._mirror_fails += 1
                     if self._mirror_fails == 1:
@@ -537,6 +680,111 @@ class _CredsDialog(tk.Toplevel):
     def _go(self):
         self.on_submit({k: self.vars[k].get().strip() for k in self.vars})
         self.destroy()
+
+
+class _WifiScanMixin:
+    """Shared BLE Wi-Fi scan → listbox for the Provision and E2E dialogs."""
+    def _scan(self):
+        self._status.config(text="scanning over BLE… (~20s)")
+        self.netbox.delete(0, "end")
+
+        def work():
+            try:
+                import asyncio
+                from hwtest.recorder_ble import RecorderBle
+                async def go():
+                    addr = await RecorderBle.find("SATE-", timeout=10)
+                    if not addr:
+                        return None
+                    async with RecorderBle(addr) as r:
+                        return await r.scan_wifi(timeout=25)
+                self._q.put(asyncio.run(go()))
+            except Exception as e:  # noqa: BLE001
+                self._q.put(e)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _poll(self):
+        try:
+            while True:
+                item = self._q.get_nowait()
+                if isinstance(item, Exception):
+                    self._status.config(text=f"scan failed: {item}")
+                elif item is None:
+                    self._status.config(text="no recorder in BLE/setup mode")
+                else:
+                    for s in sorted({n.get("ssid", "") for n in item if n.get("ssid")}):
+                        self.netbox.insert("end", s)
+                    self._status.config(text=f"{self.netbox.size()} network(s) — click one, type the password")
+        except queue.Empty:
+            pass
+        try:
+            self.after(150, self._poll)
+        except tk.TclError:
+            pass
+
+    def _pick(self, _e):
+        sel = self.netbox.curselection()
+        if sel:
+            self.vars["ssid"].set(self.netbox.get(sel[0]))
+
+
+class _E2EDialog(tk.Toplevel, _WifiScanMixin):
+    def __init__(self, parent, on_submit, server):
+        super().__init__(parent)
+        self.title("Run E2E — login → provision → test")
+        self.configure(bg=CARD)
+        self.on_submit = on_submit
+        self.resizable(False, False)
+        self._q = queue.Queue()
+        self.vars = {}
+        r = 0
+        tk.Label(self, text="One flow: log in → provision Wi-Fi (register + claim) → run scenarios.",
+                 bg=CARD, fg=INK2, font=("Menlo", 10), wraplength=400, justify="left").grid(
+            row=r, column=0, columnspan=2, sticky="w", padx=12, pady=(12, 8)); r += 1
+
+        def field(label, key, show=""):
+            nonlocal r
+            tk.Label(self, text=label, bg=CARD, fg=INK2, font=("Menlo", 10)).grid(
+                row=r, column=0, sticky="w", padx=12, pady=3)
+            v = tk.StringVar(); self.vars[key] = v
+            tk.Entry(self, textvariable=v, width=34, show=show, font=("Menlo", 11), relief="flat",
+                     highlightthickness=1, highlightbackground=HAIR).grid(row=r, column=1, padx=12, pady=3)
+            r += 1
+
+        field("SATE email", "email")
+        field("SATE password", "password", "•")
+        top = tk.Frame(self, bg=CARD)
+        top.grid(row=r, column=0, columnspan=2, sticky="ew", padx=12, pady=(8, 2)); r += 1
+        Btn(top, "Scan Wi-Fi (BLE)", self._scan, primary=True).pack(side="left")
+        self._status = tk.Label(top, text="", bg=CARD, fg=INK2, font=("Menlo", 9),
+                                wraplength=240, justify="left"); self._status.pack(side="left", padx=8)
+        self.netbox = tk.Listbox(self, height=4, width=42, font=("Menlo", 11), relief="flat",
+                                 highlightthickness=1, highlightbackground=HAIR, activestyle="none",
+                                 selectbackground=_mix(CARD, ACCENT, 0.18))
+        self.netbox.grid(row=r, column=0, columnspan=2, padx=12, pady=3, sticky="ew"); r += 1
+        self.netbox.bind("<<ListboxSelect>>", self._pick)
+        field("Wi-Fi SSID", "ssid")
+        field("Wi-Fi password", "wifipw", "•")
+        self.run_tests = tk.BooleanVar(value=True)
+        tk.Checkbutton(self, text="run tests after provisioning", variable=self.run_tests, bg=CARD,
+                       fg=INK, selectcolor=CARD, font=("Menlo", 10), highlightthickness=0, bd=0,
+                       activebackground=CARD).grid(row=r, column=0, columnspan=2, sticky="w", padx=12, pady=4)
+        r += 1
+        br = tk.Frame(self, bg=CARD)
+        br.grid(row=r, column=0, columnspan=2, pady=12)
+        Btn(br, "Run E2E", self._go, primary=True).pack(side="left", padx=6)
+        Btn(br, "Cancel", self.destroy).pack(side="left", padx=6)
+        self.after(120, self._poll)
+
+    def _go(self):
+        val = lambda k: self.vars[k].get() if k in ("password", "wifipw") else self.vars[k].get().strip()
+        email, pw, ssid, wifipw = val("email"), val("password"), val("ssid"), val("wifipw")
+        if not (email and pw and ssid):
+            self._status.config(text="need email, password, and a Wi-Fi network")
+            return
+        run_tests = self.run_tests.get()
+        self.destroy()
+        self.on_submit(email, pw, ssid, wifipw, run_tests)
 
 
 class _ProvisionDialog(tk.Toplevel):
