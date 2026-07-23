@@ -154,8 +154,8 @@ screen mirrored live on the left with the controls on the right:
 
 | Section | What |
 |---|---|
-| **1 · Device** | Connect / set up (Wi-Fi scan, so you only type the password), diagnose, live status |
-| **2 · Test recording** | Run the hands-off suite, or tick **any** of the six scenarios individually and run just those; simulator; screenshot |
+| **1 · Device** | Connect / set up (Wi-Fi scan, so you only type the password), diagnose, live status, and **Unlink & reset** — the mobile app's flow (`DELETE /api/devices/:id`, the unit factory-resets on its next heartbeat, BLE `factory_reset` as the off-Wi-Fi fallback), so the full first-time path (claim + provision + test) can be re-run from scratch |
+| **2 · Test recording** | Run the hands-off suite, or tick **any** of the six scenarios individually and run just those; screenshot. (The simulator has no button — run it with `sate test --sim`.) |
 | **3 · Remote control** | `record` · `stop` · `reboot` · `sync now` · `re-sync all` |
 | **Tools** | Reboot over BLE, move Wi-Fi |
 | **Firmware** | Flash the debug build, flash production, or **flash an older published version** |

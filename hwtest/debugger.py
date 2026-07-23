@@ -259,6 +259,10 @@ class Debugger:
         row = tk.Frame(ap, bg=CARD); row.pack(fill="x")
         add(row, "Diagnose", lambda: self._run(["doctor", "--device"], "Diagnose"))
         add(row, "Live status", self._refresh_status)
+        # Same flow as the mobile app's "Unlink & reset recorder": free the device on
+        # the server, let it factory-reset itself, then set it up again from scratch —
+        # the only way to exercise the FULL first-time path (claim + provision + test).
+        add(f, "Unlink & reset recorder…", self._unlink, danger=True, wide=True)
 
         # 2) TEST — record & verify (mobile-app step 2)
         f = section("2 · TEST RECORDING")
@@ -286,8 +290,8 @@ class Debugger:
         add(row, "Run selected", self._run_selected)
         add(row, "All", lambda: self._select_scn("all"))
         add(row, "Hands-off only", lambda: self._select_scn("auto"))
+        # (simulator runs live on `sate test --sim`; not worth a button here)
         row = tk.Frame(ap, bg=CARD); row.pack(fill="x")
-        add(row, "Try in simulator", lambda: self._run_tests_inproc(None, sim=True))
         add(row, "Take screenshot", self._snap_once)
 
         # 3) REMOTE CONTROL — the device-api command channel (fw >=1.5.17)
@@ -600,6 +604,108 @@ class Debugger:
         if any(k in self.MANUAL for k in keys):
             self._log("  note: a selected scenario needs you to delete a session on the device screen.", "dim")
         self._run_tests_inproc(keys, sim=False)
+
+    # The real user's unit. NEVER touched by anything in this app, and doubly so by
+    # unlink: deleting its row would factory-reset a device in actual clinical use.
+    PROTECTED_SERIALS = ("SATE-D19EB8",)
+
+    def _unlink(self):
+        """Unlink & reset — the mobile app's flow, for restarting a full E2E test.
+
+        1. DELETE /api/devices/:id frees the device on the server.
+        2. An online unit picks up {unclaimed:true} on its next heartbeat and
+           factory-resets itself back to first-time setup (sessions in SATE are kept).
+        3. An off-Wi-Fi unit gets a `factory_reset` pushed over BLE instead.
+        Afterwards run "Connect / set up device…" to claim + provision it again —
+        that is the full first-time path, end to end.
+        """
+        if self.busy:
+            return
+        if not self.access_token:
+            self._log("  sign in first — unlink frees the device on your account.", "bad"); return
+        if not self._ensure_device_id():
+            self._log("  no device selected — run 1 · Connect / set up device first.", "bad"); return
+        if (self.serial or "").upper() in self.PROTECTED_SERIALS:
+            self._log(f"  refusing: {self.serial} is a protected in-use device.", "bad"); return
+        if not _confirm(self.root, "Unlink & reset recorder",
+                        f"Remove {self.serial or self.device_id} from this account and reset it "
+                        "to first-time setup?\n\nSessions already in SATE are kept. The recorder "
+                        "must be set up again before it records."):
+            return
+        self._log("\nunlinking + resetting the recorder…", "head")
+        self._set_busy(True)
+
+        def work():
+            import json as _json
+            import urllib.request
+            srv = self.cfg.get("server", {})
+            base = srv.get("base_url", DEFAULT_SERVER)
+            hdrs = {"Authorization": f"Bearer {self.access_token}",
+                    "apikey": srv.get("anon_key", DEFAULT_ANON)}
+            try:
+                # 1) free it on the server
+                req = urllib.request.Request(f"{base}/api/devices/{self.device_id}",
+                                             method="DELETE", headers=hdrs)
+                with urllib.request.urlopen(req, timeout=20):
+                    pass
+                self.q.put(("log", "  removed from the account — an online unit factory-resets "
+                                   "on its next heartbeat (~10s)", "ok"))
+                # 2) watch the serial log for the reset actually happening
+                port = self._resolve_port()
+                saw_reset = False
+                if port:
+                    try:
+                        from hwtest.link import SerialLink
+                        link = SerialLink(port)
+                        deadline = time.time() + 90
+                        while time.time() < deadline:
+                            ln = link.readline(1.0)
+                            if not ln:
+                                continue
+                            self.q.put(("log", f"  | {ln}", None))
+                            if "provisioned=0" in ln or "factory" in ln.lower():
+                                saw_reset = True
+                                if "provisioned=0" in ln:
+                                    break
+                        link.close()
+                    except Exception as e:  # noqa: BLE001
+                        self.q.put(("log", f"  (serial watch failed: {e})", "dim"))
+                # 3) off-Wi-Fi fallback: push factory_reset over BLE
+                if not saw_reset:
+                    self.q.put(("log", "  no reset seen on serial — trying factory_reset over BLE…", None))
+                    try:
+                        import asyncio
+                        from hwtest.recorder_ble import RecorderBle
+
+                        async def ble_reset():
+                            addr = await RecorderBle.find("SATE-", timeout=10)
+                            if not addr:
+                                return False
+                            async with RecorderBle(addr) as r:
+                                await r.send_op({"op": "factory_reset"})
+                            return True
+                        if asyncio.run(ble_reset()):
+                            self.q.put(("log", "  factory_reset sent over BLE", "ok"))
+                            saw_reset = True
+                        else:
+                            self.q.put(("log", "  not advertising over BLE either", "dim"))
+                    except Exception as e:  # noqa: BLE001
+                        self.q.put(("log", f"  BLE reset failed: {e}", "dim"))
+                # 4) forget the binding locally
+                unlinked = self.serial or self.device_id
+                self.device_id = self.device_key = ""
+                self.serial = ""
+                srv.pop("device_id", None); srv.pop("device_key", None)
+                self.q.put(("info", "fw —  ·  port —", None))
+                state = "reset confirmed" if saw_reset else                         "server-side unlink done; the unit resets when it next reaches the server"
+                self.q.put(("log", f"  {unlinked} unlinked — {state}.", "ok"))
+                self.q.put(("log", "  now run 1 · Connect / set up device to claim it again "
+                                   "and re-test the full first-time flow.", "head"))
+            except Exception as e:  # noqa: BLE001
+                self.q.put(("log", f"  unlink failed: {e}", "bad"))
+            finally:
+                self.q.put(("done", None, None))
+        threading.Thread(target=work, daemon=True).start()
 
     def _ensure_device_id(self):
         """Resolve this bench device's device-api id from the signed-in account."""
