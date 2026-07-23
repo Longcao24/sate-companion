@@ -114,6 +114,21 @@ def cmd_test(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     keys = [k.strip() for k in args.only.split(",")] if args.only else None
 
+    # Recorder serial port: --port wins, else use config, else auto-detect; and if the
+    # configured port has vanished (USB renumber), fall back to the detected one.
+    if args.target == "recorder" and not args.sim:
+        scfg = cfg.setdefault("serial", {})
+        if getattr(args, "port", None):
+            scfg["port"] = args.port
+        else:
+            want = scfg.get("port")
+            if not want or not Path(want).exists():
+                auto = _auto_port()
+                if auto:
+                    if want:
+                        warn(f"configured port {want} not found — using detected {auto}")
+                    scfg["port"] = auto
+
     if args.target == "pendant":
         from hwtest.pendant import run_pendant
         from hwtest.scenarios import PASS, FAIL, ERROR, SKIP
@@ -460,6 +475,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     t = sub.add_parser("test", help="run hardware-in-the-loop tests")
     t.add_argument("-t", "--target", choices=["recorder", "pendant"], default="recorder")
+    t.add_argument("-p", "--port", help="recorder serial port (overrides config; auto-detected if omitted)")
     t.add_argument("-c", "--config", help="path to config.toml (default: hwtest/config.toml)")
     t.add_argument("--sim", action="store_true", help="run against the in-memory device (no hardware)")
     t.add_argument("--only", help="comma-separated scenario keys")
