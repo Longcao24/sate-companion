@@ -706,7 +706,11 @@
  *----------*/
 
 /*1: Enable API to take snapshot for object*/
-#define LV_USE_SNAPSHOT 0
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
+#define LV_USE_SNAPSHOT 1   /* screen-mirror: DEBUG (USB-CDC) builds ONLY */
+#else
+#define LV_USE_SNAPSHOT 0   /* production: no snapshot code at all */
+#endif
 
 /*1: Enable Monkey test*/
 #define LV_USE_MONKEY 0

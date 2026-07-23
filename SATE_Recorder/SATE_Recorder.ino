@@ -110,7 +110,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.12";
+static const char    *FIRMWARE_VERSION  = "1.5.13";   // verified trim: confirm server storage before freeing SD audio
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -1327,15 +1327,77 @@ static void renameSessionFiles(const char *dir, uint32_t from, uint32_t to)
   if (SD_MMC.exists(fm)) SD_MMC.rename(fm, tm);
 }
 
+// --- Crash-safe delete/renumber journal -------------------------------------
+// deleteSession() shifts every later session down one slot to keep numbering
+// contiguous. That multi-rename is NOT atomic: a reboot / brownout / watchdog
+// mid-loop leaves a HOLE, and findNextSessionIndex / sessionCount / the pending
+// scan all stop at the first empty slot - so every unsynced take past the hole
+// becomes invisible and never uploads (permanent loss if the patient never
+// records again). So we journal the operation to NVS BEFORE touching the card and
+// re-drive it to completion on the next boot, mirroring the record-resume mark.
+static void delJournalBegin(const char *dir, uint32_t total)
+{
+  g_prefs.begin("sate-del", false);
+  g_prefs.putUChar("active", 1);
+  g_prefs.putString("dir", dir);
+  g_prefs.putUInt("total", total);
+  g_prefs.end();
+}
+
+static void delJournalClear()
+{
+  g_prefs.begin("sate-del", false);
+  g_prefs.putUChar("active", 0);
+  g_prefs.end();
+}
+
+// Close any hole in a patient dir by shifting occupied slots down to a contiguous
+// 1..N (a .synced tombstone counts as occupied - sessionExists checks it). Every
+// rename target is an already-vacated slot, so this is idempotent and safe to
+// re-run if it is itself interrupted (the next boot just continues compacting).
+static void compactPatientDir(const char *dir, uint32_t upTo)
+{
+  uint32_t writeIdx = 1;
+  for (uint32_t r = 1; r <= upTo; r++) {
+    if (!sessionExists(dir, r)) continue;          // empty slot - skip
+    if (r != writeIdx) renameSessionFiles(dir, r, writeIdx);
+    writeIdx++;
+  }
+}
+
+// Called once at boot (after SD is mounted, before maybeResumeRecording): if a
+// delete/renumber was interrupted by a reboot, finish compacting the dir so no
+// take is stranded behind a hole. No-op when the journal is clear.
+static void recoverInterruptedDelete()
+{
+  g_prefs.begin("sate-del", true);
+  bool     active = g_prefs.getUChar("active", 0) == 1;
+  uint32_t total  = g_prefs.getUInt("total", 0);
+  char dir[96] = {0};
+  g_prefs.getString("dir", dir, sizeof(dir));
+  g_prefs.end();
+  if (!active || dir[0] == '\0') return;
+  // `total` is the pre-delete count; a partial down-shift only lowers the highest
+  // occupied slot, so scanning 1..total covers the whole dir. Guard a bogus value.
+  if (total < 1 || total > 9999) total = 9999;
+  compactPatientDir(dir, total);
+  delJournalClear();
+  Serial.printf("[REC] healed interrupted delete in %s (scanned %lu)\n",
+                dir, (unsigned long)total);
+}
+
 // Delete session n and shift every later session down by one, keeping the
-// 1..N numbering contiguous (findNextSessionIndex assumes no gaps).
+// 1..N numbering contiguous (findNextSessionIndex assumes no gaps). The shift is
+// journaled (above) so a reboot mid-loop is healed on the next boot.
 static uint32_t sessionCount(const char *dir);  // defined below
 static void deleteSession(const char *dir, uint32_t n)
 {
   uint32_t total = sessionCount(dir);
   if (n < 1 || n > total) return;
+  delJournalBegin(dir, total);        // journal the renumber BEFORE mutating the card
   deleteSessionFiles(dir, n);
   for (uint32_t m = n + 1; m <= total; m++) renameSessionFiles(dir, m, m - 1);
+  delJournalClear();                  // renumber completed cleanly - nothing to heal
 }
 
 // NOTE (1.5.9): nothing deletes a recording automatically any more. The device
@@ -1846,6 +1908,13 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
   uint32_t written = startWritten;  // total PCM across all segments (seeded on resume)
   uint32_t partWritten = 0;         // PCM in the current segment
   uint32_t lastUiMs = 0;
+  uint32_t partFlushed = 0;         // partWritten value at the last mid-segment flush
+  // Flush the open segment to SD every ~5 s so a power loss / brownout / watchdog
+  // reset loses at most the last few seconds, not the whole current minute. Boot
+  // recovery (prepareResumeSegments) sizes each segment from its ACTUAL on-disk
+  // bytes and re-patches the header, so a plain flush (no header rewrite, no seek)
+  // is enough - the file position stays at the end for the next append.
+  const uint32_t FLUSH_EVERY_BYTES = PCM_BYTES_PER_SEC * 5;
   bool ok = true;
   // Running out of card mid-take is NOT a failure - it must never throw away the
   // minutes already captured (nothing deletes recordings automatically any more,
@@ -1888,10 +1957,17 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
       file.close();
       part++;
       partWritten = 0;
+      partFlushed = 0;
       sessionPartPath(partPath, sizeof(partPath), wavPath, part);
       file = SD_MMC.open(partPath, FILE_WRITE);
       if (!file) { diskFull = true; part--; break; } // no room for another segment
       writeWavHeader(file, PCM_SEGMENT_BYTES);
+    } else if (partWritten - partFlushed >= FLUSH_EVERY_BYTES) {
+      // Mid-segment durability point: push buffered audio to the card so a crash
+      // in the current minute keeps everything up to here (recovery reads the
+      // real file size). No header patch / seek - the write position is unchanged.
+      file.flush();
+      partFlushed = partWritten;
     }
 
     // Physical buttons during capture: RECORD = stop, FLAG = mark this instant.
@@ -3021,13 +3097,13 @@ static void maybeResumeRecording()
   uint32_t existingBytes = 0;
   int startPart = prepareResumeSegments(wavPath, &existingBytes);
   if (existingBytes == 0) {
-    // Board died before the first minute flushed: part00 is empty / header-only.
-    // Left alone it sits forever as a phantom "pending" session that shows
-    // "syncing" but has no real audio to upload. Delete it and rescan pending.
-    deleteSessionFiles(dir, sess);
-    recCrashClear();
-    connNotifyNewSession();   // pendDirty -> Home stops showing the ghost sync
-    return;
+    // Board died before any audio was flushed: only a header-only part00 exists.
+    // Don't discard the take - RESTART recording into the SAME session (overwrite
+    // from segment 0) so an interrupted recording always continues on boot. With
+    // the ~5 s mid-segment flush this window is tiny, but when it does happen the
+    // user still gets a live take back instead of a silently dropped one.
+    startPart = 0;
+    existingBytes = 0;
   }
 
   // Refuse to resume onto a (nearly) full card - same rule as starting a take.
@@ -3168,6 +3244,10 @@ void setup()
   }
   loadPatientsFromSd();                   // server/app-pushed list, if any
   loadTotalRecordings();                   // lifetime recording count (NVS) for telemetry
+  // Heal a delete/renumber that a reboot interrupted mid-shift BEFORE anything
+  // reads the session numbering (usage cache, resume, pending scan): otherwise a
+  // hole hides every take past it. No-op unless the delete journal is set.
+  recoverInterruptedDelete();
   sdRefreshUsage(true);                    // prime the usage cache so the first
                                            // record-begin / Home never pays f_getfree
   // A take interrupted by a reboot is resumed below (maybeResumeRecording, after
@@ -3204,9 +3284,69 @@ void setup()
   logHeap("ready");
 }
 
+// ---- Screen mirror (DEBUG / USB-CDC builds ONLY) --------------------------
+// On-demand only: the host sends "SCREENDUMP\n" over the debug serial and the
+// firmware base64-streams ONE RGB565 snapshot of the active LVGL screen. It never
+// runs on its own, is compiled out of production builds entirely (gated on
+// ARDUINO_USB_CDC_ON_BOOT, set only by the --debug/CDC FQBN), and refuses while
+// RECORDING so it can never disturb a take. Host side: hwtest `sate screenshot`.
+#if ARDUINO_USB_CDC_ON_BOOT
+#include "mbedtls/base64.h"
+
+static void streamScreenshotB64(const uint8_t *data, uint32_t n)
+{
+  static char out[4160];
+  const uint32_t CH = 3072;              // multiple of 3 -> 4096 base64 chars, no interior padding
+  uint32_t i = 0;
+  while (i < n) {
+    uint32_t chunk = (n - i < CH) ? (n - i) : CH;
+    size_t olen = 0;
+    if (mbedtls_base64_encode((unsigned char *)out, sizeof(out), &olen, data + i, chunk) != 0) break;
+    Serial.write((const uint8_t *)out, olen);
+    Serial.write('\n');
+    i += chunk;
+    delay(1);                            // let the USB-CDC TX buffer drain
+  }
+}
+
+static void doScreenDump()
+{
+  if (currentState == RECORDING) { Serial.println("[SCREENSHOT-ERR busy-recording]"); return; }
+  lv_obj_t *scr = lv_scr_act();
+  lv_img_dsc_t *snap = lv_snapshot_take(scr, LV_IMG_CF_TRUE_COLOR);
+  if (!snap) { Serial.println("[SCREENSHOT-ERR snapshot-failed]"); return; }
+  Serial.printf("\n[SCREENSHOT-BEGIN w=%u h=%u fmt=rgb565 swap=%d bytes=%u]\n",
+                (unsigned)snap->header.w, (unsigned)snap->header.h,
+                (int)LV_COLOR_16_SWAP, (unsigned)snap->data_size);
+  streamScreenshotB64((const uint8_t *)snap->data, snap->data_size);
+  Serial.println("[SCREENSHOT-END]");
+  lv_snapshot_free(snap);
+}
+
+static void serviceSerialScreendump()
+{
+  if (!Serial.available()) return;
+  static char cmd[24];
+  static uint8_t ci = 0;
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      cmd[ci] = 0;
+      if (ci > 0 && strcmp(cmd, "SCREENDUMP") == 0) doScreenDump();
+      ci = 0;
+    } else if (ci < sizeof(cmd) - 1) {
+      cmd[ci++] = c;
+    }
+  }
+}
+#else
+static inline void serviceSerialScreendump() {}   // production: compiled out, zero cost
+#endif
+
 void loop()
 {
   runGui();
+  serviceSerialScreendump();   // DEBUG builds only: on-demand screen mirror over serial
   serviceFactoryResetButton(); // hold BOOT 5 s -> wipe config + reboot
   serviceScreenDim();          // dim backlight after 5 min idle, wake on activity
   serviceBatteryGuard();       // sleep near-empty to protect the LiPo (fw 1.5.3)
@@ -3393,8 +3533,21 @@ void loop()
         // assemble one WAV out of two different recordings. Setting uiSdBusy is
         // asynchronous - the net task only reacts on its next pass - so poll until
         // the upload is really down (connUploadProgress() is false once it is).
+        //
+        // The wait MUST cover a chunk POST already in flight: the net task can be
+        // blocked inside sendSessionChunk for up to the final-slice timeout (~60 s)
+        // before it loops back and releases upFile. The old 3 s bound expired mid
+        // POST and renumbered underneath a live upload - the exact two-takes-in-one
+        // -WAV corruption above. Bound the wait to the worst-case chunk instead, and
+        // show why the UI is busy. The common case still exits in well under a
+        // second (upload idle or between chunks); only a stalled chunk waits long,
+        // and waiting is correct - the alternative is a corrupted recording.
         connSetUiSdBusy(true);
-        uint32_t sent, total, guard = millis() + 3000;
+        uint32_t sent, total;
+        if (connUploadProgress(&sent, &total)) {
+          showStatus("Deleting", "Finishing current sync first...");
+        }
+        uint32_t guard = millis() + 65000;   // > final-chunk timeout (~60 s) + margin
         while (connUploadProgress(&sent, &total) && (int32_t)(millis() - guard) < 0) {
           lv_timer_handler();
           delay(5);

@@ -557,6 +557,108 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     return 0
 
 
+def _write_png(path: str, w: int, h: int, rgb: bytes) -> None:
+    """Minimal RGB PNG writer (stdlib zlib only — no Pillow needed)."""
+    import struct
+    import zlib
+
+    def chunk(typ: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + typ + data
+                + struct.pack(">I", zlib.crc32(typ + data) & 0xffffffff))
+
+    raw = bytearray()
+    for y in range(h):
+        raw.append(0)                       # filter type 0 for the row
+        raw += rgb[y * w * 3:(y + 1) * w * 3]
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n")
+        f.write(chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)))
+        f.write(chunk(b"IDAT", zlib.compress(bytes(raw), 9)))
+        f.write(chunk(b"IEND", b""))
+
+
+def _rgb565_to_rgb888(buf: bytes, swap: bool) -> bytes:
+    out = bytearray((len(buf) // 2) * 3)
+    o = 0
+    for i in range(0, len(buf) - 1, 2):
+        b0, b1 = buf[i], buf[i + 1]
+        v = (b0 << 8) | b1 if swap else (b1 << 8) | b0
+        r = (v >> 11) & 0x1f
+        g = (v >> 5) & 0x3f
+        b = v & 0x1f
+        out[o] = (r << 3) | (r >> 2)
+        out[o + 1] = (g << 2) | (g >> 4)
+        out[o + 2] = (b << 3) | (b >> 2)
+        o += 3
+    return bytes(out)
+
+
+def cmd_screenshot(args: argparse.Namespace) -> int:
+    import base64
+    import re
+    import time
+    banner()
+    port = args.port or _auto_port()
+    if not port:
+        bad("no serial port — plug in the recorder (debug build) or pass --port"); return 2
+    try:
+        import serial
+    except ImportError:
+        bad("pyserial not installed — `pip install pyserial`"); return 1
+
+    info(f"requesting a screen dump from {port} …")
+    try:
+        ser = serial.Serial(port, 115200, timeout=0.3)
+    except Exception as e:  # noqa: BLE001
+        bad(f"could not open {port}: {e}"); return 1
+    try:
+        ser.reset_input_buffer()
+        ser.write(b"SCREENDUMP\n")         # NOTE: does not reset the board — captures the live screen
+        deadline = time.monotonic() + args.timeout
+        buf = b""
+        w = h = 0
+        swap = False
+        b64_lines: list[str] = []
+        collecting = False
+        began = False
+        b64_re = re.compile(r"^[A-Za-z0-9+/=]+$")
+        while time.monotonic() < deadline:
+            buf += ser.read(4096)
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                s = line.decode("utf-8", "replace").strip()
+                if not s:
+                    continue
+                if s.startswith("[SCREENSHOT-ERR"):
+                    bad(f"device refused: {s}"); return 1
+                m = re.search(r"\[SCREENSHOT-BEGIN w=(\d+) h=(\d+).*swap=(\d+)", s)
+                if m:
+                    w, h, swap = int(m.group(1)), int(m.group(2)), m.group(3) == "1"
+                    collecting, began = True, True
+                    continue
+                if "[SCREENSHOT-END]" in s:
+                    collecting = False
+                    break
+                if collecting and b64_re.match(s):
+                    b64_lines.append(s)
+            if began and not collecting:
+                break
+        if not began:
+            bad("no screenshot response — is this a --debug build? (production has no screendump)")
+            return 1
+        data = base64.b64decode("".join(b64_lines), validate=False)
+        want = w * h * 2
+        if len(data) < want:
+            warn(f"got {len(data)} of {want} bytes — padding (a log line may have interleaved)")
+            data = data + b"\x00" * (want - len(data))
+        rgb = _rgb565_to_rgb888(data[:want], swap)
+        _write_png(args.output, w, h, rgb)
+        ok(green(f"saved {w}×{h} screenshot → {args.output}"))
+        return 0
+    finally:
+        ser.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="sate",
@@ -603,6 +705,12 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--claim-token", help="account claim token → provision + register; omit to just change Wi-Fi")
     pr.add_argument("--address", help="BLE address (auto-found if omitted)")
     pr.set_defaults(func=cmd_provision)
+
+    ss = sub.add_parser("screenshot", help="capture the recorder's screen (DEBUG build) → PNG")
+    ss.add_argument("-o", "--output", default="screen.png", help="output PNG path (default: screen.png)")
+    ss.add_argument("-p", "--port", help="serial port (auto-detected if omitted)")
+    ss.add_argument("--timeout", type=float, default=12.0, help="seconds to wait for the frame")
+    ss.set_defaults(func=cmd_screenshot)
 
     mon = sub.add_parser("monitor", help="mirror the recorder's live state from its serial log")
     mon.add_argument("-p", "--port", help="serial port (auto-detected if omitted)")
