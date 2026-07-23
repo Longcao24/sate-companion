@@ -62,7 +62,7 @@ class SimBackend(Actions, BaseServer):
         if self._recording:
             # A take was in progress → the firmware resumes it on boot.
             self.link.push(
-                f"[CONN] resume {self._patient} session {self._session} at 0/{self._take_bytes}",
+                f"[REC] resume session {self._session} from part 0 (32000 bytes already on card)",
                 delay=tail,
             )
         if self._pending_heal:

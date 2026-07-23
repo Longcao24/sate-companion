@@ -88,6 +88,7 @@ bool        connWifiChangeMode();    // true while parked in BLE awaiting new cr
 extern void sateHookPatientsUpdated(); // /sate/patients.json was rewritten
 extern void sateHookConnChanged();     // mode or pending count changed
 extern void sateHookRecord();          // app/server asked for a remote recording
+extern void sateHookStop();            // app/server asked to stop the current take
 // Service the GUI for one tick. Called from inside long blocking connectivity
 // work (e.g. streaming a big upload) so the screen stays responsive.
 extern void sateHookGuiPump();

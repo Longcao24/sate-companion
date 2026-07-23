@@ -111,8 +111,16 @@ class BenchActions(Actions):
 
     def trigger_stop(self) -> None:
         if self._can_remote():
-            self.log("    ▸ remote take auto-stops after ~8s (no action needed)")
-            return
+            # fw >=1.5.15 has a real remote "stop" (before that a server-started take
+            # could only be ended at the device or by the ~62-min ceiling).
+            self.log("    ▸ sending remote STOP command…")
+            try:
+                self._send_remote("stop")
+                return
+            except Exception as e:  # noqa: BLE001
+                self.log(f"    ▸ remote stop failed ({e}) — falling back to a reset")
+                self.link.reset()
+                return
         self.prompt("Press RECORD again to STOP the take")
 
     def trigger_reboot(self) -> None:

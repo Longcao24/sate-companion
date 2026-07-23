@@ -17,7 +17,9 @@ PASS, FAIL, SKIP, ERROR = "PASS", "FAIL", "SKIP", "ERROR"
 RE_READY = r"\[MEM\]\s+ready"
 RE_CRASH = r"Guru Meditation|panic'ed|abort\(\)|assert failed|Backtrace:|CORRUPT HEAP"
 RE_REC_START = r"\[MEM\]\s+record start"
-RE_RESUME = r"\[CONN\] resume \S+ session (\d+) at"
+RE_RESUME = r"\[CONN\] resume \S+ session (\d+) at"          # upload resume (chunked)
+RE_REC_RESUME = r"\[REC\] resume session (\d+) from part"     # RECORDING resume (fw >=1.5.16)
+RE_REC_RESUME_ABORT = r"\[REC\] resume: ABORT - (.+)"
 RE_UPLOADED = r"\[CONN\] uploaded (\S+) session (\d+) \((\d+) bytes\)"
 RE_FREED = r"\[CONN\] freed synced audio \S+ session (\d+) \(server-confirmed"
 RE_FREED_ANY = r"freed synced audio"
@@ -90,9 +92,15 @@ class RebootResume(Scenario):
         ctx.act.trigger_reboot()
         if not ctx.link.wait_for(RE_READY, timeout=40, on_line=ctx.record_line):
             return self._r(FAIL, "did not boot back to [MEM] ready after the reboot", ctx)
-        m = ctx.link.wait_for(RE_RESUME, timeout=15, on_line=ctx.record_line)
+        m = ctx.link.wait_for(RE_REC_RESUME, timeout=20, on_line=ctx.record_line)
         if not m:
-            return self._r(FAIL, "no '[CONN] resume … session …' — the interrupted take did NOT auto-resume", ctx)
+            why = ""
+            for l in ctx.lines:
+                mm = __import__("re").search(RE_REC_RESUME_ABORT, l)
+                if mm:
+                    why = f" — device said: {mm.group(1)}"
+                    break
+            return self._r(FAIL, f"the interrupted take did NOT auto-resume{why}", ctx)
         return self._r(PASS, f"auto-resumed session {m.group(1)} after the reboot", ctx)
 
 

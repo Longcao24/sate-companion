@@ -110,7 +110,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.14";   // on-demand screen mirror (SCREENDUMP, DEBUG builds only)
+static const char    *FIRMWARE_VERSION  = "1.5.16";   // remote takes auto-resume after a reboot (local NVS, no Wi-Fi needed)
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -232,6 +232,7 @@ static volatile int           pendingArg    = 0;
 static volatile bool connPatientsReq = false;
 static volatile bool connStateReq    = false;
 static volatile bool connRecordReq   = false;
+static volatile bool connStopReq     = false;  // app/server asked to STOP an in-progress take
 
 // Patient the SLP typed in the app for the next remote recording, delivered in
 // the /commands poll. Staged here and applied by loop() (UI task) so we never
@@ -345,6 +346,7 @@ void loop();
 void sateHookPatientsUpdated();
 void sateHookConnChanged();
 void sateHookRecord();
+void sateHookStop();
 void sateHookGuiPump();
 static bool deviceReady();
 static void isrRecBtn();
@@ -353,6 +355,7 @@ static void isrFlagBtn();
 void sateHookPatientsUpdated() { connPatientsReq = true; }
 void sateHookConnChanged()     { connStateReq = true; }
 void sateHookRecord()          { connRecordReq = true; }
+void sateHookStop()            { connStopReq = true; }
 // sateHookGuiPump() is defined after the Display object below (it needs it).
 
 void sateHookSetActivePatient(const char *id, const char *name, const char *age,
@@ -1883,6 +1886,7 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
   *outPcmBytes = 0;
   currentState = RECORDING;
   recordStopReq = false;
+  connStopReq   = false;   // drop any stale remote-stop so it can't end the new take
   g_flagCount = 0;                         // fresh flag list for this take
                                            // (pre-crash flags lived in RAM and are lost)
   setStatePill("REC", COL_REC_BG, COL_REC);
@@ -1971,7 +1975,10 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
     }
 
     // Physical buttons during capture: RECORD = stop, FLAG = mark this instant.
-    if (btnPressed(recBtn)) {
+    // A remote "stop" command (connStopReq) ends the take exactly the same way —
+    // before this, a server/app-started take could only be ended at the device.
+    if (btnPressed(recBtn) || connStopReq) {
+      connStopReq = false;
       recordStopReq = true;
       // Acknowledge the stop on-screen THIS frame so the user sees it took and
       // doesn't tap again (which used to start a stray second recording). The
@@ -3010,16 +3017,18 @@ static void runRecordSavePlaySession(bool review = true,
   sessionWavPath(wavPath, sizeof(wavPath), dir, sessionNum);
   sessionJsonPath(jsonPath, sizeof(jsonPath), dir, sessionNum);
 
-  // Mark this take crash-resumable BEFORE the first sample lands. Only on-device
-  // (review) takes auto-resume: a remote/server capture has nobody holding the
-  // unit and the server re-issues it, so its orphan segments upload via sync
-  // instead. Cleared the instant capture returns (clean stop / disk-full / cap).
-  const bool localTake = review;
-  if (localTake) recCrashMark(g_patients[currentPatientIndex].patientId, sessionNum);
+  // Mark this take crash-resumable BEFORE the first sample lands. Since fw 1.5.16
+  // this covers REMOTE/server-started takes too: an SLP who starts a recording from
+  // the app expects it to keep going if the unit reboots (brownout / power blip),
+  // not to end early. It resumes from local NVS + the SD segments alone — no Wi-Fi
+  // and no server involvement — and can be ended at the device or with the remote
+  // "stop" command (fw >=1.5.15). The `tries` boot-loop guard in
+  // maybeResumeRecording() still applies. Cleared the instant capture returns.
+  recCrashMark(g_patients[currentPatientIndex].patientId, sessionNum);
 
   uint32_t pcmBytes = 0;
   bool ok = recordWavStreamToSd(wavPath, &pcmBytes, pcmTotal);
-  if (localTake) recCrashClear();
+  recCrashClear();   // every take is marked now, so every take clears its mark
 
   if (!ok) {
     SD_MMC.remove(wavPath);
@@ -3071,11 +3080,21 @@ static void maybeResumeRecording()
   g_prefs.getString("pid", pid, sizeof(pid));
   g_prefs.end();
 
-  if (!active || sess == 0) return;
+  // Diagnostics: this path used to be silent, so a take that failed to resume was
+  // invisible on the wire. Every branch now says why (grep "[REC] resume").
+  if (!active || sess == 0) {
+    Serial.printf("[REC] resume: nothing to resume (active=%d sess=%lu)\n", (int)active, (unsigned long)sess);
+    return;
+  }
+  Serial.printf("[REC] resume: interrupted take found - session %lu patient '%s' tries=%u\n",
+                (unsigned long)sess, pid, (unsigned)tries);
 
   // Boot-loop guard: if resuming has itself crashed the board a couple of times,
   // stop trying. The captured segments still upload as a normal unsynced session.
-  if (tries >= 2) { recCrashClear(); return; }
+  if (tries >= 2) {
+    Serial.println("[REC] resume: ABORT - boot-loop guard (tries>=2); segments upload via sync");
+    recCrashClear(); return;
+  }
   g_prefs.begin("sate-rec", false);
   g_prefs.putUChar("tries", tries + 1);
   g_prefs.end();
@@ -3084,7 +3103,10 @@ static void maybeResumeRecording()
   int idx = -1;
   for (int i = 0; i < g_patientCount; i++)
     if (!strcmp(g_patients[i].patientId, pid)) { idx = i; break; }
-  if (idx < 0) { recCrashClear(); return; }      // patient gone -> sync handles it
+  if (idx < 0) {
+    Serial.printf("[REC] resume: ABORT - patient '%s' not in roster (%d loaded)\n", pid, g_patientCount);
+    recCrashClear(); return;                     // patient gone -> sync handles it
+  }
   currentPatientIndex = idx;
 
   char dir[96], wavPath[160], jsonPath[160], part0[200];
@@ -3092,7 +3114,10 @@ static void maybeResumeRecording()
   sessionWavPath(wavPath, sizeof(wavPath), dir, sess);
   sessionJsonPath(jsonPath, sizeof(jsonPath), dir, sess);
   sessionPartPath(part0, sizeof(part0), wavPath, 0);
-  if (!SD_MMC.exists(part0)) { recCrashClear(); return; }   // nothing on the card
+  if (!SD_MMC.exists(part0)) {
+    Serial.printf("[REC] resume: ABORT - %s missing on the card\n", part0);
+    recCrashClear(); return;
+  }
 
   uint32_t existingBytes = 0;
   int startPart = prepareResumeSegments(wavPath, &existingBytes);
@@ -3116,6 +3141,8 @@ static void maybeResumeRecording()
   }
 
   // Tell the SLP the take is continuing and give them a beat to hit Stop.
+  Serial.printf("[REC] resume session %lu from part %d (%lu bytes already on card)\n",
+                (unsigned long)sess, startPart, (unsigned long)existingBytes);
   showStatus("Resuming recording", "Interrupted take - press RECORD to stop");
   pumpGuiMs(1500);
 

@@ -354,15 +354,23 @@ static void writeSyncMarker(const char *pid, uint32_t num)
 }
 
 // --- Reclaim SD: keep only the newest N takes' AUDIO per patient -------------
-// Once a take is .synced, its on-device audio is redundant: the server only ACKs
-// final=1 AFTER the assembled WAV is durably in Storage (awaited upload that
-// THROWS on failure, re-checked with objectExists on retry - it is NOT a bare
-// 2xx). So a synced take beyond the newest N can have its audio freed to stop the
-// SD filling. We keep the .synced marker as a TOMBSTONE: the slot stays numbered
-// (contiguous), the pending scan still skips it (see scanPendingLocked), and it
-// can be re-downloaded/played from the server. UNSYNCED takes are NEVER touched -
-// the device is still their only copy. Full deletion stays user-only
+// Once a take is .synced, its on-device audio is redundant, so a synced take
+// beyond the newest N can have its audio freed to stop the SD filling. We keep
+// the .synced marker as a TOMBSTONE: the slot stays numbered (contiguous), the
+// pending scan still skips it (see scanPendingLocked), and it can be
+// re-downloaded/played from the server. UNSYNCED takes are NEVER touched - the
+// device is still their only copy. Full deletion stays user-only
 // (deleteSessionFiles in the .ino, reached only from the Delete button).
+//
+// fw 1.5.13: a .synced marker alone no longer licenses the free. The marker can
+// exist without the server durably holding the audio (the app sets mark_synced
+// over BLE before its own upload finished; the 413 bug once left a marker with
+// no storage object). Before audio is freed, GET /api/sessions/verify must
+// answer stored:true for this exact session AND byte count - the server checks
+// both the row and the real storage object. Any doubt (offline, non-2xx, parse
+// failure, byte mismatch) keeps the audio; trim simply retries after the next
+// upload. Deleting the only copy of a take is the one unrecoverable mistake
+// this device can make, so the default on ANY uncertainty is "keep".
 static const uint32_t KEEP_AUDIO_SESSIONS = 5;
 
 static bool sessionHasAudioLocal(const char *pid, uint32_t n)
@@ -373,6 +381,40 @@ static bool sessionHasAudioLocal(const char *pid, uint32_t n)
   sessionPath(p, sizeof(p), pid, n, "wav");          // legacy: one merged file
   return SD_MMC.exists(p);
 }
+
+// Byte count of the ASSEMBLED WAV for a session, EXACTLY as the server stored it
+// in sate_device_sessions.bytes: a legacy merged .wav is its own file size; a
+// segmented take is one 44-byte WAV header (kept on part0 only) + all PCM. This
+// mirrors beginUpload()'s upTotal and the `total` the final chunk declared, so a
+// byte-for-byte match against the server row proves it is the SAME audio - not a
+// same-numbered but different take (session numbers are reused after a delete).
+static uint32_t sessionAssembledBytes(const char *pid, uint32_t n)
+{
+  char p[200];
+  sessionPath(p, sizeof(p), pid, n, "wav");
+  if (SD_MMC.exists(p)) {
+    File f = SD_MMC.open(p, FILE_READ);
+    uint32_t sz = f ? (uint32_t)f.size() : 0;
+    if (f) f.close();
+    return sz;
+  }
+  uint32_t total = 0;
+  for (int k = 0;; k++) {
+    sessionPartFile(p, sizeof(p), pid, n, k);
+    if (!SD_MMC.exists(p)) break;
+    File f = SD_MMC.open(p, FILE_READ);
+    uint32_t sz = f ? (uint32_t)f.size() : 0;
+    if (f) f.close();
+    total += (k == 0) ? sz : ((sz > 44) ? sz - 44 : 0);   // part0 keeps its header
+  }
+  return total;
+}
+
+// Ask the server whether session `n` for `pid` is durably stored with EXACTLY
+// `bytes`. Defined further down (needs httpJson); declared here for the trim.
+// Returns true ONLY on a clean 2xx whose body says stored:true. Offline, any
+// non-2xx, a parse failure, or stored:false all return false -> keep the audio.
+static bool verifySessionStored(const char *pid, uint32_t n, uint32_t bytes);
 
 static bool sessionOccupiedLocal(const char *pid, uint32_t n)
 {
@@ -414,8 +456,20 @@ static void trimPatientSyncedAudio(const char *pid)
     sessionPath(mark, sizeof(mark), pid, n, "synced");
     if (!SD_MMC.exists(mark)) continue;               // not synced -> only copy, keep
     if (!sessionHasAudioLocal(pid, n)) continue;      // already freed
+    // The .synced marker is necessary but NOT sufficient to delete: it can be
+    // set before the audio is durably on the server (BLE mark_synced, or the old
+    // false-2xx). Confirm the server really holds THIS take, byte-for-byte,
+    // before freeing the device's only copy. Any doubt -> keep it; the next
+    // upload/trim cycle retries. Deleting an unconfirmed take is unrecoverable.
+    uint32_t bytes = sessionAssembledBytes(pid, n);
+    if (bytes == 0) continue;                         // nothing measurable -> keep
+    if (!verifySessionStored(pid, n, bytes)) {
+      Serial.printf("[CONN] keep %s session %lu — server did not confirm %lu bytes\n",
+                    pid, (unsigned long)n, (unsigned long)bytes);
+      continue;
+    }
     freeSessionAudioKeepMarker(pid, n);
-    Serial.printf("[CONN] freed synced audio %s session %lu (keep newest %u)\n",
+    Serial.printf("[CONN] freed synced audio %s session %lu (server-confirmed, keep newest %u)\n",
                   pid, (unsigned long)n, (unsigned)KEEP_AUDIO_SESSIONS);
   }
 }
@@ -700,6 +754,26 @@ static bool httpJson(const char *method, const char *path, const char *body,
   }
   s_http.end(); // with reuse(true) this returns the socket to the pool, not close
   return ok;
+}
+
+// See the forward declaration up by trimPatientSyncedAudio. The device_serial is
+// intentionally omitted so the server defaults it to THIS device's serial - the
+// same identity the take was uploaded under - avoiding a mismatch. patient_id +
+// session_number + bytes together identify the exact take; the server answers
+// stored:true only when the row AND its storage object are both present.
+static bool verifySessionStored(const char *pid, uint32_t n, uint32_t bytes)
+{
+  if (WiFi.status() != WL_CONNECTED) return false;
+  char path[224];
+  snprintf(path, sizeof(path),
+           "/api/sessions/verify?patient_id=%s&session_number=%lu&bytes=%lu",
+           pid, (unsigned long)n, (unsigned long)bytes);
+  char resp[128];
+  int code = 0;
+  if (!httpJson("GET", path, nullptr, resp, sizeof(resp), &code)) return false;
+  JsonDocument doc;
+  if (deserializeJson(doc, resp) != DeserializationError::Ok) return false; // parse fail -> keep
+  return doc["stored"].as<bool>() == true;
 }
 
 // POST one ~1 MB slice of the WAV at byte `offset` to /api/sessions/chunk. The
@@ -1132,10 +1206,10 @@ static void uploadStep()
     upFile.close();
     upHasFile = false;
     if (upSrcIdx >= upLastSrc) {
-      upActive = false;
       if (!upFinalAcked) {
         // Walked off the end without the server ever acking final=1. Do NOT mark
         // this synced - the server has no session row for it. Retry it later.
+        upActive = false;
         upResumeSave(upPid, upNum, upServerOffset);
         strikeAdd(upPid, upNum);
         sateHookUploadEnd();
@@ -1149,9 +1223,18 @@ static void uploadStep()
       // SYNCED takes older than the newest KEEP_AUDIO_SESSIONS (the marker stays as
       // a tombstone; unsynced takes are never touched). The just-synced take is the
       // newest, so it is always kept. Full deletion remains user-only.
+      //
+      // upActive MUST stay true across writeSyncMarker + trimPatientSyncedAudio -
+      // both mutate this patient's dir on the card, and the UI's delete guard waits
+      // on connUploadProgress() (= upActive). If we cleared it before the trim (as
+      // this used to), a delete tapped during trim's verify network call would see
+      // "idle", renumber the dir, and slide a DIFFERENT unsynced take into a slot
+      // trim then frees BY NUMBER - deleting an unconfirmed take (permanent loss).
+      // Keep the flag up until the whole SD-reclaim tail is done.
       trimPatientSyncedAudio(upPid);
       strikeClear(upPid, upNum);
       upResumeClear();
+      upActive = false;
       sateHookUploadEnd();
       Serial.printf("[CONN] uploaded %s session %lu (%u bytes) in %lu ms\n",
                     upPid, (unsigned long)upNum, (unsigned)upServerOffset,
@@ -1632,6 +1715,8 @@ static void runRemoteCommand(const char *op)
     fetchPatients();
   } else if (!strcmp(op, "record")) {
     sateHookRecord();        // loop() runs the capture when the UI is idle
+  } else if (!strcmp(op, "stop")) {
+    sateHookStop();          // end an in-progress take (there was no remote Stop before)
   } else if (!strcmp(op, "wifi_change")) {
     // The app asked an ONLINE recorder to enter Change-Wi-Fi mode: drop to BLE
     // and advertise so the phone can push new creds. The account is untouched.

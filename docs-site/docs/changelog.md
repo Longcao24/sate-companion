@@ -10,7 +10,7 @@ relevant table on every release. Versions are independent per component (the
 recorder firmware, the app, and the web app do **not** share a number).
 
 <div class="badge-row">
-<span class="sate-badge">recorder 1.5.14</span>
+<span class="sate-badge">recorder 1.5.16</span>
 <span class="sate-badge">pendant 1.0.0</span>
 <span class="sate-badge">app 0.1.0</span>
 <span class="sate-badge">web 1.5.9</span>
@@ -30,7 +30,7 @@ timeline
 
 | Component | Field / source of truth | Current |
 |---|---|---|
-| Recorder firmware | `SATE_Recorder/SATE_Recorder.ino` → `FIRMWARE_VERSION` | **1.5.14** |
+| Recorder firmware | `SATE_Recorder/SATE_Recorder.ino` → `FIRMWARE_VERSION` | **1.5.16** |
 | Pendant firmware | `SATE_Pendant/SATE_Pendant.ino` → `FIRMWARE_VERSION` (added 2026-07-22) | **1.0.0** |
 | Mobile app | `app.json` `version` (+ `package.json`) | **0.1.0** |
 | Web app | `react_app_sate-ui_update/package.json` `version` | **1.5.9** |
@@ -54,7 +54,9 @@ can read/verify what's flashed. The device already ships a `BLEDfu` OTA service.
 
 | Version | Date | Notes |
 |---|---|---|
-| **1.5.14** | 2026-07-22 | **On-demand screen mirror**: a `SCREENDUMP` serial command base64-streams one RGB565 `lv_snapshot` of the active screen. **DEBUG (USB-CDC) builds only** (gated on `ARDUINO_USB_CDC_ON_BOOT`), never auto-fires, refuses while recording; production carries none of the code. Powers `sate screenshot` / the desktop Debugger app. |
+| **1.5.16** | 2026-07-23 | **Remote takes auto-resume after a reboot.** `recCrashMark()` now marks *every* take crash-resumable (was on-device/`review` takes only), so a server/app-started recording interrupted by a brownout continues instead of ending early — from local NVS + the SD segments alone, **no Wi-Fi or server needed**. Added `[REC] resume …` diagnostics: the resume path was previously silent, so a failed resume was invisible; every branch now logs why (incl. the boot-loop guard, missing patient, missing `part00`). |
+| **1.5.15** | 2026-07-23 | **Remote `stop` command.** A server/app-started take could previously only be ended at the device (or by the ~62-min ceiling) — `REMOTE_RECORD_SECONDS` was declared but never used, so a remote take ran unbounded. `stop` ends the take exactly like the RECORD button. Verified on hardware: rescued a unit stuck recording (`state: recording → idle`). |
+| 1.5.14 | 2026-07-22 | **On-demand screen mirror**: a `SCREENDUMP` serial command base64-streams one RGB565 `lv_snapshot` of the active screen. **DEBUG (USB-CDC) builds only** (gated on `ARDUINO_USB_CDC_ON_BOOT`), never auto-fires, refuses while recording; production carries none of the code. Powers `sate screenshot` / the desktop Debugger app. |
 | 1.5.13 | 2026-07-22 | **Server-verified trim** (`GET /api/sessions/verify` before freeing SD audio) · reboot **auto-resume** of a local take (~5 s flush + restart empty `part00`) · **crash-safe delete/renumber** (NVS journal + boot heal). Source only — no GitHub release cut yet. |
 | 1.5.12 | 2026-07-21 | Sketch restructure + full hardware doc refresh; bounded reclaim `trimPatientSyncedAudio` (keep newest 5 synced sessions per patient). |
 | 1.5.9 | 2026-07 | Reclaim policy change: device holds the only copy until user delete (the three old auto-purge paths removed). |
