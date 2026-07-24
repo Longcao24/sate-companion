@@ -116,7 +116,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.28";   // SD handshake covers resync/fetch/BLE ops; standalone slot guaranteed; button takes report state; delete race reported
+static const char    *FIRMWARE_VERSION  = "1.5.29";   // Sessions list shows only recordings with audio on the card — synced+reclaimed tombstones no longer clutter it as phantom records
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -316,7 +316,7 @@ static void sessionPartPath(char *out, size_t outSize, const char *finalWav, int
 static const uint32_t SESSION_NUM_MAX = 99;
 static bool sessionExists(const char *dir, uint32_t n);
 static void deleteSessionFiles(const char *dir, uint32_t n);
-static void scanSessionNumbers(const char *dir, bool *present);
+static void scanSessionNumbers(const char *dir, bool *present, bool *audio = nullptr);
 static bool sessionHasAudio(const char *dir, uint32_t n);
 static void clearSessionTombstone(const char *dir, uint32_t n);
 static uint32_t findNextSessionIndex(const char *dir);
@@ -1543,9 +1543,10 @@ static void clearSessionTombstone(const char *dir, uint32_t n)
 // .synced tombstone). `present` must hold SESSION_NUM_MAX + 1 slots. Numbers
 // are NOT contiguous - a delete leaves a hole - so callers iterate the whole
 // map and skip absent slots instead of stopping at the first gap.
-static void scanSessionNumbers(const char *dir, bool *present)
+static void scanSessionNumbers(const char *dir, bool *present, bool *audio)
 {
   memset(present, 0, SESSION_NUM_MAX + 1);
+  if (audio) memset(audio, 0, SESSION_NUM_MAX + 1);
   File root = SD_MMC.open(dir);
   if (!root) return;
   File e;
@@ -1556,10 +1557,14 @@ static void scanSessionNumbers(const char *dir, bool *present)
     if (!strncmp(base, "session_", 8)) {
       uint32_t n = (uint32_t)strtoul(base + 8, nullptr, 10);
       const char *sfx = strchr(base + 8, '.');
-      if (n >= 1 && n <= SESSION_NUM_MAX && sfx &&
-          (!strcmp(sfx, ".wav") || !strcmp(sfx, ".synced") ||
-           !strncmp(sfx, ".part", 5))) {
-        present[n] = true;
+      if (n >= 1 && n <= SESSION_NUM_MAX && sfx) {
+        const bool isWav  = !strcmp(sfx, ".wav");
+        const bool isPart = !strncmp(sfx, ".part", 5);
+        // A slot "exists" for numbering if it has any artifact incl. a .synced
+        // tombstone; it has AUDIO only if a segment or a legacy merged .wav is
+        // present. A tombstone (synced + audio reclaimed) has none.
+        if (isWav || isPart || !strcmp(sfx, ".synced")) present[n] = true;
+        if (audio && (isWav || isPart)) audio[n] = true;
       }
     }
     e.close();
@@ -2886,10 +2891,15 @@ static void showSessionsScreen()
   char dir[96];
   patientDirPath(dir, sizeof(dir));
   bool present[SESSION_NUM_MAX + 1] = {false};
-  if (SD_MMC.exists(dir)) scanSessionNumbers(dir, present);
+  bool hasAudio[SESSION_NUM_MAX + 1] = {false};
+  if (SD_MMC.exists(dir)) scanSessionNumbers(dir, present, hasAudio);
+  // Only show recordings whose audio is still ON THE CARD. A synced-and-reclaimed
+  // take is a tombstone kept purely for numbering - its audio lives on the server
+  // now, there is nothing to play or delete here, so it must not appear as a
+  // "record" the user counts. This is why the list showed 21 when only 5 remained.
   uint32_t total = 0;
   for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++)
-    if (present[i]) total++;
+    if (hasAudio[i]) total++;
 
   if (total == 0) {
     lv_obj_t *empty = lv_label_create(lv_scr_act());
@@ -2923,8 +2933,9 @@ static void showSessionsScreen()
   snprintf(sessRowPid, sizeof(sessRowPid), "%s", p.patientId);
 
   for (uint32_t n = SESSION_NUM_MAX; n >= 1; n--) {
-    // Numbers keep holes after a delete - skip the empty slots.
-    if (!present[n]) {
+    // Show only recordings with audio on the card; tombstones (synced + reclaimed)
+    // are on the server, not here, and are skipped.
+    if (!hasAudio[n]) {
       if (n == 1) break;   // avoid uint32 underflow
       continue;
     }
@@ -3905,6 +3916,23 @@ static void doDiagDump()
                 stName, (int)deviceReady(),
                 g_patientCount ? g_patients[currentPatientIndex].patientId : "-",
                 currentPatientIndex, g_patientCount, readBatteryMv());
+  {
+    // What the user sees on the Sessions screen vs what is really on the card:
+    // recordings with audio (playable) vs tombstones (synced + reclaimed, on the
+    // server now). This is the line that answers "why does it say N records?".
+    char ddir[96];
+    patientDirPath(ddir, sizeof(ddir));
+    bool dpres[SESSION_NUM_MAX + 1] = {false}, daud[SESSION_NUM_MAX + 1] = {false};
+    if (SD_MMC.exists(ddir)) scanSessionNumbers(ddir, dpres, daud);
+    uint32_t withAudio = 0, tombstones = 0;
+    for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++) {
+      if (daud[i]) withAudio++;
+      else if (dpres[i]) tombstones++;
+    }
+    Serial.printf("[DIAG] %s: %lu record(s) with audio (shown), %lu synced tombstone(s) on card\n",
+                  g_patients[currentPatientIndex].patientId,
+                  (unsigned long)withAudio, (unsigned long)tombstones);
+  }
   Serial.printf("[DIAG] sd used=%llu/%llu MB fault=%d | conn mode=%d '%s' ip=%s pending=%lu upload=%d%%\n",
                 (unsigned long long)(g_sdUsedCache / (1024 * 1024)),
                 (unsigned long long)(g_sdTotal / (1024 * 1024)),
