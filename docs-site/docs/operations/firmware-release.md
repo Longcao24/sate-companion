@@ -5,129 +5,117 @@ sidebar_position: 1
 
 # Building & publishing a firmware release
 
-The recorder OTA-updates itself by pulling a `.bin` from a public Storage bucket.
-Publishing = upload the app bin + insert a `sate_firmware` row.
+The recorder keeps itself up to date over the air. Each release is packaged as a
+firmware image, published to a public storage location, and offered to devices in the
+field, which download and install it on their next check-in — no cable, no visit.
 
 <div class="badge-row">
-<span class="sate-badge">OTA</span>
-<span class="sate-badge">default_8MB dual-slot</span>
-<span class="sate-badge bad">no device-side rollback</span>
+<span class="sate-badge">Over-the-air updates</span>
+<span class="sate-badge">Dual-slot install</span>
+<span class="sate-badge bad">No automatic rollback</span>
 </div>
 
 ```mermaid
 flowchart TD
-    A["Build (arduino-cli compile, default_8MB)"] --> B["App bin SATE_Recorder.ino.bin"]
-    B --> C["Publish: upload .bin to firmware Storage bucket"]
-    C --> D["Insert sate_firmware row {version, url, notes}"]
-    D --> E["Queue reboot"]
-    E --> F["Wait for device to come back"]
-    F --> G["Queue ota (flashes with clean heap)"]
-    G -.->|No device-side rollback| H["Bad image bricks -> USB reflash"]
+    A["Build the firmware image"] --> B["Verify on real hardware"]
+    B --> C["Publish to the firmware store"]
+    C --> D["Register the release (version + notes)"]
+    D --> E["Restart the target device"]
+    E --> F["Device checks in and installs the update"]
+    F -.->|No automatic rollback| G["A bad image must be recovered over USB"]
 ```
 
-:::danger
-OTA has **no device-side rollback** — a well-formed-but-bad image is committed and
-never reverts. Always test on real hardware before publishing (see step 3 below).
+:::danger[No automatic rollback]
+An update, once installed, stays installed — the device does not fall back to the
+previous image on its own. A bad build has to be recovered by reflashing over USB.
+Always validate a release on real hardware before publishing it.
 :::
 
 ## 1. Build
 
-Bump `FIRMWARE_VERSION` in `SATE_Recorder/SATE_Recorder.ino`, then compile with the
-**mandatory** flash config:
+Each release carries a version number that the device reports back and that drives the
+"update available" banner, so every release starts by bumping that version. The image
+is then compiled for the recorder's hardware target.
 
-```bash
-arduino-cli compile --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi" SATE_Recorder
-```
-
-:::danger[Partition scheme]
-`PartitionScheme` MUST be `default_8MB` (two OTA slots `ota_0`+`ota_1`). **Never
-`huge_app`** — it's a single slot; flashing it silently kills OTA (the device still
-records/registers but can't self-update).
-:::
-
-The **OTA image is the app bin** (`SATE_Recorder.ino.bin`, ~1.7 MB) — **not**
-`.ino.merged.bin` (the full 8 MB image, USB-flash only).
+The recorder is built around an **ESP32-S3** with **16 MB of flash** and **8 MB of
+PSRAM**, and the flash is laid out with **two application slots**. That dual-slot
+layout is what makes over-the-air updating possible: the new image lands in the
+inactive slot while the current one keeps running, and the device switches over only
+once the download is complete.
 
 <div class="spec-grid">
-<div class="spec-tile"><div class="k">Flash size</div><div class="v">16M</div></div>
-<div class="spec-tile"><div class="k">Partition</div><div class="v">default_8MB</div></div>
-<div class="spec-tile"><div class="k">OTA slots</div><div class="v">ota_0 + ota_1</div></div>
-<div class="spec-tile"><div class="k">PSRAM</div><div class="v">opi</div></div>
-<div class="spec-tile"><div class="k">OTA image</div><div class="v">~1.7 MB app bin</div></div>
+<div class="spec-tile"><div class="k">Platform</div><div class="v">ESP32-S3</div></div>
+<div class="spec-tile"><div class="k">Flash</div><div class="v">16 MB</div></div>
+<div class="spec-tile"><div class="k">PSRAM</div><div class="v">8 MB</div></div>
+<div class="spec-tile"><div class="k">Layout</div><div class="v">Dual app slot</div></div>
+<div class="spec-tile"><div class="k">OTA image</div><div class="v">~1.7 MB app</div></div>
 </div>
+
+:::note[Two kinds of image]
+The over-the-air update is the compact **application image** (~1.7 MB) — just the code
+that changes between releases. The full factory image, used only for the very first
+flash of a brand-new board over USB, is much larger and is not what gets published.
+:::
 
 ## 2. Publish
 
-Upload the app bin to the public `firmware` bucket at `sate_<version>.bin`
-(`upsert`, `application/octet-stream`), then insert a `sate_firmware` row
-`{version, url, notes}` where `url` is the bucket's public URL. `getLatestFirmware`
-orders by `created_at`, so the newest row wins.
+Publishing a release is two steps: upload the application image to the public firmware
+store, and register a release record that names the version, points to the image, and
+carries release notes. Devices always pick up the **most recently registered** release,
+so publishing a newer version is what rolls it out to the fleet.
 
-Two ways:
-- **Web card** (`/admin` → "Publish firmware") — uses the admin's browser session.
-- **Direct** — `curl` upload + a `sate_firmware` insert (via the Supabase MCP
-  `execute_sql`). Then verify the public URL returns 200 and its SHA-256 matches the
-  local bin.
+There are two ways to publish:
 
-:::warning[Publish validation & the admin-gate gap]
-`publishFirmware` now validates the version is plain semver and the image is a real
-ESP32 app bin (`0xE9` magic, ≤4 MB). **But** the `POST /firmware` route is still
-registered above the `/admin` gate — any authenticated user can publish fleet
-firmware. Add an `isAdmin()` gate before GA. See [Known issues](../known-issues).
+- **Admin console** — the web admin area has a "Publish firmware" action that handles
+  the upload and registration in one step, using the signed-in administrator's session.
+- **Direct** — upload the image and add the release record programmatically, then
+  confirm the published image is reachable and matches the local build byte-for-byte.
+
+:::warning[Publishing is an administrator action]
+Publishing pushes firmware to every device in the fleet, so it is meant to be
+restricted to administrators. Treat access to the publish path as privileged and keep
+it behind the admin gate.
 :::
 
-## 3. OTA a device
+## 3. Update a device
 
-Queueing OTA to a device with an upload backlog fails `err-get-1` (a fragmented heap
-can't get the ~40 KB for the 2nd TLS handshake). The recipe is: queue **`reboot`**,
-wait for it to come back, **then** queue **`ota`** — the first poll after boot
-flashes with a clean heap.
+The safe way to update a device that has a backlog of work is to **restart it first,
+wait for it to come back online, and only then trigger the update**. A freshly
+rebooted device has the clean working memory it needs to complete the secure download,
+whereas a busy device with a large backlog can run short and fail the download.
 
-:::danger[No device-side rollback (open)]
-The firmware doesn't override `verifyOta()`, so the Arduino core marks a new image
-valid in early init **before** `setup()` runs. A well-formed-but-bad image (wrong
-build, the `LV_TICK_CUSTOM=0` trap, `huge_app`) is committed and **never rolls back**
-→ brick requiring USB reflash. Test every image on real hardware
-([Hardware testing](hardware-testing)) before publishing.
+:::danger[Validate before you publish]
+Because there is no automatic rollback, a well-formed but wrong or broken image will be
+committed and will not revert — leaving the device recoverable only by reflashing over
+USB. Test every image on real hardware before publishing. See
+[Hardware testing](hardware-testing).
 :::
 
-## The CI gate — mandatory for every version
+## The release gate — mandatory for every version
 
-**Every recorder firmware version must pass `sate ci` before it is released.** This
-is the standard test, not an optional extra — it is the release criterion.
+**Every recorder firmware version must pass the automated hardware test gate before it
+is released.** This is the standard release criterion, not an optional extra.
 
-```bash
-sate ci               # build + flash the working tree (debug), run the standard suite
-sate ci --no-flash    # gate whatever is already on the board
-```
+The gate runs the whole test suite against a **real recorder**, hands-off, from a single
+command. In one pass it:
 
-One command runs the whole gate on a real recorder:
+1. Identifies the version being tested.
+2. Builds and installs a debug build so the harness can follow the device's own logs.
+3. Drives the device through a set of realistic scenarios — booting cleanly, resuming a
+   recording after a reboot, matching stored bytes exactly, verifying reclaimed storage,
+   keeping unsynced audio, and defaulting to standalone recording — by issuing remote
+   record, stop, and reboot commands, so nobody has to sit at the bench.
+4. Writes a durable pass/fail report and fails loudly on any problem, so it fits neatly
+   into release checklists.
 
-1. Reads `FIRMWARE_VERSION` from the source — the version being gated.
-2. Compiles and flashes the **debug** (USB-CDC) build, because the harness asserts
-   on the firmware's own serial log.
-3. Runs the standard hands-off scenarios — `boot_health`, `reboot_resume`,
-   `byte_match`, `verified_trim`, `unsynced_kept`, `reclaim_idle`,
-   `standalone_default` — driving the device with remote
-   `record` / `stop` / `reboot`, so nobody has to be at the bench.
-4. Writes a durable report to `hwtest/ci-reports/fw-<version>_<stamp>.json` and
-   exits non-zero on any FAIL/ERROR, so it drops into scripts and release checklists.
+A small number of scenarios that require a physical tap on the device — the delete
+flows — sit outside the automated gate and are run by hand before any release that
+touches deletion behavior.
 
-The gate refuses to run against the protected in-use unit. It needs the board on
-USB, the device on Wi-Fi, and the account in `hwtest/config.toml` (see
-[Hardware testing](hardware-testing) for what each scenario checks and why these
-four catch the classes a compile can't: reboot-mid-record, swallowed stops,
-byte mismatches, unverified SD frees).
-
-The two delete scenarios (`delete_journal`, `delete_during_upload`) stay outside the
-gate because they need a human tap on the Sessions screen — run them from the
-desktop Debugger before a release that touches delete/renumber code.
-
-:::danger[Regression rule — every new feature]
-Any change — firmware, harness, backend — re-runs the standard suite **before it
-merges**, not just before a release. `sate ci` *is* the regression suite: the
-1.5.16 → 1.5.18 chain is the proof, where each fix exposed the next latent bug
-(resume blocked the network; then the stop was swallowed) and only re-running the
-full suite after every change caught them. Feature touches the backend too? Add
-`sate e2e`. Something looks down? `sate infra` first.
+:::danger[Regression rule — every change]
+Any change — firmware, test harness, or backend — re-runs the standard suite **before
+it merges**, not just before a release. The suite *is* the regression net: on more than
+one occasion a fix has exposed the next hidden problem, and only re-running the full
+suite after every change caught it. When a change also touches the backend, run the
+end-to-end suite as well.
 :::

@@ -3,74 +3,87 @@ title: Troubleshooting
 sidebar_position: 2
 ---
 
-# Troubleshooting & gotchas
+# Troubleshooting & common issues
 
-Hard-won traps. Check the one matching your symptom before spending hours.
-
-```mermaid
-flowchart TD
-    S["Recorder boots but screen frozen"] --> T1{"LV_TICK_CUSTOM = 1?"}
-    T1 -->|No| F1["Set LV_TICK_CUSTOM 1 in lv_conf.h"]
-    T1 -->|Yes| T2{"Draw buffers/heap in PSRAM?"}
-    T2 -->|No| F2["Keep buffers in PSRAM (MALLOC_CAP_SPIRAM)"]
-    T2 -->|Yes| T3{"Flash mode correct?"}
-    T3 -->|qio / wrong| F3["Reflash with --flash_mode dio"]
-    T3 -->|dio| OK["Not this class -> check other tables"]
-```
+A field guide to the symptoms operators and installers hit most often, grouped by
+component. Each entry pairs a visible symptom with the underlying cause and the
+practical fix — enough to recognize and resolve an issue without diving into the
+code.
 
 ## Recorder
 
-| Symptom | Cause | Fix |
+The recorder is an ESP32-S3 device with a small color display. Most issues fall
+into a few recognizable classes.
+
+```mermaid
+flowchart TD
+    S["Recorder boots but screen frozen"] --> T1{"Display clock ticking?"}
+    T1 -->|No| F1["Display timer misconfigured — recheck UI library settings"]
+    T1 -->|Yes| T2{"Graphics memory placed correctly?"}
+    T2 -->|No| F2["Keep display buffers in external PSRAM"]
+    T2 -->|Yes| T3{"Firmware image healthy?"}
+    T3 -->|No| F3["Reflash a known-good build"]
+    T3 -->|Yes| OK["Different class — check other tables"]
+```
+
+| Symptom | Likely cause | What to do |
 |---|---|---|
-| Screen bright but frozen at the boot spinner (serial still reaches `[MEM] ready`) | `lv_conf.h` `LV_TICK_CUSTOM` is `0` — LVGL's clock never ticks | Set `LV_TICK_CUSTOM 1` in `~/Documents/Arduino/libraries/lv_conf.h` (+ montserrat 12/14/20). Reinstalling lvgl resets this — re-check after any `lib install lvgl`. |
-| Records/registers but can't self-update | Flashed with `huge_app` (single slot, no OTA) | Reflash with `PartitionScheme=default_8MB` |
-| "Server registration failed code -1" | LVGL draw buffers moved to internal DMA RAM (ate the contiguous block the TLS handshake needs) | Keep draw buffers + heap in **PSRAM** (`MALLOC_CAP_SPIRAM`) |
-| Black screen after manual `esptool` flash | Wrong flash mode | Manual merged-bin flash needs `--flash_mode dio` (qio = dead) |
-| No `/dev/cu.usbmodem*` when plugged in | Firmware not built with USB CDC | Build `CDCOnBoot=cdc,USBMode=hwcdc` |
-| `cc1plus` hangs forever compiling | iCloud evicted lvgl to 0-block placeholders | `arduino-cli lib uninstall lvgl && lib install lvgl@8.4.0`, re-fix `lv_conf.h`. Move the sketchbook out of iCloud. |
-| OTA fails `err-get-1` | Fragmented heap on a device with a backlog | Queue `reboot`, wait, then `ota` |
-| Battery reads wrong / bootloops | Battery ADC moved off GPIO9 | Keep `BAT_ADC_PIN 9` (GPIO34 is a classic-ESP32 pin, wrong on S3) |
+| Screen lights up but freezes at the boot spinner (device otherwise finishes starting) | The display's refresh timer isn't running, so the UI never repaints | Recheck the UI library configuration after any library update — a reinstall can silently reset it |
+| Records and registers normally but can't self-update over the air | Flashed with a firmware layout that has no spare update slot | Reflash using the dual-slot layout that supports over-the-air updates |
+| "Server registration failed" during setup | Graphics memory crowded out the contiguous block the secure connection needs | Keep display buffers and working memory in external PSRAM, not internal RAM |
+| Black screen after a manual firmware flash | Wrong flash mode used during the manual flash | Reflash with the correct, compatible flash settings (the standard upload tool handles this automatically) |
+| Device doesn't appear as a serial port when plugged in | Firmware built without USB serial support | Rebuild with USB serial enabled |
+| Battery reads wrong or the device restarts in a loop | Battery sensing wired to the wrong pin for this chip | Restore the correct battery sense pin for the ESP32-S3 |
+| Over-the-air update fails on a device with a large backlog | Fragmented memory leaves too little room for the secure download | Reboot the device first, let it come back online, then trigger the update |
 
 ## Pendant
 
-| Symptom | Cause | Fix |
+The pendant is a small wearable that streams audio over standard Bluetooth Low
+Energy.
+
+| Symptom | Likely cause | What to do |
 |---|---|---|
-| App runs but never advertises, no CDC port | Flashed with the **Adafruit** Feather core (links app at `0x26000`, overwrites the SoftDevice) | Use the **Seeed** core (`Seeeduino:nrf52:xiaonRF52840SensePlus`, links at `0x27000`). Recover with a DFU SoftDevice restore. |
-| App can't find the pendant | Name is only in the scan-response (`localName`), and `name` may be a stale cached GAP name | Scan with **no** service filter; match on `name` OR `localName` OR the advertised service |
-| Notification gap while connected | **Normal** — the pendant naps in silence | Not a disconnect; don't treat it as one |
-| Harsh "rè" buzz on loud audio | Gain stacked (firmware `DIGITAL_GAIN` + app `LOUDNESS`, both tanh) | Pick one loudness stage (see [Pendant](../guides/pendant)) |
+| Firmware runs but the pendant never advertises and exposes no serial port | Flashed with an incompatible board core that overwrites part of the Bluetooth stack | Reflash using the correct board core; recover a corrupted board by restoring its Bluetooth stack first |
+| App can't find the pendant when scanning | The pendant's name is only in its scan response, and a cached name may be stale | Scan without a service filter and match on any of the advertised identifiers |
+| Brief gaps in audio while connected | Normal — the pendant sleeps during silence to save power | Not a disconnect; no action needed |
+| Harsh buzzing on loud audio | Loudness boost applied in two places at once | Use a single loudness stage (see the [Pendant guide](../guides/pendant)) |
 
 ```mermaid
 flowchart TD
   P{"Pendant symptom?"}
-  P -->|"never advertises, no CDC port"| A["Flashed Adafruit core"]
-  A --> AF["Use Seeed core (links 0x27000)"]
-  P -->|"app can't find it"| B["Name only in scan-response"]
-  B --> BF["Scan no filter; match name OR localName OR service"]
+  P -->|"never advertises, no serial port"| A["Wrong board core flashed"]
+  A --> AF["Reflash with correct core; restore Bluetooth stack if needed"]
+  P -->|"app can't find it"| B["Name only in scan response"]
+  B --> BF["Scan without a filter; match any advertised identifier"]
 ```
 
 ## Backend
 
-| Symptom | Cause | Fix |
+The backend spans an edge API, a long-running container that runs AI processing,
+and cloud storage. Audio processing is intentionally asynchronous.
+
+| Symptom | Likely cause | What to do |
 |---|---|---|
-| Session stuck in `processing` forever | The AI call ran inside an edge fn and hit the ~150 s wall-clock kill | Processing must live in the **container** (`cf-processor`); `process-device-session` must be a 200 no-op |
-| Duplicate recordings | The repo's `process-device-session` (not the deployed no-op) raced the container | Don't deploy the repo file as-is |
-| `process_error: "download failed: Object not found"` on big takes | Storage project-wide file-size limit (defaults 50 MB) below a ~118 MB take | Raise the **project** limit (bucket limit alone isn't enough); it's 500 MB now |
-| Registration breaks after a redeploy ("Setup link expired") | Redeployed with `verify_jwt:true` | Deploy `device-api`/`mint-plaud-token` with `--no-verify-jwt` |
+| A session stays stuck in "processing" indefinitely | A long AI job was run inside a short-lived edge function and hit its execution time limit | Keep AI processing in the long-running container, never inline in an edge function |
+| Duplicate recordings appear for one session | Two components processed the same session at once | Ensure only the container performs processing |
+| Large recordings fail to download during processing | A project-wide file-size limit was set below the size of a long take | Raise the storage size limit at the project level, not just per bucket |
+| Device registration breaks after a redeploy ("Setup link expired") | The API was redeployed with token verification misconfigured | Redeploy the device and token services with their intended verification settings |
 
 ```mermaid
 flowchart TD
   Q{"Backend symptom?"}
-  Q -->|"stuck in processing forever"| C["AI ran inside edge fn (~150s kill)"]
-  C --> CF["Process in cf-processor container; edge = 200 no-op"]
-  Q -->|"duplicate recordings"| D["repo process-device-session raced container"]
-  D --> DF["Don't deploy repo file as-is"]
+  Q -->|"stuck in processing forever"| C["AI ran inside a short-lived edge function"]
+  C --> CF["Process in the long-running container; keep the edge path lightweight"]
+  Q -->|"duplicate recordings"| D["Two components processed the same session"]
+  D --> DF["Only the container should process"]
 ```
 
-## Dev environment
+## Development environment
 
-- **The dev Mac's LAN IP is dynamic** — a stale IP breaks app launch and device
-  provisioning. Check `ipconfig getifaddr en0` first when things "suddenly" can't
-  reach the Mac.
+:::note[Dynamic LAN address]
+The development machine's local network address can change between sessions. A
+stale address is a common reason the app or device provisioning "suddenly" can't
+reach it — verify the current address first before assuming a deeper fault.
+:::
 
-See [Known issues](../known-issues) for the full audit list.
+See [Known issues](../known-issues) for the broader list of tracked items.

@@ -5,337 +5,233 @@ sidebar_position: 2
 
 # BLE protocol
 
-Two independent BLE peripherals in this repo, unrelated GATT profiles:
+The SATE system uses Bluetooth Low Energy for two very different jobs, handled by
+two independent devices with unrelated Bluetooth profiles:
 
-- **Pendant** (`SATE_Pendant/SATE_Pendant.ino`) — a wearable that streams live PCM
-  audio. Standard Bluefruit/Nordic GATT, app-side link is
-  `src/pendant/PendantLink.ts`.
-- **Recorder** (`SATE_Recorder/connectivity.cpp`) — a device that mostly talks
-  Wi-Fi/HTTPS, but exposes a JSON-over-BLE bridge for provisioning and for
-  pulling sessions when it has no Wi-Fi. App-side link is `src/ble/SateBle.ts`,
-  shared constants in `src/protocol.ts`. See also `doc/04-ble-protocol.md`.
+- **Pendant** — a wearable that streams live microphone audio to the mobile app in
+  real time.
+- **Recorder** — a device that normally moves audio over Wi-Fi, but also offers a
+  Bluetooth bridge used for first-time setup and for pulling recordings when no
+  Wi-Fi is available.
 
-Both are plain `react-native-ble-plx` peripherals (unlike Plaud's proprietary
-SDK) and **share one `BleManager`** on the app side — see `src/ble/bleManager.ts`
-and `src/ble/radio.ts`.
+Both are standard Bluetooth peripherals (no proprietary vendor SDK), and on the
+mobile side they cooperatively share a single Bluetooth radio so they never
+compete for the hardware.
 
-<div class="badge-row"><span class="sate-badge">2 BLE peripherals</span><span class="sate-badge">16 kHz mono PCM</span><span class="sate-badge">244 B/notify</span><span class="sate-badge">react-native-ble-plx</span></div>
+<div class="badge-row"><span class="sate-badge">2 BLE peripherals</span><span class="sate-badge">16 kHz mono audio</span><span class="sate-badge">Live streaming + offline sync</span><span class="sate-badge">Standard GATT</span></div>
 
 ---
 
-## Pendant (streaming)
+## Pendant (live streaming)
 
-Source: `SATE_Pendant/SATE_Pendant.ino`; app side `src/pendant/PendantLink.ts`.
+The pendant continuously captures microphone audio and pushes it to the phone as a
+steady stream of small Bluetooth notifications. The app stitches those packets
+back into a normal audio file, so from the user's point of view a pendant session
+behaves like any other recording once it lands in the app.
 
-### GATT profile
+### What the pendant exposes
 
-| Characteristic | UUID | Properties | Payload |
-|---|---|---|---|
-| Audio service | `19B10000-E8F2-537E-4F6C-D104768A1214` | — | groups the two characteristics below |
-| Audio | `19B10001-E8F2-537E-4F6C-D104768A1214` | **Notify** (fixed-length) | 244 bytes = 122 int16 LE samples, 16 kHz mono PCM |
-| Control | `19B10002-E8F2-537E-4F6C-D104768A1214` | **Write** (fixed-length 1 byte) | 1 byte command |
-| Battery Service | `0000180F-...` (standard) | Notify | 1 byte, see below |
-| Battery Level | `00002A19-...` (standard) | Notify | low 7 bits = %, bit 7 = charging |
-| DFU (OTA) | Adafruit/Nordic `BLEDfu` (`bledfu`) | — | Nordic BLE DFU protocol, added first so its attribute handle is fixed across firmware versions |
+At a conceptual level the pendant advertises a handful of Bluetooth capabilities:
 
-The firmware uses Adafruit's `BLEBas` helper for the battery service,
-which registers the standard `0x180F` service / `0x2A19`
-characteristic.
+| Capability | Role |
+|---|---|
+| Audio stream | A steady flow of raw 16 kHz mono PCM audio, sent as fixed-size notifications |
+| Control | A single-byte command the app writes to start, stop, or locate the device |
+| Battery | Standard battery-level reporting, including a charging indicator |
+| Firmware update | A standard over-the-air update capability for shipping new firmware |
 
 ```mermaid
 flowchart TD
-    Pendant["SATE Pendant (nRF52840)"]
+    Pendant["SATE Pendant (wearable)"]
 
-    Pendant --> DFU["DFU · Nordic BLEDfu · added first"]
-    Pendant --> BAS["Battery Service · 0x180F"]
-    Pendant --> AS["Audio Service · advertised"]
+    Pendant --> DFU["Firmware update (OTA)"]
+    Pendant --> BAS["Battery reporting"]
+    Pendant --> AS["Audio service"]
 
-    BAS --> BLV["Battery Level · NOTIFY 1 B"]
+    AS --> AUD["Audio stream · live PCM"]
+    AS --> CTRL["Control · start / stop / find"]
 
-    AS --> AUD["Audio · NOTIFY 244 B"]
-    AS --> CTRL["Control · WRITE 1 B"]
+    CTRL --> C1["Start streaming"]
+    CTRL --> C0["Stop streaming"]
+    CTRL --> C2["Find me (flash LEDs)"]
 
-    CTRL --> C1["0x01 CMD_START"]
-    CTRL --> C0["0x00 CMD_STOP"]
-    CTRL --> C2["0x02 CMD_FIND_ME"]
-
-    AUD --> WAV["App: concat → WAV"]
+    AUD --> WAV["App: reassemble into audio file"]
 ```
 
-<p class="diagram-caption">UUIDs and properties are in the GATT profile table above; audio-packet, battery-byte, and WAV-assembly detail are in the sections below. DFU is added first so its attribute handle stays fixed across firmware versions; the audio service UUID rides in the primary advertising packet.</p>
+<p class="diagram-caption">The pendant advertises its audio capability so the app can discover it, then streams live audio while the app reassembles the packets into a playable recording.</p>
 
-### Control byte values
+### Control commands
 
-From `onCtrlWrite()` and mirrored in `PendantLink.ts`:
+The app steers the pendant with three simple commands:
 
-| Value | Meaning |
-|---|---|
-| `0x01` | Start streaming (`CMD_START`) — begins PDM capture, resets ring buffer, drops ~140 ms of mic-settling samples |
-| `0x00` | Stop streaming (`CMD_STOP`) — ends PDM capture |
-| `0x02` | Find-me (`CMD_FIND_ME`) — flashes red/blue LEDs for 5 s, independent of streaming state |
+- **Start** — begin capturing and streaming audio. The very start of capture is
+  trimmed slightly so the microphone has time to settle.
+- **Stop** — end capture and streaming.
+- **Find me** — briefly flash the device's LEDs so a user can physically locate it.
+  This works whether or not the pendant is currently streaming.
 
-### Audio packet byte layout
+### Live audio
 
-Each notify on the Audio characteristic is exactly `PKT_SAMPLES * 2` = 244
-bytes: 122 little-endian `int16_t` PCM samples, 16 kHz, mono,
-no header, no framing. The app reconstructs a WAV by concatenating raw
-notify payloads and prepending a 44-byte RIFF/WAVE header
-(`PendantLink.ts`, `pcmToWavBase64`).
+Audio arrives as a continuous series of small, fixed-size packets carrying raw
+16 kHz mono PCM samples with no per-packet framing. The app buffers and
+concatenates these packets, then wraps the result in a standard audio-file header
+so the recording can be played, uploaded, and processed through the same pipeline
+as every other SATE recording.
 
-<div class="bytemap">
-  <div class="cell"><b>sample 0</b><span>int16 LE (2 B)</span></div>
-  <div class="cell"><b>sample 1</b><span>int16 LE (2 B)</span></div>
-  <div class="cell grow"><b>… samples 2–120 …</b><span>2 B each</span></div>
-  <div class="cell"><b>sample 121</b><span>int16 LE (2 B)</span></div>
-  <div class="cell hi"><b>= 244 B</b><span>122 × int16, no header</span></div>
-</div>
+### Battery and charging
 
-### Battery byte
+The pendant reports its battery level as a percentage together with a charging
+indicator, so the app can show both the current charge and whether the device is
+plugged in.
 
-`publishBattery()` packs the value written to the battery
-characteristic as:
+### Discovery and connection
 
-- bits 0–6: battery percent (0–100)
-- bit 7 (`0x80`): charging flag (USB VBUS detected)
+The pendant broadcasts enough information for the app to find it reliably even
+across firmware versions and cached device names. To keep discovery robust, the
+app scans without a rigid filter and matches the pendant on any of its advertised
+identifiers.
 
-<div class="bytemap">
-  <div class="cell hi"><b>bit 7</b><span>charging (0x80)</span></div>
-  <div class="cell grow"><b>bits 0–6</b><span>battery percent (0–100)</span></div>
-</div>
+Once connected, the link is tuned for a smooth audio stream: it negotiates a
+higher-throughput Bluetooth mode and a larger packet size, and accepts a small
+amount of added latency in exchange for better battery life. A short on-device
+audio buffer absorbs that latency so the stream stays continuous.
 
-The app unpacks it identically: `percent: raw & 0x7f, charging: (raw & 0x80) !== 0`
-(`PendantLink.ts`).
-
-### Advertising
-
-Set up in `setup()`:
-
-- `Bluefruit.Advertising.addService(audioSvc)` — the **audio service UUID is in
-  the primary advertising packet**.
-- `Bluefruit.ScanResponse.addName()` — the device **name ("SATE Pendant") is
-  only in the scan response**, not the primary advert.
-- Advertising interval: fast 20 ms, backs off to slow 152.5 ms after 30 s
-  (`setInterval(32, 244)`).
-- General-discoverable flag set (`BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE`).
-
-Because the name only shows up in the scan response, iOS can report it via
-`localName` (and may even carry a stale cached `name` from a previous
-firmware/label). The app therefore scans with **no service filter** and
-matches on `name` OR `localName` OR the advertised audio service UUID
-(`PendantLink.ts`).
-
-### Connection parameters
-
-`onConnect()`:
-
-- Requests **2M PHY** (`BLE_GAP_PHY_2MBPS`) to double raw throughput.
-- Requests **MTU 247** (`requestMtuExchange(247)`), matching the app's
-  `connectToDevice(deviceId, { requestMTU: 247 })` (`PendantLink.ts`).
-- Requests a 30 ms connection interval (`24 * 1.25 ms`) — the ring buffer
-  (~0.5 s) absorbs the added latency; this is a power-saving tradeoff, not a
-  throughput one.
-- `Bluefruit.configPrphBandwidth(BANDWIDTH_MAX)` before `Bluefruit.begin()`
-  sizes the MTU-247 negotiation and notify queue.
-
-### Battery percent curve
-
-`readBatteryPct()` reads `VBAT` via a resistor divider and maps
-voltage to percent with a piecewise-linear LiPo discharge curve (100% ≥4.10 V
-down to 0% ≤3.30 V); this is cosmetic UI detail, not part of the wire protocol.
+:::note[Battery percentage is cosmetic]
+The battery percentage is derived from a voltage reading mapped onto a typical
+LiPo discharge curve. It is a display convenience for the app, not part of the
+audio wire protocol.
+:::
 
 ---
 
-## Recorder (offline BLE bridge)
+## Recorder (offline Bluetooth bridge)
 
-Source: `SATE_Recorder/connectivity.cpp`; shared protocol constants
-`src/protocol.ts`; app-side link `src/ble/SateBle.ts`; `doc/04-ble-protocol.md`.
+The recorder's main path is Wi-Fi: it uploads finished recordings straight to the
+SATE server. Bluetooth plays a supporting role and is used for just two things:
 
-The recorder's primary path is Wi-Fi/HTTPS straight to the SATE server
-(`connectivity.cpp` HTTP section, `beginUpload`/`uploadStep`). BLE is used for
-two things only: **first-time / Wi-Fi provisioning**, and **pulling sessions
-when the recorder currently has no Wi-Fi** ("offline bridge"). That second
-case is what this section documents.
+1. **Provisioning** — first-time setup, joining a Wi-Fi network, and claiming the
+   device to an account.
+2. **Offline sync** — pulling recordings off the device over Bluetooth when it has
+   no working Wi-Fi connection.
 
-### GATT profile
+This section focuses on that second case: how the app retrieves recordings
+directly over Bluetooth.
 
-Service `53415445-0001-4a7e-8c5e-000000000001` (`SATE_SERVICE`,
-`connectivity.cpp`, `protocol.ts`).
+### What the recorder exposes
 
-| Characteristic | UUID | Properties | Payload |
-|---|---|---|---|
-| `CHAR_INFO` | `...0010` | Read (`NIMBLE_PROPERTY::READ`, `connectivity.cpp`) | one-shot JSON `{model, fw, serial, provisioned}` (`InfoCB::onRead`) |
-| `CHAR_CONTROL` | `...0020` | Write (`connectivity.cpp`) | JSON op from the app, chunk-framed if large |
-| `CHAR_STATUS` | `...0030` | Notify | JSON events from the device, chunk-framed |
-| `CHAR_DATA` | `...0040` | Notify | raw WAV bytes for a pulled session, chunk-framed |
+The recorder offers a small set of Bluetooth capabilities organized around a single
+service:
 
-`NimBLEDevice::setMTU(247)` is requested on `bleStart()`; the app also
-requests MTU 247 on connect (`SateBle.ts`). The framed-message chunk size
-(`BLE_CHUNK = 180`, `connectivity.cpp`) is deliberately independent of the
-negotiated MTU so the link works even if 247 isn't granted.
+| Capability | Role |
+|---|---|
+| Info | Basic device facts the app can read once: model, firmware, serial, and whether it has been claimed |
+| Control | The channel the app writes commands to (scan Wi-Fi, provision, list recordings, and so on) |
+| Status | The channel the device sends progress and result events back on |
+| Data | The channel that carries recording audio during a transfer |
 
-### Advertising
+Because Bluetooth packets are small, large messages — JSON commands and audio
+alike — are split into a sequence of chunks and reassembled on the other side. The
+chunking is deliberately independent of the negotiated packet size so transfers
+work reliably even on a conservative connection.
 
-`bleUpdateAdvertising()` (`connectivity.cpp`):
+### Advertising and at-a-glance status
 
-- Primary advert: flags, the `SATE_SERVICE` UUID, and 6 bytes of manufacturer
-  data (company id `0xFFFF` + payload):
-  `[0]=0x5A magic  [1]=flags  [2]=pending sessions (capped 255)  [3]=0x00 reserved`
-  - `flags` bit 0 (`0x01`, `ADV_FLAG_UNPROVISIONED`) = device not yet claimed
-  - `flags` bit 1 (`0x02`, `ADV_FLAG_NEEDS_SYNC`) = provisioned **and** has
-    pending (unsynced) sessions
+Before the app ever connects, the recorder broadcasts a compact status summary in
+its advertisement. This lets the app show useful state in a device list without
+opening a connection, including:
 
-<div class="bytemap">
-  <div class="cell"><b>0xFFFF</b><span>company id</span></div>
-  <div class="cell"><b>0x5A</b><span>magic</span></div>
-  <div class="cell grow hi"><b>flags</b><span>bit 0 unprovisioned / bit 1 needs-sync</span></div>
-  <div class="cell"><b>pending</b><span>sessions, capped 255</span></div>
-  <div class="cell"><b>0x00</b><span>reserved</span></div>
-</div>
+- whether the device still needs to be set up (not yet claimed to an account), and
+- whether it has finished recordings waiting to be synced, along with a rough count.
 
-- Scan response: device name = its serial (`SATE-XXXXXX`).
-- The app parses the magic/flags/pending fields to show "needs setup" /
-  "needs sync" / a pending count **without connecting**
-  (`SateBle.ts`); on Android `ble-plx` prepends a 2-byte company id,
-  so the parser checks manufacturer-data offsets 0 and 2 for the magic byte.
+The device's serial number is also broadcast so users can tell devices apart.
 
-### Framed message protocol
+### Framed message transfers
 
-Any payload (JSON command/status, or raw WAV bytes) larger than one packet is
-split into `[flag: 1 byte][payload]` packets:
+Any message too large for one packet — a command, a status event, or a chunk of
+audio — is sent as a series of framed pieces, each marked as either "more to come"
+or "final." The receiving side reassembles the pieces back into the complete
+message once the final piece arrives. The firmware paces and retries these sends so
+a momentarily busy Bluetooth link doesn't drop data, and the app performs the
+mirror-image reassembly (and splitting, for its own writes).
 
-- `FRAME_PARTIAL = 0x01` — more packets follow
-- `FRAME_FINAL = 0x02` — last packet of this logical message
+### Commands the app can send
 
-<div class="bytemap">
-  <div class="cell hi"><b>flag</b><span>0x01 partial / 0x02 final</span></div>
-  <div class="cell grow"><b>payload</b><span>up to BLE_CHUNK = 180 bytes</span></div>
-</div>
+The app drives the recorder with a small vocabulary of operations:
 
-Firmware side: `notifyFramed()` (`connectivity.cpp`) chunks a buffer
-into `BLE_CHUNK` (180-byte) payload pieces, retries `ch->notify()` up to 50
-times per packet (5 ms backoff) to ride out a busy TX queue, and paces with a
-2 ms delay between packets. Incoming writes are reassembled by `CtrlCB::onWrite`
-into `ctrlAsm`, and handed to `handleBleOp()` once a `FRAME_FINAL`
-flag lands.
+| Operation | Purpose |
+|---|---|
+| Scan Wi-Fi | Ask the device to list nearby Wi-Fi networks |
+| Provision | Join a Wi-Fi network and register/claim the device to an account |
+| Change Wi-Fi | Move an already-claimed device to a new network, without re-claiming it |
+| Cancel Wi-Fi | Abort an in-progress Wi-Fi change |
+| List recordings | List the recordings that haven't been synced yet |
+| Send recording | Stream a specific recording's audio to the app |
+| Mark synced | Mark a recording as synced once the app has it safely |
+| Set patients | Update the on-device patient list |
+| Reboot | Restart the device |
+| Factory reset | Wipe Wi-Fi and account and return to first-time setup |
 
-App side: `FrameAssembler` (`SateBle.ts`) does the mirror-image
-reassembly on notifies; `frameChunks()` (`SateBle.ts`) does the
-mirror-image splitting on writes, using the same 180-byte payload MTU
-(`mtuPayload = 180`).
+When the app refers to a recording, it uses its position in the most recent
+"list recordings" result rather than any permanent identifier.
 
-### Control ops (`CHAR_CONTROL`, app → device)
+### Events the device sends back
 
-Dispatched in `handleBleOp()` (`connectivity.cpp`); JSON shapes
-documented in `src/protocol.ts`.
+The device reports progress and results on its status channel — Wi-Fi scan results,
+provisioning progress, the list of pending recordings, the start and end of a file
+transfer, and simple success/error acknowledgements for each command.
 
-| Op | Args | Effect | Reply |
-|---|---|---|---|
-| `scan_wifi` | — | async Wi-Fi scan | `ev:scan` |
-| `provision` | `ssid, pass, server, claim_token` | join Wi-Fi + register/claim the device | `ev:state` sequence |
-| `change_wifi` | `ssid, pass` | move an **already-claimed** device to a new network, no re-registration | `ev:state` sequence ending `wifi_saved` |
-| `cancel_wifi` | — | abort a pending change-Wi-Fi window | `ev:ok` |
-| `list_sessions` | — | list sessions not yet marked synced | `ev:sessions` |
-| `send_session` | `n` | stream session `n`'s WAV over `CHAR_DATA` | `ev:file` → data → `ev:file_done` |
-| `mark_synced` | `n` | write the `.synced` tombstone marker for session `n` | `ev:ok` / `ev:err` |
-| `set_patients` | `patients[]` | overwrite `/sate/patients.json` on the SD card | `ev:ok` / `ev:err` |
-| `reboot` | — | ack, then restart after 800 ms | `ev:ok` |
-| `factory_reset` | — | ack, wipe Wi-Fi + account, restart to first-time setup | `ev:ok` |
+Provisioning in particular reports a readable sequence of states as it connects,
+confirms Wi-Fi, and registers the device (or a shorter sequence when only changing
+networks), and surfaces a clear error state if anything fails along the way.
 
-`n` is a **1-based index into the pending-session table** built by the most
-recent `list_sessions` scan (`pendTable`, `connectivity.cpp`;
-"`n` on the wire = index + 1") — it is not a persistent
-session id.
+### Pulling a recording
 
-### Status events (`CHAR_STATUS`, device → app)
+Retrieving a recording over Bluetooth follows a careful, verify-before-delete
+sequence, because until a recording is proven to be safely on the server the device
+holds the only copy:
 
-| Event | Fields | Source |
-|---|---|---|
-| `scan` | `networks: [{ssid, rssi, sec}]` | `connectivity.cpp` |
-| `state` | `state, ip?, device_id?, msg?` | provisioning / change-Wi-Fi progress, `handleProvisionTick()` |
-| `sessions` | `items: [{n, patient_id, bytes}]` | `connectivity.cpp`, pending only |
-| `file` | `n, bytes, meta` | `sendSessionOverBle()`; then raw bytes follow on `CHAR_DATA` |
-| `file_done` | `n` | — |
-| `ok` / `err` | `op` (+ `msg` on err) | `statusOk()` / `statusErr()` |
+1. The app lists the pending recordings on the device.
+2. For each one, the app asks the device to send it. The device first announces the
+   transfer and the exact size to expect, then streams the audio in framed chunks,
+   then signals completion.
+3. The app reassembles the chunks and **compares the received size against the size
+   the device declared up front.** Bluetooth notifications are unacknowledged, so a
+   dropped chunk could otherwise silently truncate the audio — this check makes any
+   shortfall fail loudly so the app simply retries the pull.
+4. Only after a recording transfers completely **and** is confirmed uploaded to the
+   server does the app tell the device to mark it as synced.
 
-Provisioning `state` sequence: `connecting → wifi_ok → registering → registered`
-(full `provision`) or `connecting → wifi_ok → wifi_saved` (`change_wifi`), or
-`error` at any point (`connectivity.cpp`, `protocol.ts`).
-
-### File transfer: `send_session`
-
-`sendSessionOverBle()` (`connectivity.cpp`):
-
-1. Opens the session's WAV + JSON metadata files from SD.
-2. Sends one `ev:file` status message: `{"ev":"file","n":<n>,"bytes":<total>,"meta":<raw json>}`.
-3. Streams the WAV in 4 KB blocks (`ioChunk[4096]`); each block is one
-   call to `notifyFramed(chData, ...)` — i.e. each 4 KB block is itself
-   re-split into 180-byte framed packets on `CHAR_DATA`.
-4. Sends `ev:file_done {"n":<n>}`.
-
-The loop bails early if `bleClientConnected` goes false mid-transfer
-(`while (wf.available() && bleClientConnected)`), leaving the app's transfer
-incomplete — this is exactly the case the app's byte-count check below is
-guarding against.
-
-### App-side reconciliation (`pullSession`, `markSynced`)
-
-`SateLink.pullSession()` (`SateBle.ts`):
-
-1. Registers waiters for `ev:file` (matching `n`) and `ev:file_done`
-   (matching `n`, 120 s timeout).
-2. Sends `{op:"send_session", n}`.
-3. Accumulates every `CHAR_DATA` chunk via `dataHandler`, reporting
-   `(received, total)` progress against the `bytes` field from `ev:file`.
-4. After `ev:file_done` arrives, concatenates the chunks and compares byte
-   count against the `bytes` the device declared up front:
-   ```ts
-   const assembled = Buffer.concat(chunks);
-   if (assembled.length !== total) {
-     throw new Error(`session ${n} transfer incomplete: got ${assembled.length} of ${total} bytes`);
-   }
-   ```
-   BLE notifications are unacknowledged, so a dropped `CHAR_DATA` notify
-   would otherwise silently truncate the WAV. This check makes that fail
-   loudly (the caller retries the pull) instead of uploading and
-   `mark_synced`-ing a short recording — permanently losing the tail of the
-   device's only copy.
-5. Only on an exact byte match does `pullSession()` resolve with
-   `{wavBase64, meta}`.
-
-The caller (`src/sync/AutoSync.ts`) uses this ordering: `listSessions()`
-→ `pullSession(n)` → `api.uploadSession(...)` (upload to the backend) →
-**only then** `link.markSynced(n)` (`AutoSync.ts`, comment: "only after
-the server confirmed"). `markSynced()` itself (`SateBle.ts`) just
-writes `{op:"mark_synced", n}` and waits for `ev:ok`/op match — the
-byte-exactness guarantee lives entirely in the `pullSession` check above, not
-in `markSynced`; `markSynced` is never sent unless `pullSession` already
-proved the transfer was complete and the backend upload succeeded.
+:::caution[Safety ordering is deliberate]
+The device is only ever told a recording is synced after the app has both received
+it in full and confirmed the server accepted it. This ordering prevents the device
+from freeing the only copy of a recording before it is durably stored elsewhere.
+:::
 
 ### Session pull sequence
 
 ```mermaid
 sequenceDiagram
-    participant App as App (SateLink)
-    participant Dev as Recorder (BLE)
+    participant App as Mobile app
+    participant Dev as Recorder (Bluetooth)
     participant Srv as SATE server
 
-    App->>Dev: write CHAR_CONTROL {op:"list_sessions"}
-    Dev-->>App: notify CHAR_STATUS ev:sessions items:[{n,patient_id,bytes}]
+    App->>Dev: List pending recordings
+    Dev-->>App: Here are the pending recordings
 
-    loop for each pending session n
-        App->>Dev: write CHAR_CONTROL {op:"send_session", n}
-        Dev-->>App: notify CHAR_STATUS ev:file {n,bytes,meta}
-        loop framed WAV chunks
-            Dev-->>App: notify CHAR_DATA [flag][payload]
+    loop for each pending recording
+        App->>Dev: Send this recording
+        Dev-->>App: Transfer starting (name, size)
+        loop framed audio chunks
+            Dev-->>App: audio chunk
         end
-        Dev-->>App: notify CHAR_STATUS ev:file_done {n}
-        App->>App: assembled.length === bytes ? else throw + retry
+        Dev-->>App: Transfer complete
+        App->>App: Size matches? else retry the pull
 
-        App->>Srv: uploadSession(wav_base64, meta)
-        Srv-->>App: 2xx
+        App->>Srv: Upload recording
+        Srv-->>App: Accepted
 
-        App->>Dev: write CHAR_CONTROL {op:"mark_synced", n}
-        Dev->>Dev: writeSyncMarker() -> .synced tombstone on SD
-        Dev-->>App: notify CHAR_STATUS ev:ok {op:"mark_synced"}
+        App->>Dev: Mark as synced
+        Dev->>Dev: Record that it's synced (keeps a marker)
+        Dev-->>App: Acknowledged
     end
 ```

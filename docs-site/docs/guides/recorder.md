@@ -5,16 +5,12 @@ sidebar_position: 1
 
 # SATE Recorder firmware
 
-Internal engineering reference for the **SATE Clinical Recorder** — the handheld ESP32-S3
-speech-capture device. This page is grounded in the source under `SATE_Recorder/`
-(`SATE_Recorder.ino`, `connectivity.cpp/.h`, `display.cpp`, `es8311.cpp`). The details
-below are current as of **firmware 1.5.17** (`FIRMWARE_VERSION` in `SATE_Recorder.ino`).
+An overview of the **SATE Clinical Recorder** — the handheld speech-capture device a
+speech-language pathologist carries into a session. This page describes what the recorder
+is, how it fits into the wider SATE system, and how it behaves for the people who operate
+it. It stays at the conceptual level rather than the code level.
 
-<div class="badge-row"><span class="sate-badge">Firmware 1.5.17</span><span class="sate-badge">ESP32-S3</span><span class="sate-badge">16 MB flash / 8 MB PSRAM</span></div>
-
-> Companion references: `doc/02-firmware.md` (architecture), `doc/07-runbook.md`
-> (build/flash/OTA), root `hardware.md` (pin map + RAM budget). Where they disagree with
-> this page, re-read the code — the numbers below were taken from it directly.
+<div class="badge-row"><span class="sate-badge">ESP32-S3</span><span class="sate-badge">16 MB flash / 8 MB PSRAM</span><span class="sate-badge">16 kHz mono WAV</span></div>
 
 ---
 
@@ -22,52 +18,42 @@ below are current as of **firmware 1.5.17** (`FIRMWARE_VERSION` in `SATE_Recorde
 
 <figure class="doc-figure"><img src="/img/sate-device-frame.png" alt="SATE Recorder — ESP32-S3 handheld" /><figcaption>The SATE Recorder (ESP32-S3, 2.8" touchscreen + microSD).</figcaption></figure>
 
-The recorder is a **Freenove FNK0104AB** board: an **ESP32-S3** (16 MB flash, 8 MB octal
-PSRAM) driving a 2.8" 240×320 ILI9341 touchscreen (LVGL UI), a micro-SD slot over SD_MMC,
-and an **ES8311** audio codec with an analog microphone captured over I2S. Two external
-push-buttons (RECORD, FLAG) plus the on-board BOOT button give physical control; a battery
-sense pin and RGB/backlight round it out. It is a self-contained field recorder an SLP
-carries into a session — record, review, and it syncs to SATE Cloud on its own.
+The recorder is a self-contained field device built around an **ESP32-S3** (16 MB flash,
+8 MB PSRAM). It pairs a 2.8" colour touchscreen, a micro-SD card for local storage, and a
+dedicated audio codec with an analog microphone. A pair of physical buttons — **RECORD**
+and **FLAG** — give the clinician tactile control without looking at the screen. In
+practice it is a pocket recorder: press to capture, review on the device, and it syncs
+its recordings up to SATE Cloud on its own whenever it can reach the network.
 
-**Standalone-recording model.** Although the firmware still carries the full patient-roster
-machinery (`/sate/patients/<pid>/` dirs, `currentPatientIndex`, `applyActivePatient`,
-per-patient session numbering), in real use **patients are not assigned at capture time**.
-The device seeds a synthetic `"Standalone"` patient when the roster is empty
-(`ensureStandalonePatient()`, `SATE_Recorder.ino`) and every take uploads with
-`patient_id "Standalone"`; the recording is attached to a real patient **later, on the web
-report**. This matches the pendant's default behavior. Consequently, audit findings that
-hinge on patient-slot management are lower real-world priority (see §9), while every
-audio-integrity finding still fully applies.
+**Standalone-recording model.** In everyday use the recorder captures **standalone audio
+reports** — a recording is not tied to a specific patient at the moment of capture.
+Instead, each recording uploads under a neutral "Standalone" identity and is attached to a
+real patient **later, on the web report**. This keeps the clinician's hands free during a
+session and mirrors how the wearable pendant behaves.
 
-**Lifecycle in one paragraph.** On boot, `setup()` (`SATE_Recorder.ino`) runs an
-on-screen init checklist (display → SD → audio codec → SATE services), heals any interrupted
-delete/renumber (`recoverInterruptedDelete()`), then either shows the onboarding gate (until
-the device is *claimed* to an account) or Home, and **arms** a reboot-interrupted take for
-resume. The resume itself runs from `loop()` once the network task is up, never from
-`setup()` (see the note below). At runtime `loop()` on core 1 drives the LVGL GUI, the
-ISR-latched buttons, the battery/dim/factory-reset services, and consumes flags set by the
-connectivity task. Pressing RECORD streams a WAV to the SD card as a chain of 1-minute
-segments; on stop the session's metadata JSON is written and the session is queued. A
-core-0 network task (`connLoop()`) polls the server for commands, uploads pending sessions
-in ~1 MB resumable chunks over HTTPS, and — when Wi-Fi is unavailable — advertises over BLE
-so the companion app can provision, bridge-sync, and control the device.
+**Lifecycle in one paragraph.** On power-up the device runs a short on-screen startup
+checklist (screen, storage, audio, cloud services), then shows either a first-time setup
+gate — until the device has been claimed to an account — or the Home screen. If a previous
+recording was interrupted by a reboot or power loss, the device arms itself to resume that
+recording cleanly. During normal operation the touchscreen and buttons stay fully
+responsive while a separate background worker talks to the network. Pressing RECORD writes
+audio to the SD card as a series of short segments; on stop, the recording is finalised and
+queued for upload. The network worker periodically checks in with the cloud, uploads
+pending recordings in resumable chunks, and — when Wi-Fi is unavailable — advertises over
+Bluetooth so the companion mobile app can set it up, bridge recordings across, and control
+it.
 
-:::danger[The resume must run from `loop()`, never from `setup()`]
-Resuming re-enters the capture, which **blocks until Stop**. Calling it at the end of
-`setup()` therefore means `loop()` never runs — and `connStartNetTask()` lives in
-`loop()`. The unit records on with **no heartbeat, no remote `stop`, and no serial**:
-invisible to the server and unstoppable except at the button or the ~62-minute
-ceiling. A remote take, where nobody is standing at the device, simply goes dark.
-
-`setup()` only sets a pending flag; `loop()` performs the resume once the net task is
-up (or ~8 s in, if the unit is offline). That keeps a resumed take controllable for
-its whole length. This was a real fault, found on the bench and fixed in **1.5.17** —
-do not move the call back into `setup()`.
+:::danger[A resumed recording must stay controllable for its whole length]
+When the device resumes a recording interrupted by a reboot, that capture runs until it is
+stopped. The firmware is careful to bring the network worker online **before** re-entering
+a resumed recording, so the recording stays fully controllable — it still sends
+heartbeats, still honours a remote stop, and still reports status. A remote recording,
+where nobody is standing at the device, would otherwise go dark for its entire duration.
+This behaviour is deliberate and was hardened after a real bench finding.
 :::
 
-**Device state machine.** The UI runs a small `DeviceState` machine
-(`SATE_Recorder.ino`). Uploads run concurrently on the net task, so *Uploading* is
-reached from *Home* while the card is otherwise idle (gated by `uiSdBusy`, see §6):
+**Device state machine.** The interface follows a small set of states. Uploads run in the
+background, so *Uploading* is reached from *Home* while the device is otherwise idle:
 
 ```mermaid
 stateDiagram-v2
@@ -86,32 +72,29 @@ stateDiagram-v2
     Uploading --> Home : synced
 ```
 
-**Boot sequence** — `setup()` (`SATE_Recorder.ino`) runs an on-screen checklist,
-heals a half-done delete, then either gates on onboarding or resumes an interrupted take:
+**Boot sequence** — startup runs an on-screen checklist, heals any interrupted maintenance,
+then either gates on first-time setup or arms a resume:
 
 ```mermaid
 sequenceDiagram
-    participant S as setup
+    participant S as Startup
     participant D as Display
-    participant SD as SD_MMC
-    participant NVS as NVS
-    participant A as ES8311 audio
-    participant C as connectivity
-    S->>D: screen.init + backlightInit
-    S->>SD: initSdCard
-    SD-->>S: sdOk
-    S->>SD: loadPatientsFromSd
-    S->>NVS: recoverInterruptedDelete
-    Note over NVS,SD: heal reboot-interrupted delete/renumber
-    S->>A: initAudio
-    A-->>S: audioOk
-    S->>C: connInit(FIRMWARE_VERSION)
-    Note over C: Wi-Fi and BLE bring-up, net task not started yet
-    alt device ready (claimed)
-        S->>D: showHomeScreen
-        S->>S: arm resume (loop() runs it once the net task is up)
+    participant SD as Storage
+    participant A as Audio
+    participant C as Connectivity
+    S->>D: initialise screen + backlight
+    S->>SD: initialise storage
+    SD-->>S: ready
+    S->>SD: load local state
+    S->>A: initialise audio
+    A-->>S: ready
+    S->>C: bring up Wi-Fi and Bluetooth
+    Note over C: network worker not started yet
+    alt device claimed
+        S->>D: show Home
+        S->>S: arm resume (starts once the network worker is up)
     else not claimed
-        S->>D: showOnboardingScreen
+        S->>D: show first-time setup
     end
 ```
 
@@ -121,512 +104,339 @@ sequenceDiagram
 
 <div class="spec-grid">
   <div class="spec-tile"><div class="k">MCU</div><div class="v">ESP32-S3</div></div>
-  <div class="spec-tile"><div class="k">Flash / PSRAM</div><div class="v">16 MB / 8 MB OPI</div></div>
-  <div class="spec-tile"><div class="k">Screen</div><div class="v">2.8" 240×320 ILI9341</div></div>
+  <div class="spec-tile"><div class="k">Flash / PSRAM</div><div class="v">16 MB / 8 MB</div></div>
+  <div class="spec-tile"><div class="k">Screen</div><div class="v">2.8" 240×320 touch</div></div>
   <div class="spec-tile"><div class="k">Sample rate</div><div class="v">16 kHz mono</div></div>
   <div class="spec-tile"><div class="k">Segment length</div><div class="v">60 s</div></div>
 </div>
 
-| Peripheral | Pins / value | Notes |
-|---|---|---|
-| **MCU** | ESP32-S3 | 16 MB flash + **8 MB octal (OPI) PSRAM** (`hardware.md`, runbook) |
-| **microSD (SD_MMC, 4-bit)** | CMD 40, CLK 38, D0 39, D1 41, D2 48, D3 47 | `SATE_Recorder.ino` |
-| **Audio codec (ES8311, I2S)** | MCK 4, BCK 5, DIN 6, DOUT 8, WS 7 | `SATE_Recorder.ino`; `initAudio()` |
-| **I2C (touch + codec)** | SDA 16, SCL 15 @ 400 kHz | one shared `Wire` bus, `SATE_Recorder.ino` |
-| **Speaker-amp enable** | `AP_ENABLE` = GPIO1 | driven LOW in `initAudio()` |
-| **Touch (FT6336U)** | I2C addr `0x38`, INT 17, RST 18 | `display.cpp` |
-| **TFT (ILI9341, SPI)** | 10–13, 45, 46 (per pin-audit comment) | backlight on GPIO45 |
-| **Backlight** | `TFT_BL_PIN` = GPIO45, LEDC PWM 5 kHz/8-bit | `backlightInit()`; dims to duty 10 after 5 min idle |
-| **RECORD button** | `REC_BTN_PIN` = **GPIO2** (not a strap pin) | active-LOW, INPUT_PULLUP, FALLING-edge ISR |
-| **FLAG button** | `FLAG_BTN_PIN` = **GPIO14** | active-LOW, INPUT_PULLUP, FALLING-edge ISR |
-| **BOOT button** | `BOOT_BTN_PIN` = GPIO0 | hold 5 s → factory reset |
-| **Battery sense** | `BAT_ADC_PIN` = **GPIO9** (ADC1) | behind on-board 0.5 divider (`×2`), `BAT_SENSE_ENABLED 1` |
-| **Display driver** | LVGL 8.4 | draw buffers in **PSRAM** (`display.cpp`) |
+At a glance, the recorder combines:
 
-**Audio detail.** The ES8311 is configured as an **analog** mic front-end
-(`es8311_microphone_config(dev, false)`, i.e. *not* a digital/PDM mic), with the analog PGA
-set to **+30 dB** (`ES8311_MIC_GAIN_30DB`, `es8311.cpp`). The I2S link runs in
-**standard mode**, 16 kHz, 16-bit, mono, left slot (`initAudio()`,
-`SATE_Recorder.ino`). Capture and playback both stream through a single static
-4 KB buffer (`audioChunk`) — no length-proportional allocation.
+- **An ESP32-S3** with 16 MB flash and 8 MB PSRAM — enough headroom for the graphical UI
+  and network stacks to coexist.
+- **A 2.8" 240×320 colour touchscreen** for the on-device interface, recording review, and
+  status.
+- **A micro-SD card** as the durable local store for every recording until it is confirmed
+  safe in the cloud.
+- **An audio codec with an analog microphone**, captured as 16 kHz, 16-bit, mono audio —
+  the right balance of speech clarity and modest file size for clinical speech capture.
+- **Two external buttons** (RECORD and FLAG) plus the on-board boot button, giving reliable
+  physical control.
+- **Battery sensing and an RGB/backlight**, so the device reports its charge and dims when
+  idle.
 
-:::danger[Do not move battery sense to GPIO34]
-GPIO34 is a classic-ESP32 ADC pin, wrong on the S3, and it bootloops the board (the fw 1.0.6
-mistake). GPIO9 is the fix.
-:::
+The microphone front end applies a fixed analog gain suited to close speech, and audio
+streams continuously to storage during a recording rather than being buffered whole in
+memory.
 
 ---
 
 ## 3. Connection methods / transports
 
-The recorder speaks over four channels. Only one *network* path is active at a time (Wi-Fi
-online **or** BLE), while USB serial is always available when tethered.
+The recorder communicates over a few distinct channels. Only one *network* path is active
+at a time — Wi-Fi when online, Bluetooth when not — while a USB link is always available
+when the device is tethered for maintenance.
 
-### (a) USB serial — flashing & debug
+### (a) USB — flashing and diagnostics
 
-- **When:** development, flashing, and reading the boot/register/OTA log. Never used in
-  normal field operation.
-- **Enumeration:** the **production FQBN** builds without a debug CDC, so the board enumerates
-  as USB-Serial-JTAG only and the port stays a stable `/dev/cu.usbmodem101`. Debug builds add
-  `CDCOnBoot=cdc,USBMode=hwcdc`, which splits into two interfaces macOS renumbers `101 ⇄ 2101`.
-- **`Serial` output only appears with `CDCOnBoot=cdc,USBMode=hwcdc`.** A plain `cat` will not
-  reset the board and, on the JTAG interface, only flushes once the host asserts DTR. Use a
-  pyserial reader that pulses **RTS→EN** (reset) with **DTR** high (run, not bootloader) — see
-  `doc/07-runbook.md`.
-- **Log tags to grep:** `[MEM]` (heap telemetry, `logHeap()`), `[CONN]`, `[OTA]`,
-  `[REC]`, `[STATUS]`. `[MEM] ready` means `setup()` completed.
+Used only during development and servicing: flashing firmware and reading the device's
+startup and status log. It is never part of normal field operation.
 
-### (b) Wi-Fi → Supabase `device-api` over HTTPS
+### (b) Wi-Fi → SATE Cloud
 
-- **When:** the device is provisioned and the joined network is reachable
-  (`CONN_WIFI_ONLINE`). This is the primary sync path.
-- **Transport:** `WiFiClientSecure` (TLS, port 443, `setInsecure()` — trust-on-first-use, no
-  on-device CA bundle) for Supabase; a plain `WiFiClient` for the mock server. Chosen by
-  `serverIsSupabase()` (`connectivity.cpp`).
-- **Auth headers:** `apikey: <anon key>` (Supabase gateway requirement; the anon key is
-  public by design, embedded at `connectivity.cpp`) **plus** `Authorization: Bearer
-  <cfgDeviceKey>` (device identity issued at registration).
-- **Keep-alive:** one shared `HTTPClient`/client (`s_http`, `s_httpsClient`) with
-  `setReuse(true)` so the frequent command poll skips the TLS handshake
-  (`httpJson()`).
+The primary sync path. When the device is set up and its network is reachable, it talks to
+the cloud edge API over a secure connection. Over this channel the device:
 
-| Purpose | Method / path | Key function |
-|---|---|---|
-| Register / claim | `POST /api/devices/register` | `handleProvisionTick()` `PROV_REGISTER` |
-| Heartbeat + command poll | `GET /api/devices/:id/commands?...` | `pollCommands()`, `pushHeartbeatState()` |
-| Fetch patient roster | `GET /api/patients` | `fetchPatients()` |
-| Chunked upload | `POST /api/sessions/chunk?...&offset=&final=&total=` | `beginUpload()`, `uploadStep()`, `sendSessionChunk()` |
-| Verify durable storage | `GET /api/sessions/verify?patient_id=&session_number=&bytes=` | `verifySessionStored()` |
+| Purpose | What it does |
+|---|---|
+| Register / claim | Binds the device to an account during first-time setup |
+| Heartbeat + command poll | Checks in regularly, reporting state and receiving commands |
+| Chunked upload | Streams each recording to the cloud in resumable ~1 MB slices |
+| Verify durable storage | Confirms a recording is safely stored before reclaiming space |
+
+The regular check-in doubles as the device's **heartbeat**: it reports how many recordings
+are pending, the current state (idle, recording, or uploading), firmware version, any
+update progress, and battery level. The response can carry commands, a firmware-update
+offer, and account status — including the signal that a device has been un-claimed, which
+returns it to first-time setup.
 
 :::note[Upload transport history]
-Earlier firmware streamed audio to Supabase over a **WebSocket**. The current path is the
-**resumable chunked HTTPS** upload above (`POST /sessions/chunk`, `HTTPClient`): the server
-reassembles the ~1 MB slices and byte-verifies before accepting, so a dropped connection or a
-mid-upload reboot resumes from the last acked offset instead of losing the take.
+Earlier firmware streamed audio to the cloud over a persistent WebSocket connection. The
+current path is a **resumable chunked upload**: the cloud reassembles the slices and
+byte-verifies the result before accepting it, so a dropped connection or a mid-upload
+reboot resumes from the last acknowledged point instead of losing the recording.
 :::
 
-The poll query string doubles as the **heartbeat**: it carries `pending`, `state`
-(idle/recording/uploading), `fw`, `ota` phase, `bat`, `recs`, and raw cell `mv`
-(`pollCommands()`). The response can carry `commands[]`, an `ota` payload, an
-`active_patient`, and an `unclaimed:true` flag (the only path back to first-time setup —
-`connFactoryReset()`).
+### (c) Bluetooth fallback bridge — when offline
 
-### (c) BLE fallback bridge — when offline
+Bluetooth is used for first-time setup, and whenever Wi-Fi is unavailable or drops. Over
+this channel the companion mobile app can:
 
-- **When:** provisioning (first-time setup), or whenever Wi-Fi is unavailable/dropped
-  (`enterBleMode()`). Provisioning-time `connLoop()` runs on the **main loop**, not the
-  net task, so the register TLS handshake has contiguous heap.
-- **Stack:** NimBLE-Arduino v2, MTU 247, 180-byte packets (`BLE_CHUNK`). GATT service
-  `53415445-0001-...-000000000001` with four characteristics: INFO (read), CONTROL (write),
-  STATUS (notify), DATA (notify) (`connectivity.cpp`).
-- **Framing:** logical messages are chunked into `[flag][payload]` packets, flag
-  `FRAME_PARTIAL 0x01` / `FRAME_FINAL 0x02` (`notifyFramed()`, reassembly in
-  `CtrlCB::onWrite`).
+| Capability | What it does |
+|---|---|
+| Scan Wi-Fi | Ask the device to list nearby networks |
+| Provision | Hand the device Wi-Fi credentials and claim it to an account |
+| Change Wi-Fi | Update credentials while keeping the existing account |
+| List recordings | See which recordings are still unsynced |
+| Bridge a recording | Pull a recording off the device over Bluetooth |
+| Mark synced | Note that a recording has been received |
+| Reboot / factory reset | Restart the device, or wipe its account binding |
 
-<div class="bytemap">
-  <div class="cell hi"><b>flag</b><span>0x01 partial / 0x02 final</span></div>
-  <div class="cell grow"><b>payload</b><span>≤ 180-byte chunk (BLE_CHUNK)</span></div>
-</div>
+While offline, the device also advertises a small status beacon so the app can tell — at a
+glance, without connecting — whether it still needs setup or has recordings waiting to sync.
 
-- **Advertising manufacturer data:** `[0xFF 0xFF][magic 0x5A][flags][pending][rsvd]`; flags
-  encode *unprovisioned* / *needs-sync* so the app sees state without connecting
-  (`bleUpdateAdvertising()`).
+### (d) Over-the-air firmware updates
 
-<div class="bytemap">
-  <div class="cell"><b>0xFF 0xFF</b><span>company id</span></div>
-  <div class="cell"><b>0x5A</b><span>magic</span></div>
-  <div class="cell grow hi"><b>flags</b><span>unprovisioned / needs-sync</span></div>
-  <div class="cell"><b>pending</b><span>unsynced count</span></div>
-  <div class="cell"><b>rsvd</b><span>reserved</span></div>
-</div>
+When an update is offered during a check-in, the device downloads the new firmware image
+directly from cloud storage, writes it into a spare application slot, and reboots into it.
+Update progress and any failure are reported in the heartbeat, so an operator can watch an
+update from the dashboard with nothing physically attached. The device carries two
+application slots specifically so an update never overwrites the running firmware.
 
-- **Threading rule:** NimBLE callbacks only copy bytes and set a flag; **all** real work runs
-  from `connLoop()` / `handleBleOp()` — mirrors the touch-callback rule.
-
-| BLE op | Effect | Handler |
-|---|---|---|
-| `scan_wifi` | async passive Wi-Fi scan, results notified back | `handleBleOp` |
-| `provision` | Wi-Fi creds + claim token → connect → register | `PROV_WIFI`/`PROV_REGISTER` |
-| `change_wifi` | new creds, **keep** account/key (no re-register) | — |
-| `cancel_wifi` | leave change-Wi-Fi mode immediately | — |
-| `list_sessions` | enumerate unsynced sessions (`n`, patient, bytes) | — |
-| `send_session` | stream a WAV to the app over CHAR_DATA | `sendSessionOverBle()` |
-| `mark_synced` | write a `.synced` marker for a session | — |
-| `set_patients` | write `/sate/patients.json` from the app | — |
-| `reboot` / `factory_reset` | deferred reboot / account wipe | — |
-
-### (d) OTA — pull a `.bin` from Storage
-
-- **When:** an `ota` command arrives in the command poll while online
-  (`pollCommands()`).
-- **Payload:** rides alongside the command list as `ota:{url, version}`. If `version` equals
-  the running build, the flash is skipped.
-- **Flow:** `runOtaUpdate()` opens a **dedicated** `WiFiClientSecure`
-  (`setReuse(false)`, follows redirects for signed URLs), `GET`s the image, streams it into
-  the spare OTA app slot via `Update.writeStream()`, requires a full-length write, then
-  `Update.end(true)` sets the new slot as boot and reboots. Progress/failure is reported via
-  the `otaPhase` string in the heartbeat (`dl`, `updating`, `err-get<code>`, `err-space`,
-  `err-write`, `err-final`) so the dashboard shows it with no serial attached.
-- **Dual-slot requirement:** OTA only works because the partition scheme is `default_8MB`
-  (two app slots). **Never** `huge_app` — see §7. See §9 for the rollback caveat.
-
-:::warning[OTA with a large upload backlog]
-On a device with a big upload backlog, OTA fails `err-get-1`: the second TLS handshake can't
-get its ~40 KB contiguous block on a heap fragmented by hours of 1 MB chunks. **Queue
-`reboot` first, wait for it to come back, then queue `ota`** (runbook recipe).
+:::warning[Updating a device with a large upload backlog]
+On a device that has hours of recordings still waiting to upload, an update can fail to
+start because memory is fragmented. The reliable recipe is to **reboot the device first,
+wait for it to come back, then trigger the update** — the first check-in after a fresh boot
+has the clean memory the download needs.
 :::
 
 ---
 
 ## 4. Features
 
-| Feature | What it does | Where |
-|---|---|---|
-| **Segmented recording** | Streams mic → SD as `session_NNNN.partKK.wav`, one file per **1-minute** segment. No on-device merge — the server stitches segments on upload. | `recordWavStreamToSd()` |
-| **~5 s durability flush** | `file.flush()` every `FLUSH_EVERY_BYTES` (= 5 s of PCM), so a brownout loses at most a few seconds, not the open minute. | — |
-| **Flag markers** | The FLAG button records the elapsed-ms offset of a clinical moment (up to `FLAG_CAP_MAX`=64). Written into the session JSON `flags_ms[]`, uploaded as `&flags=`, surfaced as seek-bar ticks on the web report. | `saveMetadataToSd()` |
-| **Auto-resume after reboot** | **Every** take marks itself active in NVS (`recCrashMark()`) — button-started *and* server/app-started — so any take interrupted by a reboot or brownout continues in the same session instead of ending early. It works from local NVS plus the SD segments alone: **no Wi-Fi and no server are needed**. An empty header-only `part00` **restarts** the take rather than deleting it. A boot-loop guard gives up after two attempts so a take that reliably crashes cannot wedge the device. | — |
-| **Card-full guard** | Refuses to start a take without room for a full segment; if the card fills mid-take, it stops cleanly and keeps every captured segment (a full card is a normal end state, never data loss). | `SD_MIN_FREE_BYTES` |
-| **Nap / screen dim** | Backlight fades to duty 10 (~4%) after 5 min idle; any touch/button wakes it. | `serviceScreenDim()` |
-| **Battery guard** | Reads GPIO9 (×2 divider, 1-point calibrated), reports `%`/`mV` telemetry, and deep-sleeps near-empty to protect the LiPo. | `readBatteryMv()`, `serviceBatteryGuard()`, `batteryBootGuard()` |
-| **Verified SD reclaim** | After a synced take, frees the **audio** (not the tombstone) of synced takes older than the newest `KEEP_AUDIO_SESSIONS`=5 — **only** on a byte-exact server confirmation. | `trimPatientSyncedAudio()` |
-| **Remote commands** | `sync_now`, `resync_all`, `reload_patients`, `record`, **`stop`**, `wifi_change`, `reboot`, `ota`, plus `unclaimed`→factory-reset. `stop` (fw 1.5.15) ends a take exactly like the RECORD button; before it, a server-started take could only be ended at the device or by the ~62-minute ceiling. A stop is latched only while a take is **armed** — from the moment the take is decided on, through the status screen and its GUI pump, until capture returns — so it can neither go stale and kill the next take, nor be dropped mid-start. | `runRemoteCommand()`, `pollCommands()`, `sateHookStop()` |
-| **Sessions screen + delete** | List/playback of recorded sessions; Delete removes a take and renumbers the rest (crash-safe, see §9). Full deletion is **user-only**. | `ACT_DELETE_SESSION`; `deleteSession()` |
-| **Battery telemetry** | `bat`/`recs`/`mv` on every heartbeat for the admin dashboard. Lifetime recording count persisted in NVS (`sate-stats`) so it survives the 5-session trim. | `connSetTelemetry()`; `loadTotalRecordings()` |
-| **Find-me / live state** | `connSetLiveState()` forces an immediate heartbeat so the app sees "recording"/"uploading" near-instantly; BLE advert `NEEDS_SYNC` flag exposes pending count. | `connSetLiveState()` |
+| Feature | What it does |
+|---|---|
+| **Segmented recording** | Audio streams to storage as a series of short (~1-minute) segments. There is no on-device merge — the cloud stitches the segments into one recording on upload. |
+| **Frequent durability flush** | Audio is flushed to storage every few seconds, so a sudden power loss costs at most a few seconds, never the whole recording in progress. |
+| **Flag markers** | The FLAG button timestamps a clinically significant moment. Those marks travel with the recording and surface as seek-bar ticks on the web report. |
+| **Auto-resume after reboot** | Any recording interrupted by a reboot or power loss continues in the same recording rather than ending early. It works from local storage alone — no Wi-Fi or server needed — and a boot-loop guard gives up gracefully if a recording reliably fails to resume. |
+| **Card-full guard** | The device refuses to start a recording without room for a full segment, and if the card fills mid-recording it stops cleanly and keeps every captured segment. A full card is a normal end state, never data loss. |
+| **Nap / screen dim** | The backlight fades after a few minutes idle; any touch or button press wakes it. |
+| **Battery guard** | Reports charge level, and puts itself into deep sleep when the battery runs low to protect the cell. |
+| **Verified space reclaim** | After a recording is safely in the cloud, the device may free that recording's audio from the card — but only on a byte-exact confirmation from the server that it is durably stored. |
+| **Remote commands** | Operators can trigger sync, reload settings, start and stop recording, change Wi-Fi, reboot, and push updates remotely. A remote stop ends a recording exactly as the RECORD button would. |
+| **Recordings screen** | List, play back, and delete recordings on the device. Deletion is user-initiated only. |
+| **Telemetry** | Battery, recording count, and live state ride along with every heartbeat for the admin dashboard, so a device's status is visible at a distance. |
 
 ---
 
-## 5. Session numbering, retention and reclaim {#numbering-and-retention}
+## 5. Recording numbering, retention and reclaim {#numbering-and-retention}
 
-Two rules govern what the card holds. Both were rebuilt in July 2026 after an audit
-found the old machinery was the single largest source of critical defects.
+Two simple rules govern what the SD card holds. Both were reworked after review found the
+older, more complex machinery was the single largest source of defects.
 
 ### Numbers are never renumbered
 
-Session numbers are allocated **monotonically** per directory and **wrap at 99**.
-Deleting a session removes **only that session's own files** and leaves a hole —
-nothing shifts. A number is not handed straight back either: a per-directory
-high-water in NVS (`sate-seq`) keeps a spent number spent, because the server keeps
-its row for a deleted take and a remote take of the same duration produces the same
-byte count, which would make `(patient, number, bytes)` ambiguous.
+Each recording is given a number that is only ever used once, and numbers wrap around after
+a fixed ceiling. Deleting a recording removes **only that recording's own files** and
+leaves a gap — nothing else shifts, and no other recording is renamed. Keeping numbers
+stable is deliberate: the cloud keeps its record of a deleted recording, and shuffling
+numbers on the device was historically the cause of the worst failures.
 
-At the wrap, the allocator recycles the **oldest audio-free tombstone** — a slot whose
-audio was already reclaimed after the server confirmed it. A slot that still holds real
-audio is never reused.
-
-:::danger[Do not reintroduce renumbering]
-The old design shifted later sessions down to keep numbering contiguous, journaled to
-NVS so a reboot mid-shift could heal. It produced: a renumber running under a live
-upload that **spliced two takes into one server WAV**, a trash tap that deleted the
-**wrong recording** after the shift, a wait-for-the-uploader guard shorter than the net
-task's critical section, and power-cut slot reuse. Removing the mechanism removed all of
-them. Anything that assumes contiguous `1..N` is a bug — iterate the directory.
+:::danger[Renumbering is intentionally gone]
+The older design shifted later recordings down to keep numbering contiguous. That produced
+a whole class of failures — a renumber running under a live upload that spliced two
+recordings into one on the server, a delete that removed the wrong recording after the
+shift, and slot reuse after a power cut. Removing the mechanism removed all of them.
+Nothing in the current design assumes recordings are numbered contiguously.
 :::
 
-### Retention: the 5 newest, and only what the server has
+### Retention: keep the newest, and only free what the server has
 
-The card keeps the **5 newest recordings** device-wide. Older audio is freed **only**
-when both hold:
+The card keeps the **newest few recordings** on the device. Older audio is freed only when
+**both** of these are true:
 
-1. the session carries a `.synced` marker, **and**
-2. `GET /api/sessions/verify` confirms that exact byte count is durably stored.
+1. the recording has been marked synced, **and**
+2. the server confirms — with a byte-exact check — that exactly that recording is durably
+   stored.
 
-**A recording that is not yet synced is never freed, at any age.** Any doubt — offline,
-non-2xx, parse failure, byte mismatch — keeps the audio; the next cycle retries. The
-marker alone is never sufficient: it only means "a POST returned 2xx".
+**A recording that is not yet synced is never freed, at any age.** Any doubt — the device
+is offline, the server can't confirm, or the byte counts don't match — keeps the audio, and
+the next cycle simply tries again. A local "synced" mark alone is never enough; only a
+positive server confirmation permits freeing space.
 
-Freeing removes the audio and keeps the `.synced` marker as a tombstone, so the slot
-stays accounted for. Full deletion stays user-only (the Delete button).
+When audio is freed, a lightweight marker stays behind so the slot remains accounted for.
+Full deletion of a recording stays a user action.
 
-Retention runs in two places: after every successful upload (for that recording's
-directory), and on an **idle sweep** across every directory. The sweep exists because
-reclaim used to run *only* on the upload path — so once everything was uploaded, nothing
-was ever reclaimed again, and the card filled while the screen said "all synced". The
-sweep is bounded per pass (each freed session costs one verify round-trip while it holds
-the SD bus) and it logs a per-directory inventory:
-
-```
-[CONN] card: Standalone holds 5 take(s) with audio, 31 MB
-```
-
-That line is the fastest way to answer "why is my card still full?" — retention keeps the
-live directory's newest 5 and fully reclaims stale directories, so a directory nothing
-records into any more should trend to zero.
+Retention runs both right after a successful upload and on a periodic idle sweep across the
+whole card. The idle sweep matters: without it, once everything had uploaded there was
+nothing left to trigger reclaim, and a card could fill up while the screen still said "all
+synced." The sweep also logs a per-directory inventory, which is the fastest way to answer
+"why is my card still full?"
 
 ### Standalone is the default
 
-The recorder records **standalone audio reports**. A roster arriving from the server is
-**not** an assignment: the active target stays Standalone unless a patient is explicitly
-assigned (from the app/server, or picked on the device). One function
-(`selectPatientIndex`) changes the selection and publishes the live directory to
-retention — publishing it from anywhere else races the selection at boot.
+The recorder records standalone audio reports. Receiving a patient roster from the server
+is **not** an assignment — the active target stays Standalone unless a patient is
+explicitly assigned, either from the app/server or picked on the device itself.
+
+---
 
 ## 6. Recording & upload data flow
 
-**Capture (Core 1).**
+**Capture.** Pressing RECORD marks the recording as active in durable local state, then
+streams microphone audio to storage as a chain of short segments. When the recording stops
+— by button, disk-full, or the safety ceiling — the audio file is finalised, its metadata
+(including any flag marks) is written, and the recording is queued for upload.
 
 ```mermaid
 flowchart TD
-    A[RECORD press] --> B[runRecordSavePlaySession]
-    B --> C[recCrashMark]
-    C --> D[recordWavStreamToSd]
-    D --> E{{1-min segments}}
-    E -->|RECORD again / disk full / cap| F[patch WAV header + close]
-    F --> G[finalizeSavedSession]
-    G --> H[recCrashClear + notify]
+    A[RECORD press] --> B[mark recording active]
+    B --> C[stream audio to storage]
+    C --> D{{1-min segments}}
+    D -->|RECORD again / disk full / cap| E[finalise + close file]
+    E --> F[write metadata + queue]
 ```
 
-**Upload & verified trim (Core 0 net task).**
+**Upload and verified reclaim.** The background network worker finds pending recordings,
+uploads each in resumable ~1 MB slices, and waits for the server to reassemble and verify
+the whole recording. Only then is it marked synced — and only on a later byte-exact
+confirmation is the audio freed from the card.
 
 ```mermaid
 flowchart TD
-    H[recCrashClear + notify] --> I[scanPending]
-    I --> J[beginUpload]
-    J --> K[uploadStep ~1MB slice]
-    K -->|not final| K
-    K -->|final=1 acked| L[server assembles + verifies]
-    L --> M[writeSyncMarker]
-    M --> N[trimPatientSyncedAudio]
-    N -->|stored:true| O[freeSessionAudioKeepMarker]
-    N -->|any doubt| P[KEEP audio, retry]
+    A[queued recording] --> B[find pending]
+    B --> C[upload ~1MB slice]
+    C -->|not final| C
+    C -->|final acked| D[server assembles + verifies]
+    D --> E[mark synced]
+    E --> F{durably stored?}
+    F -->|confirmed| G[free audio, keep marker]
+    F -->|any doubt| H[keep audio, retry]
 ```
 
-<p class="diagram-caption">Capture writes segments on Core 1; the Core 0 net task uploads then reclaims audio only on a byte-exact server confirmation.</p>
+<p class="diagram-caption">Capture writes segments locally; the network worker uploads, then reclaims audio only on a byte-exact server confirmation.</p>
 
-Step detail (the qualifiers moved out of the node labels above):
-
-| Step | Detail |
-|---|---|
-| RECORD press | ISR latches `g_recHit` |
-| runRecordSavePlaySession | `connSetUiSdBusy(true)` |
-| recCrashMark | NVS mark, local take only |
-| recordWavStreamToSd | mic → SD |
-| 1-min segments | `part00.wav .. partNN.wav`, flush ~5 s |
-| finalizeSavedSession | writes `session_NNNN.json` |
-| recCrashClear + notify | `connNotifyNewSession`; `connSetUiSdBusy(false)`, `pendDirty=true` |
-| scanPending | net task walks SD |
-| beginUpload | picks first unparked pending |
-| uploadStep | one ~1 MB slice per pass, `POST /sessions/chunk` with `offset`,`final`,`total` |
-| server assembles + verifies | `upFinalAcked=true` |
-| writeSyncMarker | `.synced` tombstone |
-| trimPatientSyncedAudio | `verifySessionStored` byte-exact |
-| freeSessionAudioKeepMarker | keep newest 5 |
-| KEEP audio | retry next cycle |
-
-**On-card layout of one session.** A take is a set of segment WAVs plus a metadata JSON;
-once synced a `.synced` tombstone marks it (audio may then be reclaimed):
+**On-card layout of one recording.** A recording is a set of segment audio files plus a
+metadata record; once synced, a small marker notes that it is safe (its audio may then be
+reclaimed):
 
 ```mermaid
 flowchart TD
-    DIR["/sate/patients/&lt;pid&gt;/"] --> P0["session_NNNN.part00.wav"]
-    DIR --> P1["session_NNNN.part01.wav"]
-    DIR --> PN["session_NNNN.partNN.wav"]
-    DIR --> J["session_NNNN.json (metadata + flags_ms)"]
-    DIR --> S[".synced marker (tombstone, once synced)"]
+    DIR["recording directory"] --> P0["segment 00"]
+    DIR --> P1["segment 01"]
+    DIR --> PN["segment NN"]
+    DIR --> J["metadata (with flag marks)"]
+    DIR --> S["synced marker (once synced)"]
 ```
 
-**The ring of session states.** A session slot is one of:
+**The lifecycle of a recording slot.** Each recording is in one of four states:
 
-1. **Recording** — open segments, `recCrashMark` set in NVS.
-2. **Pending** — segments (or a legacy merged `.wav`) on the card, no `.synced` marker.
-   `scanPendingLocked()` (`connectivity.cpp`) counts these.
-3. **Synced (audio present)** — a `.synced` marker **and** audio. Written only when the
-   server ACKs `final=1` (`upFinalAcked`, `uploadStep()`).
-4. **Tombstone (audio freed)** — `.synced` marker only; audio reclaimed after a byte-exact
-   `verifySessionStored()`. The slot stays *numbered* (contiguous) so later takes never hide.
-
-`scanPendingLocked()` must check the marker **before** deciding a slot is empty — otherwise a
-synced+purged (tombstone) slot looks like "no session here" and every later take is hidden
-(the fw 0.9.3 bug, `connectivity.cpp`).
+1. **Recording** — segments still open, marked active in local state.
+2. **Pending** — segments on the card, not yet synced.
+3. **Synced (audio present)** — confirmed received by the server, audio still on the card.
+4. **Reclaimed** — synced marker only; the audio was freed after a byte-exact server
+   confirmation, while the slot stays accounted for so later recordings are never hidden.
 
 ---
 
 ## 7. Concurrency model {#concurrency-model}
 
-Two cores, one deliberate split (fw 1.2.5+):
+The device does two things at once by splitting work across the ESP32-S3's two cores:
 
-- **Core 1 — GUI + record/playback.** The Arduino `loop()` runs `runGui()` (LVGL + touch),
-  services the ISR-latched buttons, factory-reset/dim/battery, and consumes connectivity
-  flags. The blocking capture loop *also* lives here, so it polls the buttons directly.
-- **Core 0 — net task (`connLoop()`).** `netTaskFn()` (`connectivity.cpp`) runs all
-  HTTP/TLS/BLE work pinned to core 0 via `xTaskCreatePinnedToCore(..., 16384, ..., 0)`, alongside the Wi-Fi/BT stacks. A blocking poll or handshake stalls only this
-  task — never the GUI or buttons.
+- **One core drives the interface and capture** — the touchscreen UI, the physical buttons,
+  the battery and screen-dim housekeeping, and the recording/playback itself.
+- **The other core runs the network worker** — all Wi-Fi, secure connections, uploads,
+  command polling, and Bluetooth work. A slow network call therefore stalls only the
+  network worker, never the interface or the buttons.
 
 ```mermaid
 flowchart LR
-    subgraph Core1[Core 1 - GUI]
-      L[loop / runGui] --> BTN[ISR-latched buttons]
-      L --> REC[recordWavStreamToSd]
-      L --> FLAGS[consume connStateReq etc.]
+    subgraph UI[Interface + capture core]
+      L[UI loop] --> BTN[buttons]
+      L --> REC[record / playback]
     end
-    subgraph Core0[Core 0 - net task]
-      NT[connLoop] --> POLL[pollCommands]
-      NT --> UP[uploadStep]
-      NT --> BLE[handleBleOp]
+    subgraph NET[Network worker core]
+      NT[network loop] --> POLL[command poll]
+      NT --> UP[upload]
+      NT --> BLE[Bluetooth ops]
     end
-    FLAGS -. volatile flags .-> NT
-    REC == connSetUiSdBusy true/false ==> NT
-    NT -. sateHook* flags .-> FLAGS
+    UI <-. status flags .-> NET
 ```
 
-**The `uiSdBusy` handoff.** The SD bus *and* the FATFS volume lock are shared. Before the UI
-touches the card (record / save / playback), it calls `connSetUiSdBusy(true)`
-(`runRecordSavePlaySession()`, `finalizeSavedSession()` releases). While
-`uiSdBusy` is set, `connLoop()` pauses **all SD access** (uploads + pending scans) — HTTP
-command polling keeps running (no SD) — and if an upload is mid-flight it aborts on the net
-task so the file handle is closed before the UI can rename/delete underneath it
-(`connectivity.cpp`). This restores the "record, *then* sync" timing without losing
-dual-core responsiveness.
+**Coordinating access to storage.** The SD card is a shared resource, so the two cores
+hand it off cleanly. When the interface needs the card — to record, save, or play back — it
+takes ownership, and the network worker pauses all card access (uploads and scans) until
+the interface is done, aborting any in-flight upload safely first. Command polling, which
+doesn't touch the card, keeps running throughout. This restores the natural "record first,
+then sync" feel without giving up the responsiveness of running on two cores.
 
 ```mermaid
 flowchart TD
-    subgraph Core1["Core 1 — GUI + record/playback"]
-      L["loop() / runGui() + buttons"]
-      R["recordWavStreamToSd()"]
+    subgraph UI["Interface + capture core"]
+      L["UI loop + buttons"]
+      R["record / playback"]
       L -->|"RECORD press"| R
     end
-    R -.->|"connSetUiSdBusy(true/false)"| F[["uiSdBusy flag"]]
-    subgraph Core0["Core 0 — net task connLoop()"]
-      P["pollCommands() heartbeat"]
-      G{"uiSdBusy?"}
-      U["uploadStep() ~1MB slice"]
-      SP["scanPending()"]
-      G -->|"false: SD free"| U
-      G -->|"false"| SP
-      G -->|"true: UI owns SD"| W["pause SD, abort chunk"]
+    R -.->|"takes / releases card"| F[["storage-busy flag"]]
+    subgraph NET["Network worker core"]
+      P["heartbeat + command poll"]
+      G{"storage busy?"}
+      U["upload slice"]
+      SP["scan pending"]
+      G -->|"free: card available"| U
+      G -->|"free"| SP
+      G -->|"busy: UI owns card"| W["pause card access"]
     end
     F --> G
 ```
 
-**Flag-based handoff.** The net task never touches LVGL. It sets `volatile` request flags
-(`connStateReq`, `connPatientsReq`, `connActivePatientReq`, `connRecordReq`) and UI
-hooks (`sateHook*`); `loop()` renders. Upload progress is likewise flag-driven
-(`connUploadUiActive/Pct` → `renderUploadOverlay()`).
-
-**Quiesce / cross-core rules.**
-
-- `scanPending()` is wrapped in `pendMux` so both cores can't tear `pendTable`.
-- The net task is **not** started at boot; provisioning runs `connLoop()` on the main loop
-  (heap for the register handshake). `loop()` calls `connStartNetTask()` once
-  `connNetTaskWanted()` (first WIFI_ONLINE) is true (`SATE_Recorder.ino`).
-- A delete renumbers sessions, so the UI takes the bus, **waits** for the uploader to release
-  its file, then calls `connNotifySessionsRenumbered()` to drop the resume point
-  and strike table (both keyed by session number).
+The network worker never touches the interface directly; the two cores coordinate through
+simple status flags, and each renders or acts on its own core. This keeps the graphical
+stack single-owner while still letting network events update what the operator sees.
 
 ---
 
 ## 8. Configuration
 
-### Mandatory flash config (verified fw 1.5.12–1.5.17)
+The recorder is configured for a specific hardware layout, and a few settings are
+load-bearing:
 
-```
-esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi
-```
+- **16 MB flash with a dual-slot layout.** Two application slots are what make over-the-air
+  updates possible — an update writes to the spare slot and never overwrites the running
+  firmware.
+- **8 MB PSRAM in the correct mode.** The graphical stack and its buffers live in PSRAM,
+  which keeps enough contiguous internal memory free for secure network handshakes.
+- **A pinned graphical-library configuration.** The on-device UI relies on a small number
+  of specific library settings; a mismatch can leave the screen lit but frozen at the boot
+  spinner, which looks like a bad flash but is not.
 
-| Setting | Must be | If wrong |
-|---|---|---|
-| `FlashSize` | **16M** | an 8M-header bootloader on a 16 MB board can hang at frame 1 |
-| `PartitionScheme` | **default_8MB** (dual `ota_0`+`ota_1`) | **`huge_app` silently disables OTA** (single slot, "3MB No OTA") |
-| `PSRAM` | **opi** (octal) | wrong PSRAM mode breaks the LVGL/heap layout |
-| flash mode (manual esptool) | **dio** | `qio` → dead black screen |
+Key operating parameters, at the level worth sharing publicly:
 
-### `lv_conf.h` traps (lives in `~/Documents/Arduino/libraries/`, **not** the repo)
-
-A fresh `lvgl` install resets these; the repo keeps a reference copy at
-`SATE_Recorder/lv_conf.reference.h`.
-
-| Setting | Must be | If wrong |
-|---|---|---|
-| **`LV_TICK_CUSTOM`** | **1** (millis source) | **Silent boot brick.** The firmware calls `lv_tick_inc()` *nowhere*, so with `0` LVGL's clock freezes at 0 → boot spinner sticks at frame 1, nothing repaints, yet `setup()` still finishes (serial reaches `[MEM] ready`). Looks exactly like a bad flash — it is not. |
-| `LV_MEM_CUSTOM` + `ps_malloc`/`ps_realloc` | 1 | LVGL heap in internal RAM fragments it → register TLS handshake fails `code -1` |
-| `LV_FONT_MONTSERRAT_12/14/20` | 1 | missing glyphs / build errors |
-
-Draw buffers are allocated `MALLOC_CAP_SPIRAM` (`display.cpp`) — keeping them and the
-LVGL heap out of internal RAM leaves the ~40 KB contiguous block the register TLS handshake
-needs.
-
-### Key `#define`s / constants
-
-| Constant | Value | File |
-|---|---|---|
-| `FIRMWARE_VERSION` | `"1.5.17"` | `SATE_Recorder.ino` |
-| `AUDIO_SAMPLE_RATE` | 16000 | `SATE_Recorder.ino` |
-| `AUDIO_BIT_DEPTH` / `AUDIO_CHANNELS` | 16 / 1 (mono) | `SATE_Recorder.ino` |
-| `SEGMENT_SECONDS` | 60 (1-min segments) | `SATE_Recorder.ino` |
-| `RECORD_MAX_SECONDS` | 3700 (~62 min safety ceiling) | `SATE_Recorder.ino` |
-| `REMOTE_RECORD_SECONDS` | 8 | `SATE_Recorder.ino` |
-| `AUDIO_CHUNK_BYTES` | 4096 (the only audio working buffer) | `SATE_Recorder.ino` |
-| `FLUSH_EVERY_BYTES` | 5 s of PCM | `SATE_Recorder.ino` |
-| loop-task stack | 16 KB (`SET_LOOP_TASK_STACK_SIZE`) | `SATE_Recorder.ino` |
-| `MAX_PATIENTS` | 6 | `SATE_Recorder.ino` |
-| `FLAG_CAP_MAX` | 64 | `SATE_Recorder.ino` |
-| `KEEP_AUDIO_SESSIONS` | 5 | `connectivity.cpp` |
-| `UPLOAD_CHUNK_BYTES` | 1 MB | `connectivity.cpp` |
-| `UPLOAD_MAX_STRIKES` / `UPLOAD_PARK_RETRY_MS` | 3 / 5 min | `connectivity.cpp` |
-| `CMD_POLL_PERIOD_MS` | 12000 | `connectivity.cpp` |
-| `HEARTBEAT_PERIOD_MS` | 15000 | `connectivity.cpp` |
-| `BLE_CHUNK` / MTU | 180 / 247 | `connectivity.cpp` |
-
-Persisted config (NVS namespaces): `sate` (Wi-Fi SSID/pass, server, device id/key,
-`provisioned`), `sate-stats` (lifetime recording count), `sate-rec` (record-resume mark),
-`sate-del` (delete/renumber journal).
-
----
-
-## 9. Key files
-
-| File | Responsibility |
+| Parameter | Value |
 |---|---|
-| `SATE_Recorder.ino` | `setup()`/`loop()`, UI state machine + all screens, record/playback, WAV + segment I/O, delete/renumber + journal, resume, battery/backlight, button ISRs, UI hooks |
-| `connectivity.cpp` / `.h` | BLE provisioning + bridge, Wi-Fi state machine, HTTPS `httpJson`/chunked upload, command poll + heartbeat, verified trim, pending scan, OTA, dual-core net task |
-| `display.cpp` / `.h` | LVGL init, ILI9341 flush (blocking CPU copy), FT6336U touch, PSRAM draw buffers |
-| `es8311.cpp` / `.h` / `es8311_reg.h` | ES8311 codec register driver (I2C), analog mic + PGA config |
-| `sate_logo_white.h` | Boot-logo bitmap |
-| `lv_conf.reference.h` | Reference copy of the load-bearing LVGL config |
+| Audio format | 16 kHz, 16-bit, mono |
+| Segment length | 60 s |
+| Recording safety ceiling | ~62 min |
+| Upload slice size | ~1 MB |
+| Command poll interval | ~12 s |
+| Heartbeat interval | ~15 s |
+
+The device persists its essential state — Wi-Fi credentials, server and account binding,
+lifetime recording count, and any resume marker — in non-volatile storage, so it survives
+reboots and power loss.
 
 ---
 
-## 10. Known issues & current status
+## 9. Reliability principles
 
-Audit of **2026-07-22**. Priorities, in order: (1) never lose or **mismatch** patient audio;
-(2) no feature ever **stuck**; security noted but deprioritized.
+The recorder's design is organised around one overriding priority: **never lose or
+mismatch a recording**, and never let a feature get stuck. A few principles follow from
+that:
 
-### Fixed this session
+- **The device is the only copy until the cloud provably has it.** Space is reclaimed only
+  on a byte-exact server confirmation, never on a local marker alone.
+- **Every recording can be resumed** from local storage after an interruption, with no
+  network required.
+- **A remote recording stays controllable** for its whole length — it never goes off the
+  air just because nobody is standing at the device.
+- **Simplicity beats cleverness where data integrity is at stake** — the removal of
+  recording renumbering is the clearest example, having eliminated an entire class of
+  data-mismatch failures.
 
-| Issue | Symptom | Status / where |
-|---|---|---|
-| **Delete-during-upload two-in-one-WAV** | Deleting a session renumbered later takes while the uploader still streamed the old number → server assembled one WAV from two different recordings. | **FIXED** — the delete handler takes the SD bus and polls `connUploadProgress()` until the in-flight chunk is really down, bounded to **65 s** (> ~60 s final-chunk timeout), then renumbers. `ACT_DELETE_SESSION`, `SATE_Recorder.ino` |
-| **Trim-tail race** | `upActive` cleared *before* `trimPatientSyncedAudio()`, so a delete during trim's verify network call saw "idle", renumbered, and slid a different unsynced take into a slot trim then freed by number → permanent loss. | **FIXED** — `upActive` stays true across `writeSyncMarker` + trim. `uploadStep()`, `connectivity.cpp` |
-| **Reboot-mid-renumber hole** | A reboot during the multi-rename shift left a numbering hole; `findNextSessionIndex`/pending scan stop at the first gap → every later take invisible + never uploads. | **FIXED** — `deleteSession()` journals the op to NVS (`sate-del`) before mutating; `recoverInterruptedDelete()` → `compactPatientDir()` re-drives it on boot (idempotent). `SATE_Recorder.ino` |
-| **Auto-resume flush** | Segments flushed only once per full minute, so a sub-minute take (or an early power cut) left a header-only `part00`, which boot recovery then **deleted**. | **FIXED** — ~5 s mid-segment flush (`FLUSH_EVERY_BYTES`) + empty-`part00`-on-boot now **restarts** the take into the same session instead of deleting it. |
-| **Verified SD trim** | Reclaim keyed on the local `.synced` marker alone, which can exist before the server durably holds the audio (BLE `mark_synced`, or a false 2xx / swallowed 413). | **ADDED** — `verifySessionStored()` (`GET /api/sessions/verify`, checks row **and** storage object, byte-exact) gates every free; `sessionAssembledBytes()` mirrors the server's stored bytes. Any doubt → **keep**. `connectivity.cpp` |
-
-### Open
-
-| Issue | Symptom | Status / where |
-|---|---|---|
-| **OTA: no device-side rollback / self-test** | The bootloader keeps the old slot only if the new image *fails to boot*; a bad image that **boots but is broken** is not caught — one bad publish could brick the fleet. No `verifyOta`/post-boot self-test; and per CLAUDE.md `POST /firmware` still lacks an `isAdmin()` gate (image is now semver+`0xE9`-magic+size validated). | **OPEN** — `runOtaUpdate()`, `connectivity.cpp` |
-| **`renameSessionFiles` ignores returns** | Each `SD_MMC.rename()` return is unchecked; a failed rename mid-renumber isn't detected in-line (the NVS journal heals it on the *next* boot, so it is not silent loss, but the running shift can leave a transient hole). | **OPEN** — `SATE_Recorder.ino` |
-| **`saveMetadataToSd` return ignored** | `finalizeSavedSession()` calls it without checking the `bool` return; a failed JSON write proceeds and the session uploads with no metadata (flags/sample-rate default). | **OPEN** — `SATE_Recorder.ino` |
-| **BLE `notifyFramed` truncation** | A notify is retried 50× then the packet is silently dropped and `off` still advances → a bridged session can be truncated with no device-side detection (the app rejects a byte-mismatched pull, but the device believes it sent). | **OPEN** — `connectivity.cpp` |
-| **Flags truncated at `flagsCsv[300]`** | Flag offsets are packed into a 300-byte query buffer; once full, remaining flags are dropped rather than overflow. A take with many flags loses the tail on upload. | **OPEN** — `beginUpload()`, `connectivity.cpp` |
-| **`millis()` wrap deadlines** | Several timers compare `now > deadline` directly (e.g. `wifiDeadline`, `nextCmdPoll`, `rebootAtMs`) rather than the wrap-safe `(int32_t)(now - x) >= 0` used elsewhere; a 49.7-day uptime wrap could misfire. Low risk on a field device that reboots often. | **OPEN** — `connLoop()`/`connectivity.cpp` timing block |
-| **Roster-full patient overwrite** | When the 6-slot roster is full, `applyActivePatient()` overwrites the *current* slot's patient instead of rejecting. Not hit in the standalone-only model (patients aren't assigned at capture). | **OPEN (low real-world priority)** — `SATE_Recorder.ino` |
-| **`pendDirty` lost-update** | `scanPendingLocked()` clears `pendDirty=false` after the walk; a `writeSyncMarker`/`free…` that sets it `true` *during* the walk can be clobbered → a stale cached count until the next mutation. Needs a generation counter under `pendMux`. | **OPEN** — `connectivity.cpp` |
-
-### Notes on scope
-
-- Per the **standalone-only** model (§1), patient-slot findings (roster-full overwrite,
-  patient-id in the storage path) are lower priority; `session_number` + `device_serial`
-  carry identity when everything uploads as `"Standalone"`.
-- Correctly **refuted** false positives (left alone): record-begin FATFS race (fresh file, no
-  renumber, FATFS reentrancy lock serializes); cf-processor watchdog requeue (heartbeat guard
-  exists).
-- Security holes (device heartbeat key not validated; device key derivable from serial) are
-  tracked separately and **deprioritized by the user** — see the audit security notes; do not
-  act on them unasked.
-
-> Before any firmware release, run the hardware-in-the-loop harness (`hwtest/`) on a real
-> board — a compiler cannot catch reboot-mid-record, delete-during-upload splicing,
-> verified-trim, or crash-safe-delete regressions.
+:::note[Hardware-in-the-loop testing]
+Because the hardest failures — interrupted recordings, dropped connections, delete-during-
+upload, verified reclaim — cannot be caught by a compiler, every firmware release is
+exercised on a real device with an automated harness that drives record, reboot, and delete
+and checks both the device's own behaviour and the bytes the server actually stored.
+:::

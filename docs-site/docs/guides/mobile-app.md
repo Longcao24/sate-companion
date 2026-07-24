@@ -5,352 +5,194 @@ sidebar_position: 3
 
 # Mobile app
 
-The SATE companion app is an **Expo SDK 54 / React Native / TypeScript** application.
-It is **iOS-focused** — the Plaud integration ships a proprietary **arm64 device SDK**
-(no simulator), so full-feature builds only run on a real iPhone. Source lives in
-`src/`; the entry point is `App.tsx`.
+The SATE companion app is a **React Native / TypeScript** application built with **Expo**.
+It is **iOS-focused** — one of its device integrations ships as a proprietary
+device-only SDK, so the full feature set runs on a real iPhone rather than a simulator.
 
-The app is a **BLE-to-cloud bridge**. It connects to three device families — the **SATE
-recorder**, the **SATE Pendant**, and **Plaud** devices — and relays their audio to the
-SATE backend (the Supabase `device-api` Edge Function) over HTTPS. It also does
-first-time recorder setup, claims devices to the signed-in SLP account, sends remote
-commands, and shows processed reports.
+At its heart the app is a **Bluetooth-to-cloud bridge**. It connects to the SATE family of
+recording devices, pulls their captured audio, and relays it to the SATE backend over a
+secure HTTPS connection. Alongside that, it handles first-time device setup, links devices
+to the signed-in clinician account, sends remote commands, and displays the processed
+reports that come back from the cloud.
 
-<div class="badge-row"><span class="sate-badge">React Native · iOS</span><span class="sate-badge">Expo SDK 54</span><span class="sate-badge">TypeScript</span><span class="sate-badge warn">dev build required</span></div>
+<div class="badge-row"><span class="sate-badge">React Native · iOS</span><span class="sate-badge">Expo</span><span class="sate-badge">TypeScript</span><span class="sate-badge warn">device build required</span></div>
 
 <div class="spec-grid">
-<div class="spec-tile"><div class="k">Framework</div><div class="v">Expo SDK 54</div></div>
+<div class="spec-tile"><div class="k">Framework</div><div class="v">Expo</div></div>
 <div class="spec-tile"><div class="k">Base</div><div class="v">React Native</div></div>
 <div class="spec-tile"><div class="k">Language</div><div class="v">TypeScript</div></div>
-<div class="spec-tile"><div class="k">Target</div><div class="v">iOS only</div></div>
-<div class="spec-tile"><div class="k">Backend</div><div class="v">device-api</div></div>
+<div class="spec-tile"><div class="k">Target</div><div class="v">iOS</div></div>
+<div class="spec-tile"><div class="k">Backend</div><div class="v">SATE cloud API</div></div>
 <div class="spec-tile"><div class="k">Device families</div><div class="v">3</div></div>
 </div>
 
-:::warning[Dev build required]
-`react-native-ble-plx` and the Plaud SDK are native modules, so **Expo Go cannot load them** — run
-`npx expo run:ios`. `getSharedBleManager()` throws a descriptive error outside a dev build
-(`src/ble/bleManager.ts`). JS changes hot-reload via Metro; native changes need a rebuild.
+:::note[Runs on a real device]
+Because the app relies on native Bluetooth and hardware SDK modules, it runs as a full
+device build rather than inside a lightweight preview client. Everyday interface changes
+still update instantly during development; only changes that touch the native layer require
+a rebuild.
 :::
 
 ## 1. Overview
 
+The app pairs a clinician's iPhone with SATE recording hardware and acts as the link
+between that hardware and the cloud. It signs in with the same account used on the SATE web
+app, so devices, patients, and reports stay consistent across both.
+
 | Aspect | Detail |
 |--------|--------|
-| Framework | Expo SDK 54, React Native, TypeScript |
-| Target | iOS (Plaud SDK is arm64 device-only; Pendant/QR-login also need native rebuilds) |
-| Backend | Supabase Auth + `device-api` Edge Function — no separate app server (`src/api/sateApi.ts`) |
-| Auth | Supabase user JWT (same account as the SATE web app); auto-refreshing session |
-| Device families | SATE recorder (`SATE-…`), Plaud (`plaud-<sn>`), SATE Pendant (`pendant-<id>`) |
-| Upload pipeline | One path for all three: `api.uploadSession()` → `device-api` → AI → `recordings` |
-| State | `StoreProvider` / `useStore` (`src/store.tsx`), persisted to AsyncStorage |
+| Framework | Expo · React Native · TypeScript |
+| Target | iOS |
+| Backend | SATE cloud API — no separate app server to run |
+| Sign-in | Same clinician account as the SATE web app; sessions refresh automatically |
+| Device families | Three supported recording devices |
+| Upload path | One shared pipeline for all devices → cloud API → AI processing → reports |
+| Local state | Settings and session persisted securely on the device |
 
-The top-level component is `Root()` in `App.tsx`. It holds a hand-rolled `Screen` union
-(`home`, `recorderDetail`, `provision`, `changeWifi`, `recorderSettings`, `preview`,
-`plaud`, `plaudSettings`, `pendant`, `report`, `settings`) and switches on `screen.name`
-— there is no navigation library. Three link objects are memoized once and threaded into
-screens: `makeLink()` (SATE), `makePlaudLink()` (Plaud), `makePendantLink()` (Pendant).
+The interface is organized as a set of focused screens — a device list, per-device detail
+and settings, first-time setup, Wi-Fi configuration, capture and preview, and report
+viewing — that the user moves between as they work.
 
-**Session self-heals.** `App.tsx` keeps the user signed in without surprise re-logins.
-The `api` (`makeApi`) is built with a `doRefresh` handler: on a `401` the client calls
-`onUnauthorized()`, swaps in the fresh access token, and **replays the request once**
-(`HttpApi.req`, `src/api/sateApi.ts`). A proactive timer also refreshes within 5 min of
-expiry. A single in-flight refresh is shared (via a `useRef` promise) so the proactive
-timer and any `401` retry don't race — important because Supabase rotates refresh tokens.
-A network blip during refresh does **not** sign the user out; only a genuinely dead
-refresh token does (`RefreshError.authInvalid`).
+**The session stays signed in.** The app keeps the clinician logged in without surprise
+re-authentication. When a request finds an expired credential, the app quietly renews it in
+the background and retries once, so a brief network hiccup never logs anyone out — only a
+genuinely invalid session does.
 
 ## 2. Connection methods
 
-Three BLE stacks contend for **one physical radio**, plus HTTPS for uploads:
+The app talks to devices over **Bluetooth Low Energy (BLE)** and talks to the cloud over
+**HTTPS**. Because there is only one physical Bluetooth radio in the phone, the app carefully
+coordinates which device family is using it at any moment.
 
-| Stack | Library | Used by | Serial prefix |
-|-------|---------|---------|---------------|
-| `bleplx` (shared) | `react-native-ble-plx`, ONE `BleManager` | SATE recorder (`SateLink`) **and** Pendant | `SATE-…` / `pendant-<id>` |
-| Plaud SDK | proprietary `CBCentralManager` (own, alive from launch) | Plaud devices | `plaud-<sn>` |
-| HTTPS | `fetch` | uploads + REST to `device-api` | — |
+| Channel | Used for |
+|---------|----------|
+| Bluetooth (shared) | Discovering and connecting to the SATE recorder and the SATE Pendant |
+| Bluetooth (dedicated SDK) | The third-party device family, which manages the radio through its own SDK |
+| HTTPS | Uploading audio and exchanging data with the cloud API |
 
-### The shared BleManager rule (RULE #2)
+### Coordinating one radio
 
-**SATE and the Pendant share a single `BleManager`** created by `getSharedBleManager()`
-in `src/ble/bleManager.ts`. This is not a style choice. `react-native-ble-plx` wraps one
-native `CBCentralManager` and is explicit that you must keep **one** instance alive.
-Creating a second manager — **or destroying one and immediately recreating another** —
-leaves the native iOS BLE stack broken: **scans return zero devices with no error.**
-
-That is the exact bug that stopped the pendant being found for days: the SATE→Pendant
-handoff used to call `link.teardown()` (destroy) and the pendant then built its own
-manager → empty scan. Both `PendantLink` and `SateLink` now pull the same manager via
-`getSharedBleManager()`; `hasSharedBleManager()` checks existence without creating one;
-`destroySharedBleManager()` is called **only** on the Plaud handoff.
-
-### The radio arbiter (`src/ble/radio.ts`)
-
-`radio.ts` is the single source of truth for who owns the radio, and the **only** place
-that hands it over. It layers four **logical owners** over the two physical stacks:
-
-| Owner | Screen(s) | Handoff behavior |
-|-------|-----------|------------------|
-| `autosync` | Home / background bridge (default owner) | drives shared `bleplx`; the only background scanner |
-| `sate-fg` | provision, changeWifi, recorderSettings, sync-over-BLE | needs the radio alone → pauses auto-sync |
-| `pendant` | pendant connect | shares `bleplx` — **stopScan only, never destroy** |
-| `plaud` | plaud connect/settings | **destroys** `bleplx`; Plaud SDK takes the radio |
+A single coordinator decides which device family currently owns the Bluetooth radio and is
+the one place that hands it off. Everyday background scanning for nearby recorders is the
+default owner; certain foreground tasks (setup, Wi-Fi changes, manual sync) temporarily take
+sole ownership so their operation isn't disturbed, and hand it back when finished.
 
 ```mermaid
 flowchart TD
-  ARB["acquireRadio(owner)"]
-  ARB --> AS["owner = autosync"]
-  ARB --> SF["owner = sate-fg"]
-  ARB --> PE["owner = pendant"]
-  ARB --> PL["owner = plaud"]
-  AS --> BLEPLX["ONE shared BleManager"]
+  ARB["Radio coordinator"]
+  ARB --> AS["Background sync (default)"]
+  ARB --> SF["Foreground device task"]
+  ARB --> PE["Pendant connection"]
+  ARB --> PL["Third-party device"]
+  AS --> BLEPLX["Shared Bluetooth radio"]
   SF --> BLEPLX
   PE --> BLEPLX
-  BLEPLX -->|"SATE ↔ Pendant handoff"| STOP["stopBleScan() only"]
-  PL --> DESTROY["destroy + rebuild lazily"]
-  DESTROY --> SDK["Plaud SDK CBCentralManager"]
+  PL --> SDK["Dedicated device SDK"]
 ```
 
-Diagram detail (kept out of the nodes above):
-
-| Node | Detail |
-|---|---|
-| `acquireRadio(owner)` | `src/ble/radio.ts` |
-| `ONE shared BleManager` | `getSharedBleManager()` |
-| `stopBleScan() only` (SATE ↔ Pendant) | never destroy |
-| `destroy + rebuild lazily` (plaud) | `stopBleScan() + destroyBle()` = `destroySharedBleManager()`; rebuilt lazily on next SATE/Pendant use |
-| `Plaud SDK CBCentralManager` | own radio |
-
-`acquireRadio(owner)` encodes the two rules:
-
-```ts
-if (owner === "plaud") {
-  hooks.stopBleScan();
-  hooks.destroyBle();     // ONLY destroy path — Plaud SDK needs the radio alone
-} else {
-  hooks.stopBleScan();    // autosync / sate-fg / pendant: stop scan, NEVER destroy
-}
-```
-
-Leaving the previous owner releases it: a departing `plaud` owner calls
-`disconnectPlaud()` (which **must** be `plaud.disconnect()` — drop the BLE link, keep the
-binding; **never** `depair()`, see RULE #1); a departing `pendant` owner calls
-`disconnectPendant()` (stopScan + drop connection, no destroy).
-
-Two consequences worth internalizing:
-
-- **`acquireRadio` is called synchronously in the navigation handler in `App.tsx`**
-  (`goHome`, `openPlaud`, `openPendant`, `openSateFg`) — **never in an effect.** A parent
-  effect runs *after* the child's, so acquiring in an effect would stop the scan the new
-  screen just started.
-- **One scan per manager.** Auto-sync (`useAutoSync`) is the only background scanner and
-  publishes the `nearby` set. A screen must **not** run its own presence scan; it reads
-  `nearby` from auto-sync. Auto-sync gates itself with `autoSyncAllowed()` (true when the
-  owner is `null` or `autosync`) and subscribes via `subscribeRadio` — there is **no
-  screen-name allowlist** (do not reintroduce one; give the screen an owner instead).
-
-A screen taking the radio (here, the pendant connect screen) and handing it back:
+Two families (the recorder and the Pendant) share the same Bluetooth connection cleanly:
+handing the radio between them simply pauses one scan and resumes the other. The third-party
+family instead takes the radio for itself through its own SDK, and the shared connection is
+re-established afterward when needed. Keeping this handoff disciplined is what ensures a
+device is always reliably discovered when the user goes looking for it.
 
 ```mermaid
 sequenceDiagram
-  participant Nav as App.tsx nav handler
-  participant ARB as acquireRadio
-  participant BLE as shared BleManager
+  participant Nav as App navigation
+  participant ARB as Radio coordinator
   participant Scr as New screen
-  participant AS as useAutoSync
-  Nav->>ARB: acquireRadio('pendant') — synchronous, not in an effect
-  ARB->>BLE: stopBleScan() — never destroy
-  ARB-->>AS: emit → autoSyncAllowed() = false (pauses)
-  Nav->>Scr: render
-  Scr->>BLE: scan / connect
-  Note over Nav,AS: leaving back to Home
-  Nav->>ARB: acquireRadio('autosync')
-  ARB-->>AS: emit → autoSyncAllowed() = true (resumes)
+  participant AS as Background sync
+  Nav->>ARB: request the radio for this screen
+  ARB->>AS: pause background scanning
+  Nav->>Scr: open the screen
+  Scr->>ARB: scan / connect
+  Note over Nav,AS: returning to the device list
+  Nav->>ARB: release the radio
+  ARB->>AS: resume background scanning
 ```
 
-### HTTPS uploads
+### Uploads to the cloud
 
-All three families feed one upload path: `api.uploadSession({ device_serial, patient_id,
-session_number, sample_rate, wav_base64, flags? })` → `POST /api/sessions` on `device-api`
-→ AI processing → `recordings`. Everything goes through the same Supabase gateway (the
-`apikey` anon header is required; `Authorization: Bearer <jwt>` when signed in).
+Every device family feeds a single upload path. Captured audio is sent to the SATE cloud
+API, queued for AI processing, and the resulting analysis becomes a report. Because all
+three families share this one pipeline, behavior stays consistent no matter which device
+produced the recording.
 
 ```mermaid
 flowchart LR
-  SATE["SATE recorder"] --> UP["uploadSession()"]
+  SATE["SATE recorder"] --> UP["Upload session"]
   PEND["Pendant"] --> UP
-  PLAUD["Plaud"] --> UP
-  UP --> API["POST /api/sessions (device-api)"]
+  PLAUD["Third-party device"] --> UP
+  UP --> API["SATE cloud API"]
   API --> AI["AI processing"]
-  AI --> REC["recordings"]
+  AI --> REC["Report"]
 ```
 
 ## 3. Features
 
-| Feature | Where | Notes |
-|---------|-------|-------|
-| **Auto-sync bridge** | `useAutoSync` (`src/sync/AutoSync.ts`) | Foreground BLE bridge: scans for recorders advertising "needs sync", connects, pulls each session, uploads, then `markSynced`. Publishes `nearby`. v0.1 runs foregrounded; true background BLE is a v0.2 item. |
-| **SATE recorder sync over BLE** | `RecorderDetailScreen.syncOverBle` | Manual foreground sync: borrows the radio with `acquireRadio("sate-fg")`, scans/connects, then hands it back with `acquireRadio("autosync")`. |
-| **Pendant capture + upload** | `PendantLink` + `PendantConnectScreen` | Live PCM capture over standard BLE GATT → WAV → `uploadSession`. |
-| **Plaud connect / capture** | `PlaudLink` + `PlaudConnectScreen` / `PlaudSettingsScreen` | Bind-guarded connect; lock-safe teardown (see RULE #1). |
-| **Provisioning** | `ProvisionScreen` + `BleLink.provision()` | BLE-only onboarding: refresh session → `claimToken()` → BLE-write Wi-Fi creds + claim token → stream `connecting → wifi_ok → registering → registered`. |
-| **Change Wi-Fi** | `ChangeWifiScreen` | Keeps the account binding (no factory reset). |
-| **QR / mobile-link login** | `LoginScreen` + `consumeMobileLink()` | Second login method: web mints a one-time code/QR, phone consumes it via the `mobile-link` Edge Function → same session shape as password login. Needs expo-camera (native rebuild). |
-| **Patient assignment** | web report | Uploads default to **Standalone**; assigning a patient is optional and done later on the web report. Not forced at capture. |
-| **Reports** | `ReportScreen` | Reads `recordings` rows directly from Supabase REST (RLS-scoped) — the same rows the web app shows. |
+| Feature | What it does |
+|---------|--------------|
+| **Automatic background sync** | Watches for nearby recorders that have audio waiting, connects, pulls each session, uploads it, and marks it synced — with no manual step. |
+| **Manual recorder sync** | Lets the user sync a specific recorder on demand from its detail screen. |
+| **Pendant capture** | Streams live audio from the wearable Pendant, packages it, and uploads it through the shared pipeline. |
+| **Third-party device connect** | Connects to and captures from the third-party device family, with careful account-binding safeguards (see below). |
+| **Device setup (provisioning)** | Guides first-time onboarding entirely over Bluetooth: hands the device its Wi-Fi credentials, links it to the account, and reports progress through to "registered." |
+| **Change Wi-Fi** | Updates a device's network without unlinking it from the account — no factory reset needed. |
+| **QR / mobile-link login** | A second way to sign in: the web app shows a one-time QR code, the phone scans it, and the clinician is signed in on the same account. |
+| **Patient assignment** | Recordings default to a standalone bucket; assigning them to a specific patient is optional and can be done later from the web report. |
+| **Reports** | Shows the same processed recordings the web app shows, scoped to the signed-in account. |
 
-### Pendant capture detail (`src/pendant/PendantLink.ts`)
+### About the Pendant
 
-The pendant is a Seeed XIAO nRF52840 Sense over **standard BLE GATT** — plain
-`react-native-ble-plx`, **no binding/lock concern** (unlike Plaud). GATT profile:
+The Pendant is a small wearable recorder that streams audio to the phone over standard
+Bluetooth. The app takes care of a few practical details on its behalf: it discovers the
+device reliably even when its advertised name is inconsistent, cleanly stops a recording
+without tacking on stray fractions of a second, and lifts a quiet microphone signal to a
+comfortable listening level before upload.
 
-| UUID | Role |
-|------|------|
-| `19b10000-e8f2-537e-4f6c-d104768a1214` | audio service |
-| `19b10001-…` | audio char (notify): 244 B = 122 int16 LE samples @ 16 kHz mono |
-| `19b10002-…` | control char (write 1 byte): `0x00` stop, `0x01` start, `0x02` find-me |
-| `0000180f-…` / `00002a19-…` | battery service/char (bit7 = charging, low 7 bits = percent) |
+## 4. Third-party device safety
 
-Notable behaviors, all grounded in code:
+The third-party device family requires special care around **account binding** — the
+association between a device and the account that owns it. If that binding is mishandled a
+device can become unusable for the account, so the app treats every binding-related action
+conservatively:
 
-- **Scan with NO service filter**, `allowDuplicates:true`. The pendant advertises the
-  audio service UUID in the ADV packet but its name only in the SCAN RESPONSE — iOS
-  surfaces those as `serviceUUIDs` and `localName` across separate callbacks. Matching
-  tests `name` **or** `localName` (`/sate|pendant|nuna/i`) **or** the advertised audio
-  service, so a stale cached GAP name can't hide it.
-- **Stop gates accumulation.** A `capturing` flag is set false in `stop()` *before*
-  `CMD_STOP`, so in-flight notifications during the round-trip don't tack extra tenths
-  onto the take (the "0:01/0:02 after Stop" bug).
-- **Quiet mic → `applyGain`**: peak-normalize to ~97% full scale (never attenuate, gain
-  capped at `MAX_GAIN=40`) plus a `LOUDNESS=2.6` drive with a `tanh` soft-clip.
-- **Buffer reset on `start()` and `disconnect()`** so a start-after-stop-without-take
-  can't prefix the new recording with the previous take's audio.
+- **A stable, account-derived identity** is used consistently, so reconnecting after a
+  reinstall or a new phone always re-establishes the same relationship rather than creating
+  a new one.
+- **A guard before connecting** refuses to attach a device that is already bound to a
+  different account.
+- **The binding is stored securely on the device** so it survives app reinstalls; the app
+  reconnects to an existing binding rather than re-creating one.
+- **Unbinding is always user-initiated**, never automatic. Ordinary teardown, logout, or
+  radio handoff only disconnects — it never releases the binding.
+- **Unbinding waits for the device to confirm** before the app forgets it locally, keeping
+  the two sides in agreement.
 
-## 4. Plaud device-lock safety (RULE #1) — CRITICAL
+:::warning[Handle binding with care]
+Binding is the one area of the app where a careless change can leave hardware unusable for
+an account. Any work touching device connection, identity, or teardown for this family
+should preserve the safeguards above.
+:::
 
-**A Plaud device can be PERMANENTLY LOCKED for an account if its binding is mishandled.**
-Unlike a SATE recorder (recoverable), a mis-bound / desynced Plaud is bricked for that
-account. Every change that touches Plaud — connect, identity, Keychain, BLE lifecycle,
-teardown, account/login, sync, settings — MUST preserve these five invariants:
+## 5. Known issues & current status
 
-1. **Stable, account-derived identity.** `plaudUserId(uid) = "sate_<uid>"`
-   (`src/plaud/PlaudLink.ts`) is the SAME string used as the Plaud `user_id` by the
-   `mint-plaud-token` Edge Function **and** as the `deviceToken` passed to
-   `connect(deviceId, plaudUserId)`. It is restored on login → survives reinstall. Never
-   pass a raw uid, a random value, or a per-install/per-device token.
-2. **Bind guard before connect.** If `bindingOwner(sn)` is set and ≠ this account,
-   **REFUSE** to connect. Reconnect to your own binding; never re-bind under a new
-   identity (guard lives in `PlaudConnectScreen`).
-3. **Binding lives in the iOS Keychain** (`plaud.bind.<sn>`, `AfterFirstUnlock`), so it
-   outlives uninstall — AsyncStorage does not. Reinstall → reconnect, never re-bind.
-4. **No auto-depair, ever.** `depair(clear:true)` is exposed ONLY via the user-initiated
-   `resetBinding` (the UNBIND button, `PlaudSettingsScreen`). Unmount / teardown / logout
-   / radio-handoff must only `disconnect()`. The arbiter's `disconnectPlaud` hook is wired
-   to `plaud.disconnect()` and **nothing else**.
-5. **ACK-before-forget on unbind.** Order is law: send `depair` → device ACKs
-   (`bleDepair`, status 0) → **only then** delete the local Keychain record. Native
-   refuses depair while disconnected, fails fast on a mid-command BLE drop, and times out
-   (20s) instead of hanging; `resetBinding` keeps the Keychain record on ANY failure.
-   Forgetting locally before the device ACKs desyncs the binding and freezes the device.
+The team tracks a small set of open items, prioritized around two goals: **never lose or
+mismatch a patient's audio**, and **never leave a feature stuck**. Security hardening is
+tracked separately and scheduled behind current feature work.
 
-Native logic: `modules/plaud-sate/` (Expo module) →
-`modules/plaud-sate/ios/PlaudSateModule.swift` (native connect/depair + ACK).
+| Area | Status |
+|------|--------|
+| Pendant capture is held in memory until upload | Being hardened so an interrupted upload or an app restart can't lose an in-progress take |
+| Duplicate sessions from a lost sync acknowledgment | **Addressed** on the server, which now detects and ignores a re-uploaded copy of the same take |
+| A stalled connection could tie up the radio | Being given proper timeouts so a hung operation can't pause background sync indefinitely |
+| Very long recordings are memory-heavy to upload | Being reworked to stream large takes instead of holding them whole in memory |
+| Network requests without a timeout | Being given timeouts so a stalled request can't hang |
+| Locally stored credentials | Planned move to more secure device storage (tracked as a security item) |
 
-## 5. Radio arbiter data flow
-
-Acquire path — a nav handler takes the radio for the new owner:
-
-```mermaid
-flowchart TD
-  subgraph Nav["App.tsx nav handlers (synchronous)"]
-    goHome["goHome → autosync"]
-    openSate["openSateFg → sate-fg"]
-    openPend["openPendant → pendant"]
-    openPlaud["openPlaud → plaud"]
-  end
-
-  goHome --> ARB{{"acquireRadio(owner)"}}
-  openSate --> ARB
-  openPend --> ARB
-  openPlaud --> ARB
-
-  ARB -->|"owner = plaud"| DESTROY["stopBleScan + destroyBle"]
-  ARB -->|"autosync / sate-fg / pendant"| STOPONLY["stopBleScan only"]
-
-  DESTROY --> PLAUDSDK["Plaud SDK CBCentralManager"]
-  STOPONLY --> BLEPLX["shared ble-plx BleManager"]
-
-  BLEPLX --> SATESCAN["SATE scan/connect"]
-  BLEPLX --> PENDSCAN["Pendant scan/connect"]
-```
-
-Release path — leaving an owner hands the radio back:
-
-```mermaid
-flowchart TD
-  ARB{{"acquireRadio(owner)"}}
-  ARB -->|"prev = plaud, leaving"| DISCPLAUD["disconnectPlaud (keeps binding)"]
-  ARB -->|"prev = pendant, leaving"| DISCPEND["disconnectPendant"]
-  ARB -->|"emit()"| AUTOSYNC["useAutoSync: autoSyncAllowed() on/off"]
-```
-
-Diagram detail (kept out of the nodes above):
-
-| Node | Detail |
-|---|---|
-| `acquireRadio(owner)` | `src/ble/radio.ts` |
-| `stopBleScan + destroyBle` (plaud) | = `destroySharedBleManager()` |
-| `stopBleScan only` (others) | NEVER destroy the shared manager |
-| `Plaud SDK CBCentralManager` | scan / connect (own radio) |
-| `shared ble-plx BleManager` | `getSharedBleManager()` |
-| `SATE scan/connect` | auto-sync or sate-fg |
-| `disconnectPlaud` | = `plaud.disconnect()` — keeps binding (RULE #1) |
-| `disconnectPendant` | stopScan + drop connection |
-| `useAutoSync` | `subscribeRadio` → `autoSyncAllowed()` flips its scan on/off |
-
-Key invariant restated by these diagrams: **SATE ↔ Pendant transitions are `stopScan`-only**
-(both live on the shared `bleplx` manager), while the **Plaud transition destroys and
-rebuilds** the manager because the Plaud SDK needs the radio to itself. Leaving Plaud
-`disconnect`s (never depairs).
-
-## 6. Key files
-
-| Path | Role |
-|------|------|
-| `App.tsx` | Root component, `Screen` union router, session auto-refresh, `registerRadio`, synchronous `acquireRadio` navigation handlers |
-| `src/ble/bleManager.ts` | The ONE shared `BleManager`: `getSharedBleManager` / `hasSharedBleManager` / `destroySharedBleManager` |
-| `src/ble/radio.ts` | Radio arbiter — logical owners `autosync\|sate-fg\|pendant\|plaud`, `acquireRadio`, `autoSyncAllowed`, `subscribeRadio` |
-| `src/ble/SateBle.ts` | `SateLink` — SATE scan/connect/provision/pull-sessions/commands (`makeLink()`) |
-| `src/sync/AutoSync.ts` | `useAutoSync` — foreground BLE bridge; the only background scanner; publishes `nearby` |
-| `src/pendant/PendantLink.ts` | Pendant GATT capture → WAV → upload; peak-normalize gain; `capturing` gate |
-| `src/pendant/PendantStore.ts` | Persisted known pendants (AsyncStorage) |
-| `src/plaud/PlaudLink.ts` | Plaud identity (`plaudUserId = sate_<uid>`), Keychain bindings, `bindingOwner`, `resetBinding` |
-| `modules/plaud-sate/ios/PlaudSateModule.swift` | Native Plaud connect / depair + ACK |
-| `src/api/sateApi.ts` | `HttpApi` — Supabase Auth login/refresh + `device-api` REST; `uploadSession`; `consumeMobileLink` |
-| `src/store.tsx` | `StoreProvider` / `useStore` — settings + session, AsyncStorage key `sate-companion-settings-v3` |
-| `src/screens/` | UI screens (Login, DeviceList, RecorderDetail/Settings, Provision, ChangeWifi, PlaudConnect/Settings, PendantConnect, Report, Settings, DevicePreview) |
-
-## 7. Known issues & current status
-
-From the multi-agent audit (2026-07-22). The stated priorities: (1) never lose or
-**mismatch** patient audio; (2) no feature ever **stuck**; security is noted, not yet
-fixed. Symptom → file → status:
-
-| Issue | Symptom | File | Status |
-|-------|---------|------|--------|
-| Pendant `takeWav()` clears buffer before upload succeeds | Take buffer is reset inside `takeWav()`; if the subsequent `uploadSession` fails, the audio is already gone → **data loss** | `src/pendant/PendantLink.ts` | **OPEN — data loss** |
-| Pendant memory-only capture | The in-progress take lives only in the in-memory `chunks[]` buffer — an app kill (or crash) mid-capture loses it | `src/pendant/PendantLink.ts` | **OPEN** |
-| AutoSync lost `markSynced` ACK → duplicate sessions | If the server stored the session but the `markSynced` ACK is lost, the next scan re-pulls and re-uploads as a NEW row (duplicate device session + duplicate AI run) | `src/sync/AutoSync.ts`, `deviceApi.ts` | **Server dedup FIXED** (`storeSessionRecord` idempotency probe); no DB UNIQUE constraint backstop yet |
-| `storeSessionRecord` dedup | Chunk path had dedup; the whole-file store path did not | `deviceApi.ts` | **FIXED** (probe on user/serial/patient/session_number/bytes + `objectExists`) |
-| `syncOverBle` connect has no timeout | `link.connect(found.id)` can hang with no timeout while holding `sate-fg` → the radio is **starved** and auto-sync stays paused | `src/screens/RecorderDetailScreen.tsx` | **OPEN — radio starved** |
-| `uploadSession` base64 OOM on long takes | The entire WAV is base64-encoded in memory (`wav_base64`); a long take can OOM the JS heap | `src/api/sateApi.ts`, `src/sync/AutoSync.ts`, `src/pendant/PendantLink.ts` | **OPEN** |
-| `unlink` / device removal swallows failure | Failure path is swallowed, so the UI can report success when the removal did not happen | recorder settings / device-remove path | **OPEN** |
-| AutoSync / Plaud teardown mid-sync when `api` dep changes | `useAutoSync`'s effect depends on `api`; a token refresh rebuilds `api` and tears the scan/connection down mid-sync | `src/sync/AutoSync.ts` (dep array `[enabled, signedIn, link, api]`) | **OPEN** |
-| No `fetch` timeout | `HttpApi.req` / `refreshSession` / `consumeMobileLink` use bare `fetch` with no `AbortController` — a stalled request can hang indefinitely | `src/api/sateApi.ts` | **OPEN** |
-| Tokens in AsyncStorage, not Keychain | Supabase access + long-lived refresh tokens are persisted in **plaintext AsyncStorage**, not the Keychain (unlike the Plaud binding). CLAUDE.md already notes AsyncStorage doesn't protect secrets | `src/store.tsx` (`Settings`, key `sate-companion-settings-v3`) | **OPEN — security, noted/deprioritized** |
-
-> Related fixed items for context: the recorder-side delete-during-upload splice, trim-tail
-> race, and pendant byte-exact truncation reject were fixed and build-verified in the same
-> session; SD reclaim is now server-verified (`GET /api/sessions/verify`, device-api ≥v15).
-> Those are firmware/backend, not the mobile app, but they close the loop on the
-> upload-integrity path this app feeds.
+:::note[Where this fits]
+The mobile app is one link in a larger chain: capture on the device, sync through the phone,
+processing in the cloud, and review on the web. The integrity safeguards on the recorder and
+backend close the same loop from the other end, so an uploaded recording is only ever freed
+from a device once the cloud has durably confirmed it.
+:::

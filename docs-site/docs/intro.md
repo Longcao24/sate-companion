@@ -6,9 +6,9 @@ slug: /
 
 <div class="doc-hero">
   <img class="hero-wordmark" src="/img/sate-logo.png" alt="SATE" />
-  <span class="eyebrow">Engineering documentation</span>
+  <span class="eyebrow">Product & platform overview</span>
   <h1>SATE Companion</h1>
-  <p>A speech-capture and analysis platform for speech-language pathologists — from a handheld recorder and a wearable pendant, through an async AI pipeline, to an interactive clinician report.</p>
+  <p>A speech-capture and analysis platform for speech-language pathologists — from a handheld recorder and a wearable pendant, through an AI-powered pipeline, to an interactive clinician report.</p>
   <div class="hero-actions">
     <a class="btn-primary" href="/getting-started">Get started</a>
     <a class="btn-secondary" href="/architecture">How it works</a>
@@ -16,37 +16,37 @@ slug: /
 </div>
 
 <div class="badge-row">
-  <span class="sate-badge">Recorder · fw 1.5.20</span>
-  <span class="sate-badge">Pendant · fw 1.0.0</span>
-  <span class="sate-badge">device-api · v18</span>
-  <span class="sate-badge ok"><span class="dot ok"></span> pipeline: async</span>
+  <span class="sate-badge">Handheld recorder</span>
+  <span class="sate-badge">Wearable pendant</span>
+  <span class="sate-badge">Mobile & web apps</span>
+  <span class="sate-badge ok"><span class="dot ok"></span> pipeline: async AI</span>
 </div>
 
 SATE Companion captures a patient's speech on a hardware device, uploads the audio to a
-backend that transcribes and analyses it with an AI model, and presents the result to the
-clinician as an interactive report they can edit and annotate.
+cloud backend that transcribes and analyses it with an AI model, and presents the result to
+the clinician as an interactive report they can review, edit, and annotate.
 
-This site is the **internal engineering reference**. Every claim is grounded in the source;
-each component guide ends with a **Known issues / current status** section drawn from the
-2026-07 audit.
+This site is a high-level overview of what the platform is, how its pieces fit together, and
+how each part behaves. It is written for a general reader — no source code or
+implementation internals required.
 
 ## Start here
 
 <div class="card-grid">
   <a class="doc-card" href="/getting-started"><strong>Getting started</strong><span>Toolchain, build, flash, and run each part end-to-end.</span></a>
   <a class="doc-card" href="/architecture"><strong>Architecture</strong><span>Data-flow diagrams, transports, and why processing is async.</span></a>
-  <a class="doc-card" href="/known-issues"><strong>Known issues</strong><span>Current bugs and status from the latest audit.</span></a>
+  <a class="doc-card" href="/known-issues"><strong>Known issues</strong><span>Current limitations and status.</span></a>
 </div>
 
 ## Component guides
 
 <div class="card-grid">
-  <a class="doc-card" href="/guides/recorder"><strong>Recorder firmware</strong><span>ESP32-S3 handheld — the flagship device.</span></a>
-  <a class="doc-card" href="/guides/pendant"><strong>Pendant firmware</strong><span>nRF52840 wearable BLE audio streamer.</span></a>
-  <a class="doc-card" href="/guides/mobile-app"><strong>Mobile app</strong><span>Device bridge, Plaud integration, auto-sync.</span></a>
-  <a class="doc-card" href="/guides/web-app"><strong>Web app</strong><span>Clinician report, transcript editing, annotations.</span></a>
-  <a class="doc-card" href="/guides/backend"><strong>Backend pipeline</strong><span>Async AI: assemble → transcribe → analyse → store.</span></a>
-  <a class="doc-card" href="/guides/plaud"><strong>Plaud integration</strong><span>Third-party recorder — device-lock sensitive.</span></a>
+  <a class="doc-card" href="/guides/recorder"><strong>Recorder</strong><span>The handheld touchscreen device — the flagship capture tool.</span></a>
+  <a class="doc-card" href="/guides/pendant"><strong>Pendant</strong><span>A small wearable that streams audio to the phone.</span></a>
+  <a class="doc-card" href="/guides/mobile-app"><strong>Mobile app</strong><span>Bridges the devices to the cloud and keeps them in sync.</span></a>
+  <a class="doc-card" href="/guides/web-app"><strong>Web app</strong><span>Clinician report: playback, transcript editing, annotations.</span></a>
+  <a class="doc-card" href="/guides/backend"><strong>Backend pipeline</strong><span>Async AI: assemble, transcribe, analyse, store.</span></a>
+  <a class="doc-card" href="/guides/plaud"><strong>Plaud integration</strong><span>Support for a third-party recorder as an audio source.</span></a>
 </div>
 
 ## The system at a glance
@@ -54,27 +54,27 @@ each component guide ends with a **Known issues / current status** section drawn
 ```mermaid
 flowchart LR
   subgraph Capture
-    REC["SATE Recorder<br/>ESP32-S3 · touchscreen + SD"]
-    PEN["SATE Pendant<br/>nRF52840 · wearable"]
-    PLA["Plaud<br/>3rd-party recorder"]
+    REC["Handheld recorder<br/>touchscreen device"]
+    PEN["Wearable pendant<br/>streams audio"]
+    PLA["Plaud recorder<br/>3rd-party source"]
   end
 
-  APP["Mobile app<br/>React Native / iOS"]
+  APP["Mobile app<br/>device bridge"]
 
-  subgraph Backend
-    API["device-api<br/>Supabase edge fn"]
-    STG[("Storage<br/>sessions · recordings")]
-    PROC["cf-processor<br/>Cloudflare container"]
-    AI["AI /process<br/>self-hosted CUDA"]
-    DB[("Postgres<br/>sessions · recordings · patients")]
+  subgraph Cloud
+    API["Edge API<br/>upload & records"]
+    STG[("Audio storage<br/>sessions & recordings")]
+    PROC["Processing service<br/>long-running worker"]
+    AI["AI engine<br/>transcribe & analyse"]
+    DB[("Database<br/>sessions · recordings · patients")]
   end
 
   WEB["Web app<br/>clinician report"]
 
-  REC -- "Wi-Fi HTTPS / BLE bridge" --> API
-  PEN -- "BLE PCM stream" --> APP
-  PLA -- "proprietary SDK" --> APP
-  APP -- "HTTPS upload" --> API
+  REC -- "Wi-Fi upload / phone bridge" --> API
+  PEN -- "Bluetooth audio stream" --> APP
+  PLA -- "vendor SDK" --> APP
+  APP -- "secure upload" --> API
   API --> STG
   API --> DB
   PROC -- "claim queued session" --> DB
@@ -86,14 +86,14 @@ flowchart LR
 
 ## Components
 
-| Component | Tech | Role | Guide |
+| Component | Platform | Role | Guide |
 |---|---|---|---|
-| **SATE Recorder** | ESP32-S3, LVGL, SD_MMC | Handheld recorder: records to SD, uploads over Wi-Fi/BLE, OTA | [Recorder firmware](guides/recorder) |
-| **SATE Pendant** | XIAO nRF52840, Bluefruit | Wearable: streams 16 kHz PCM over BLE to the app | [Pendant firmware](guides/pendant) |
-| **Mobile app** | React Native / Expo (iOS) | Bridges devices → backend; Plaud integration; auto-sync | [Mobile app](guides/mobile-app) |
-| **Web app** | React + Vite + Supabase | Clinician report: audio player, transcript editing, annotations, metrics | [Web app](guides/web-app) |
-| **Backend** | Supabase edge fns + Cloudflare container | Async AI pipeline: assemble → transcribe → analyse → store | [Backend pipeline](guides/backend) |
-| **Plaud** | proprietary iOS SDK | Third-party recorder integration (device-lock sensitive) | [Plaud integration](guides/plaud) |
+| **SATE Recorder** | ESP32-S3 touchscreen handheld | Records to local storage, then uploads over Wi-Fi or via the phone; updates itself over the air | [Recorder](guides/recorder) |
+| **SATE Pendant** | nRF52840 wearable | Streams 16 kHz mono audio over Bluetooth to the mobile app | [Pendant](guides/pendant) |
+| **Mobile app** | iOS (React Native) | Bridges the devices to the cloud, integrates the Plaud recorder, and syncs automatically | [Mobile app](guides/mobile-app) |
+| **Web app** | Browser (React) | Clinician report: audio player, transcript editing, annotations, metrics | [Web app](guides/web-app) |
+| **Backend** | Cloud (serverless + container) | Async AI pipeline: assemble, transcribe, analyse, and store | [Backend pipeline](guides/backend) |
+| **Plaud** | Third-party recorder | Optional recorder integration as an additional audio source | [Plaud integration](guides/plaud) |
 
 ## Connection methods (transports)
 
@@ -102,12 +102,12 @@ constraints of the device on either end.
 
 | Link | Transport | Why |
 |---|---|---|
-| Recorder → backend | **Wi-Fi HTTPS** (chunked upload), **BLE bridge** when offline | The recorder has Wi-Fi; BLE is the fallback when there's no network |
-| Pendant → app | **BLE** (244-byte PCM notifies) | Tiny wearable; no Wi-Fi, streams live to the phone |
-| Plaud → app | **Proprietary BLE SDK** | Vendor SDK owns its own `CBCentralManager` |
-| App → backend | **HTTPS** to `device-api` | Standard authenticated upload |
-| Backend AI call | **Long-lived HTTP** from a container (never an edge fn) | The AI call exceeds serverless wall-clock limits |
-| Firmware OTA | **HTTPS pull** of a `.bin` from Storage | Device pulls, not pushed |
+| Recorder → backend | **Wi-Fi** upload, with a **Bluetooth bridge** through the phone when offline | The recorder has its own Wi-Fi; the phone bridge is the fallback when there's no network |
+| Pendant → app | **Bluetooth** audio stream | A tiny wearable with no Wi-Fi streams live to the phone |
+| Plaud → app | **Vendor Bluetooth SDK** | The third-party recorder connects through its own SDK |
+| App → backend | **Secure upload** over the internet | Standard authenticated upload from the phone |
+| Backend AI call | **Long-lived request** from a dedicated worker | Transcription can run long, so it lives in a process without a short time limit |
+| Firmware updates | **Over-the-air pull** from the cloud | Devices fetch updates themselves rather than being pushed to |
 
-See [Architecture](architecture) for the full data-flow, and each component guide for the
-exact protocols and functions.
+See [Architecture](architecture) for the full data-flow, and each component guide for more
+detail on how that part works.
