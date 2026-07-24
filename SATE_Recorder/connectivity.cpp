@@ -569,7 +569,13 @@ static void freeSessionAudioKeepMarker(const char *pid, uint32_t n)
 // (a delete leaves its hole; a number is only reused once its old take is fully
 // gone), so among occupied slots a HIGHER number is a newer take: keep the
 // KEEP_AUDIO_SESSIONS highest occupied slots and consider the rest.
-static void trimPatientSyncedAudio(const char *pid, uint32_t keep = KEEP_AUDIO_SESSIONS)
+// Each freed session costs one HTTPS verify round-trip, and the sweep holds the
+// SD bus while it runs. Bound the work per pass so a big backlog cannot block a
+// take or a delete for minutes; the next sweep continues where this one stopped.
+static const uint32_t TRIM_MAX_FREES_PER_PASS = 2;
+
+static uint32_t trimPatientSyncedAudio(const char *pid, uint32_t keep = KEEP_AUDIO_SESSIONS,
+                                       uint32_t budget = TRIM_MAX_FREES_PER_PASS)
 {
   PatientDirScan ps;
   scanPatientDir(pid, &ps);
@@ -577,9 +583,10 @@ static void trimPatientSyncedAudio(const char *pid, uint32_t keep = KEEP_AUDIO_S
   uint32_t cnt = 0;
   for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++)
     if (ps.mark[i] || ps.audio[i]) occ[cnt++] = (uint8_t)i;  // tombstone = occupied
-  if (cnt <= keep) return;                            // nothing beyond the newest N
+  if (cnt <= keep) return 0;                          // nothing beyond the newest N
   char mark[200];
-  for (uint32_t j = 0; j < cnt - keep; j++) {
+  uint32_t freed = 0;
+  for (uint32_t j = 0; j < cnt - keep && freed < budget; j++) {
     uint32_t n = occ[j];
     sessionPath(mark, sizeof(mark), pid, n, "synced");
     if (!SD_MMC.exists(mark)) continue;               // not synced -> only copy, keep
@@ -597,9 +604,11 @@ static void trimPatientSyncedAudio(const char *pid, uint32_t keep = KEEP_AUDIO_S
       continue;
     }
     freeSessionAudioKeepMarker(pid, n);
+    freed++;
     Serial.printf("[CONN] freed synced audio %s session %lu (server-confirmed, keep newest %u)\n",
                   pid, (unsigned long)n, (unsigned)keep);
   }
+  return freed;
 }
 
 // Defined with the uploader further down; needed here to reset its memory.
@@ -671,6 +680,7 @@ static void trimAllPatients()
   if (!activePid[0]) return;
   File root = SD_MMC.open("/sate/patients");
   if (!root) return;
+  uint32_t budget = TRIM_MAX_FREES_PER_PASS;
   File entry;
   while ((entry = root.openNextFile())) {
     if (!entry.isDirectory()) { entry.close(); continue; }
@@ -686,7 +696,7 @@ static void trimAllPatients()
     // into it any more. Reclaim stays verify-gated either way: an unsynced or
     // server-unconfirmed take is never freed, in any dir.
     const bool isActive = !strcmp(pid, activePid);
-    trimPatientSyncedAudio(pid, isActive ? KEEP_AUDIO_SESSIONS : 0);
+    if (budget) budget -= trimPatientSyncedAudio(pid, isActive ? KEEP_AUDIO_SESSIONS : 0, budget);
 
     // Inventory, so "why is my card still full?" is answerable from the log:
     // retention is per patient dir, so N dirs each keep their own newest
@@ -2583,7 +2593,12 @@ void connLoop()
           if (pendCount > 0 && !upActive) uploadSweepDue = true;
           // Nothing left to send: this is the moment to give the card back its
           // space. Verify-gated, so it can only free what the server confirms.
-          if (pendCount == 0 && !upActive && timeAfter(now, nextTrimSweep)) {
+          // NOT gated on pendCount: one take the server keeps rejecting stays
+          // pending forever (strikeParked only skips it), and gating on an empty
+          // queue would make reclaim unreachable again - the exact trap this
+          // sweep exists to fix. Reclaim is verify-gated anyway, so running it
+          // alongside a stuck session is safe.
+          if (!upActive && timeAfter(now, nextTrimSweep)) {
             nextTrimSweep = now + TRIM_SWEEP_PERIOD_MS;
             trimAllPatients();
           }

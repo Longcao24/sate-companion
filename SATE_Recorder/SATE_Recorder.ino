@@ -116,7 +116,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.25";   // Standalone is the DEFAULT target — a server roster is not an assignment; only an explicit assign picks a patient
+static const char    *FIRMWARE_VERSION  = "1.5.27";   // one place changes the active patient and publishes it — the boot race made the sweep reclaim the LIVE dir
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -267,6 +267,7 @@ static volatile int  connUploadUiPct    = 0;        // 0-100
 static void finalizeSavedSession(const char *wavPath, const char *jsonPath, uint32_t sessionNum, uint32_t pcmBytes);
 static void applyActivePatient();
 static void ensureStandalonePatient();
+static void selectPatientIndex(int idx);
 static void uiResetPointers();
 static void logHeap(const char *tag);
 static void runGui();
@@ -316,6 +317,8 @@ static const uint32_t SESSION_NUM_MAX = 99;
 static bool sessionExists(const char *dir, uint32_t n);
 static void deleteSessionFiles(const char *dir, uint32_t n);
 static void scanSessionNumbers(const char *dir, bool *present);
+static bool sessionHasAudio(const char *dir, uint32_t n);
+static void clearSessionTombstone(const char *dir, uint32_t n);
 static uint32_t findNextSessionIndex(const char *dir);
 static void sdRefreshUsage(bool force);
 static void sdInvalidateUsageCache();
@@ -420,13 +423,13 @@ static void applyActivePatient()
   for (int i = 0; i < g_patientCount; i++) {
     if (!strcmp(g_patients[i].patientId, g_activePatientReq.patientId)) {
       g_patients[i] = g_activePatientReq;
-      currentPatientIndex = i;
+      selectPatientIndex(i);
       return;
     }
   }
   int idx = (g_patientCount < MAX_PATIENTS) ? g_patientCount++ : currentPatientIndex;
   g_patients[idx] = g_activePatientReq;
-  currentPatientIndex = idx;
+  selectPatientIndex(idx);
 }
 
 // Seed a single synthetic "Standalone" patient when the roster is empty so a
@@ -435,6 +438,18 @@ static void applyActivePatient()
 // any real patient pushed later replaces this (see applyActivePatient /
 // loadPatientsFromSd). Idempotent.
 // Index of the standalone bucket in g_patients, or -1.
+// The ONE place the active selection changes. Retention keys the live dir off
+// this, and publishing it from anywhere else raced the selection: at boot
+// ensureStandalonePatient() ran before loadPatientsFromSd() had chosen, so the
+// live dir was still the previous patient and the sweep reclaimed the ACTIVE
+// dir with keep=0.
+static void selectPatientIndex(int idx)
+{
+  if (idx < 0 || idx >= g_patientCount) return;
+  currentPatientIndex = idx;
+  connSetActivePatientDir(g_patients[idx].patientId);
+}
+
 static int standaloneIndex()
 {
   for (int i = 0; i < g_patientCount; i++)
@@ -456,12 +471,8 @@ static void ensureStandalonePatient()
   // Standalone is the DEFAULT target: the recorder records standalone audio
   // reports unless someone explicitly assigns a patient. Only take the selection
   // if nothing is selected yet - never steal it from an explicit assignment.
-  if (g_patientCount == 1) currentPatientIndex = idx;
-  g_standalonePatient  = (currentPatientIndex == idx);
-  // Tell connectivity which dir is live straight away. Retention refuses to run
-  // until it knows, so leaving this to whoever calls patientDirPath() first meant
-  // an idle unit never reclaimed anything (and, briefly, reclaimed everything).
-  connSetActivePatientDir(g_patients[0].patientId);
+  if (g_patientCount == 1) selectPatientIndex(idx);
+  g_standalonePatient = (currentPatientIndex == idx);
 }
 
 // The recorder is usable once it has been claimed to a SATE account. Patient
@@ -1413,7 +1424,7 @@ static void loadPatientsFromSd()
       for (int i = 0; i < g_patientCount; i++)
         if (!strcmp(g_patients[i].patientId, selId)) { sel = i; break; }
     }
-    currentPatientIndex = sel;
+    selectPatientIndex(sel);
     g_standalonePatient = (sel == standaloneIndex());
     Serial.printf("[SD] loaded %d patient(s); active=%s\n",
                   n, g_patients[currentPatientIndex].patientId);
@@ -1425,9 +1436,7 @@ static void patientDirPath(char *out, size_t outSize)
   // The recorder records STANDALONE: in practice this is always the one
   // "Standalone" dir. Retention still needs to know which dir is live, and it
   // refuses to reclaim anything until it does, so publish it on every use.
-  const char *pid = g_patients[currentPatientIndex].patientId;
-  snprintf(out, outSize, "/sate/patients/%s", pid);
-  connSetActivePatientDir(pid);
+  snprintf(out, outSize, "/sate/patients/%s", g_patients[currentPatientIndex].patientId);
 }
 
 static void sessionWavPath(char *out, size_t outSize, const char *dir, uint32_t n)
@@ -1463,6 +1472,31 @@ static bool sessionExists(const char *dir, uint32_t n)
   sessionPartPath(pp, sizeof(pp), wav, 0);
   sessionSyncMarkPath(mark, sizeof(mark), dir, n);
   return SD_MMC.exists(pp) || SD_MMC.exists(wav) || SD_MMC.exists(mark);
+}
+
+// Does session n still hold real audio (segments or a legacy merged .wav)? A
+// slot with ONLY a .synced marker is a tombstone: its audio was freed after the
+// server confirmed it, so nothing on the card would be lost by reusing it.
+static bool sessionHasAudio(const char *dir, uint32_t n)
+{
+  char wav[160], pp[200];
+  sessionWavPath(wav, sizeof(wav), dir, n);
+  sessionPartPath(pp, sizeof(pp), wav, 0);
+  return SD_MMC.exists(pp) || SD_MMC.exists(wav);
+}
+
+// Release an audio-free slot so its number can be handed out again. Only ever
+// called past the 99 wrap, and only for a slot sessionHasAudio() says is empty -
+// the recording itself is already durably on the server.
+static void clearSessionTombstone(const char *dir, uint32_t n)
+{
+  char mk[160], js[160];
+  sessionSyncMarkPath(mk, sizeof(mk), dir, n);
+  sessionJsonPath(js, sizeof(js), dir, n);
+  SD_MMC.remove(mk);
+  SD_MMC.remove(js);
+  Serial.printf("[REC] reused tombstoned slot %lu in %s (audio already on server)\n",
+                (unsigned long)n, dir);
 }
 
 // One directory walk marking every session number present in `dir` (same
@@ -1565,9 +1599,25 @@ static uint32_t findNextSessionIndex(const char *dir)
   if (highest < SESSION_NUM_MAX) {
     next = highest + 1;                           // empty dir starts at 1
   } else {
+    // Wrap. Prefer a slot that holds nothing at all.
     for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++)
-      if (!present[i]) { next = i; break; }       // wrap: lowest free slot
-    if (!next) return 0;                          // all 99 numbers occupied
+      if (!present[i]) { next = i; break; }
+    if (!next) {
+      // Every number is taken - but most are AUDIO-FREE tombstones: retention
+      // frees a synced take's audio and keeps its .synced marker, and a marker
+      // owns its slot forever. Without this the card empties, the numbers stay
+      // full, and RECORD dies permanently after 99 lifetime takes (a standalone
+      // unit records into one dir, so that is weeks of normal use). Recycle the
+      // OLDEST audio-free tombstone: its audio is already durably on the server,
+      // and the NVS high-water no longer protects it because we are past the wrap.
+      for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++) {
+        if (sessionHasAudio(dir, i)) continue;    // real audio: never reuse
+        next = i;
+        clearSessionTombstone(dir, i);            // free the slot for the new take
+        break;
+      }
+    }
+    if (!next) return 0;                          // all 99 slots hold real audio
   }
   g_prefs.begin("sate-seq", false);
   // At the wrap the high-water restarts from the number we just handed out, so
@@ -3442,7 +3492,7 @@ static void maybeResumeRecording()
     Serial.printf("[REC] resume: ABORT - patient '%s' not in roster (%d loaded)\n", pid, g_patientCount);
     recCrashClear(); return;                     // patient gone -> sync handles it
   }
-  currentPatientIndex = idx;
+  selectPatientIndex(idx);
 
   // Own the SD bus BEFORE touching the session's files or pumping the status
   // screen: the net task may already be uploading this very session (the sweep
@@ -4006,7 +4056,7 @@ void loop()
           if (patientCard) lv_obj_set_style_opa(patientCard, o, 0);
           runGui();
         }
-        currentPatientIndex = (currentPatientIndex + 1) % g_patientCount;
+        selectPatientIndex((currentPatientIndex + 1) % g_patientCount);
         showHomeScreen();
       }
       break;
