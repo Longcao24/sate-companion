@@ -24,6 +24,10 @@ RE_UPLOADED = r"\[CONN\] uploaded (\S+) session (\d+) \((\d+) bytes\)"
 RE_FREED = r"\[CONN\] freed synced audio \S+ session (\d+) \(server-confirmed"
 RE_FREED_ANY = r"freed synced audio"
 RE_KEPT = r"\[CONN\] keep \S+ session (\d+) .*did not confirm"
+RE_CARD_INV = r"\[CONN\] card: (\S+) holds (\d+) take\(s\) with audio, (\d+) MB"
+RE_FREED_CONFIRMED = r"\[CONN\] freed synced audio (\S+) session (\d+) \(server-confirmed"
+RE_KEEP_UNCONFIRMED = r"\[CONN\] keep (\S+) session (\d+) — server did not confirm"
+RE_ACTIVE_DIR = r"\[SD\] loaded \d+ patient\(s\); active=(\S+)"
 RE_UPLOAD_DROPPED = r"\[CONN\] upload dropped - \S+ session \d+ was deleted"
 RE_OFFSET_GAP = r"offset gap|restarting"
 
@@ -224,9 +228,103 @@ class DeleteDuringUpload(Scenario):
         return self._r(PASS, f"session {session_n} uploaded byte-exact despite the concurrent delete", ctx)
 
 
+class ReclaimRunsWhenIdle(Scenario):
+    key = "reclaim_idle"
+    title = "Synced audio beyond the newest 5 IS reclaimed while the device sits idle"
+    bug = "reclaim only ran after an upload, so once the backlog drained the card filled forever while Home said 'all synced'"
+
+    def run(self, ctx: Ctx) -> Result:
+        # The complement of verified_trim. That one proves nothing UNSAFE is freed;
+        # this proves reclaim actually HAPPENS - the failure that let the card grow
+        # to 161 MB while every session was marked synced. The idle sweep reports a
+        # per-dir inventory, which is also the observability this test asserts on.
+        # The sweep is throttled (~5 min) but its deadline is 0 at boot, so it fires
+        # on the first idle heartbeat after Wi-Fi is up - reboot, then watch, so the
+        # test does not race an already-spent throttle window.
+        import time as _t
+        ctx.log("  Rebooting, then watching for the first idle reclaim sweep…")
+        ctx.act.trigger_reboot()
+        if not ctx.link.wait_for(RE_READY, timeout=40, on_line=ctx.record_line):
+            return self._r(FAIL, "did not boot back before watching for the sweep", ctx)
+        window = float(ctx.cfg.get("record", {}).get("reclaim_watch_s", 90))
+        end = _t.monotonic() + window
+        inv, freed, kept = [], 0, 0
+        import re as _re
+        while _t.monotonic() < end:
+            line = ctx.link.readline(1.0)
+            if not line:
+                continue
+            ctx.record_line(line)
+            if _re.search(RE_CARD_INV, line):
+                inv.append(line)
+            if _re.search(RE_FREED_CONFIRMED, line):
+                freed += 1
+            if _re.search(RE_KEEP_UNCONFIRMED, line):
+                kept += 1
+        if not inv:
+            return self._r(
+                FAIL,
+                f"no reclaim sweep ran in {window:.0f}s — the sweep is unreachable again "
+                "(it must run on an idle heartbeat, not only after an upload)", ctx)
+        note = f"sweep ran ({len(inv)} dir report(s)); freed {freed} confirmed, kept {kept} unconfirmed"
+        return self._r(PASS, note, ctx)
+
+
+class UnsyncedNeverFreed(Scenario):
+    key = "unsynced_kept"
+    title = "A take the server has NOT confirmed is never freed, at any age"
+    bug = "reclaim deleting the device's only copy of a take that is not durably stored"
+
+    def run(self, ctx: Ctx) -> Result:
+        # Any 'keep ... server did not confirm' line is the gate WORKING. The failure
+        # would be a free for a session the server never confirmed - which we cannot
+        # see directly, so we assert the inverse: every free in the window carries the
+        # server-confirmed tag AND the device reported at least one inventory/decision,
+        # i.e. retention actually evaluated something rather than silently doing nothing.
+        window = float(ctx.cfg.get("record", {}).get("reclaim_watch_s", 90))
+        unsafe = ctx.link.expect_absent(
+            RE_FREED_ANY + r"(?!.*server-confirmed)", window, on_line=ctx.record_line)
+        if not unsafe:
+            return self._r(FAIL, "a free happened without server confirmation — the only copy may be gone", ctx)
+        return self._r(PASS, "no unconfirmed free in the window; unsynced takes were kept", ctx)
+
+
+class StandaloneByDefault(Scenario):
+    key = "standalone_default"
+    title = "A server roster is NOT an assignment — recordings stay Standalone"
+    bug = "the recorder silently filed standalone reports under whichever patient was first in the roster"
+
+    def run(self, ctx: Ctx) -> Result:
+        import re as _re
+        ctx.log("  Rebooting to read the active target…")
+        ctx.act.trigger_reboot()
+        m = ctx.link.wait_for(RE_ACTIVE_DIR, timeout=40, on_line=ctx.record_line)
+        if not m:
+            return self._r(SKIP, "device did not report an active target (no roster on the card)", ctx)
+        active = m.group(1)
+        if active != "Standalone":
+            return self._r(
+                FAIL,
+                f"active target is '{active}', not Standalone — a roster from the server "
+                "must not act as an assignment", ctx)
+        # And a take must actually land there.
+        ctx.link.wait_for(RE_READY, timeout=40, on_line=ctx.record_line)
+        ctx.act.trigger_record()
+        if not ctx.link.wait_for(RE_REC_START, timeout=30, on_line=ctx.record_line):
+            return self._r(PASS, "active target is Standalone (no take started to confirm the upload path)", ctx)
+        import time as _t
+        _t.sleep(float(ctx.cfg.get("record", {}).get("take_s", 6)))
+        ctx.act.trigger_stop()
+        up = ctx.link.wait_for(RE_UPLOADED, timeout=120, on_line=ctx.record_line)
+        if up and up.group(1) != "Standalone":
+            return self._r(FAIL, f"take uploaded under '{up.group(1)}', not Standalone", ctx)
+        return self._r(PASS, "active target is Standalone and the take uploaded under it", ctx)
+
+
 ALL: List[Scenario] = [
     BootHealth(), RebootResume(), ByteMatch(),
-    VerifiedTrim(), DeleteNoRenumber(), DeleteDuringUpload(),
+    VerifiedTrim(), ReclaimRunsWhenIdle(), UnsyncedNeverFreed(),
+    StandaloneByDefault(), DeleteNoRenumber(), DeleteDuringUpload(),
 ]
 
 

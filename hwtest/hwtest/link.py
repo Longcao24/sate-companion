@@ -176,9 +176,21 @@ class QueueLink(BaseLink):
 
     def __init__(self):
         self._events: deque[tuple[float, str]] = deque()
+        self._hb_line: Optional[str] = None   # periodic line the device emits on its own
+        self._hb_period = 0.0
+        self._hb_next = 0.0
 
     def push(self, line: str, delay: float = 0.0) -> None:
         self._events.append((time.monotonic() + delay, line))
+
+    def set_idle_heartbeat(self, line: str, period: float) -> None:
+        """A line the simulated device emits by itself, forever, on a cadence.
+
+        Some behaviour is only observable because the device reports it unprompted
+        (the idle reclaim sweep's card inventory). Scheduling a fixed burst instead
+        would be consumed by whichever scenario happens to read first."""
+        self._hb_line, self._hb_period = line, period
+        self._hb_next = time.monotonic() + period
 
     def reset(self) -> None:
         # The sim backend scripts boot lines in response to reset(); nothing here.
@@ -187,8 +199,13 @@ class QueueLink(BaseLink):
     def readline(self, timeout: float) -> Optional[str]:
         end = time.monotonic() + timeout
         while True:
-            if self._events and self._events[0][0] <= time.monotonic():
+            now = time.monotonic()
+            if self._events and self._events[0][0] <= now:
                 return self._events.popleft()[1]
-            if time.monotonic() >= end:
+            # Scripted lines win; the idle heartbeat only fills genuine quiet.
+            if self._hb_line and now >= self._hb_next:
+                self._hb_next = now + self._hb_period
+                return self._hb_line
+            if now >= end:
                 return None
             time.sleep(0.005)

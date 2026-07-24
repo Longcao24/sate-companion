@@ -81,7 +81,8 @@ class Debugger:
     # remote reboot, remote stop. Only the delete cases still need a human on the
     # Sessions screen (there is no remote "delete session" command).
     MANUAL = ("delete_journal", "delete_during_upload")
-    AUTO = ("boot_health", "byte_match", "verified_trim", "reboot_resume")
+    AUTO = ("boot_health", "byte_match", "verified_trim", "unsynced_kept",
+            "reclaim_idle", "standalone_default", "reboot_resume")
 
     def __init__(self, root: tk.Tk, cfg: dict):
         self.root = root

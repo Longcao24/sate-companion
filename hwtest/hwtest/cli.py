@@ -104,7 +104,11 @@ def _run(cmd: list[str], cwd: Path | None = None) -> int:
 # ---------------------------------------------------------------- commands
 # The standard CI gate for the SATE recorder. EVERY firmware version must pass this
 # before it is released — it is the release criterion, not an optional extra.
-CI_SCENARIOS = ["boot_health", "reboot_resume", "byte_match", "verified_trim"]
+CI_SCENARIOS = ["boot_health", "reboot_resume", "byte_match",
+                "verified_trim",        # nothing UNSAFE is freed
+                "unsynced_kept",        # ...and an unconfirmed take is never freed
+                "reclaim_idle",         # ...and reclaim ACTUALLY RUNS when idle
+                "standalone_default"]   # a server roster is not an assignment
 PROTECTED_SERIALS = ("SATE-D19EB8",)  # real in-use unit: CI must never touch it
 
 
@@ -632,7 +636,9 @@ def cmd_test(args: argparse.Namespace) -> int:
     if args.sim:
         cfg.setdefault("record", {}).update({"take_s": 1, "resume_hold_s": 0,
                                              "trim_watch_s": 0.3, "gap_wait_s": 0.3,
-                                             "upload_wait_s": 3, "delete_target": 1})
+                                             "upload_wait_s": 3, "delete_target": 1,
+                                             "reclaim_watch_s": 1.5,
+                                             "patient_id": "Standalone"})
     results = run(cfg, keys, sim=args.sim, color=_USE_COLOR, mirror=getattr(args, "mirror", None))
     return 1 if any(r.status in ("FAIL", "ERROR") for r in results) else 0
 

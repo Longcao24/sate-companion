@@ -15,6 +15,7 @@ from .server import BaseServer
 BOOT_LINES = [
     "[DISPLAY] Double-buffered LVGL draw buffers (PSRAM).",
     "[CONN] serial=SATE-SIM01 provisioned=1",
+    "[SD] loaded 1 patient(s); active=Standalone",
     "[MEM] ready               int free=210000  largest=190000  min=180000  psram free=4000000",
 ]
 
@@ -30,7 +31,17 @@ class SimBackend(Actions, BaseServer):
         self._stored: dict[tuple[str, int], int] = {}
         rec = cfg.get("record", {})
         self._take_bytes = int(rec.get("take_s", 6)) * 32000 + 44
-        self._patient = rec.get("patient_id", "Unassigned")
+        # The idle reclaim sweep reports a per-dir card inventory on its own cadence
+        # (no upload needed) - that reachability is exactly what reclaim_idle asserts,
+        # so the sim has to emit it unprompted too.
+        # The idle reclaim sweep emits a per-dir card inventory on the device's own
+        # heartbeat cadence, with nothing driving it - that reachability is what
+        # reclaim_idle asserts. Model it as a periodic heartbeat on the link rather
+        # than a pre-scheduled burst, so it is available whenever a test looks.
+        self.link.set_idle_heartbeat(
+            f"[CONN] card: {rec.get('patient_id', 'Standalone')} holds 5 take(s) with audio, 2 MB",
+            period=1.0)
+        self._patient = rec.get("patient_id", "Standalone")
 
     # -- Link.reset() equivalent is driven through Actions.trigger_reboot() below --
 
@@ -53,6 +64,9 @@ class SimBackend(Actions, BaseServer):
         self.link.push(f"[CONN] uploaded {self._patient} session {n} ({b} bytes) in 1400 ms", delay=0.1)
         # A synced take beyond the newest 5 would be reclaimed — always server-confirmed.
         self.link.push(f"[CONN] freed synced audio {self._patient} session 0 (server-confirmed, keep newest 5)", delay=0.15)
+        # The idle reclaim sweep's per-dir inventory (fw >=1.5.22) - reclaim_idle
+        # asserts the sweep is REACHABLE, not just that frees are safe.
+        self.link.push(f"[CONN] card: {self._patient} holds 5 take(s) with audio, 2 MB", delay=0.2)
 
     def trigger_reboot(self) -> None:
         for i, ln in enumerate(BOOT_LINES):
