@@ -43,7 +43,7 @@ shared BLE radio, hang the AI pipeline, or lose a patient's recording.
 | **Edit / deploy the docs** | `cd docs-site && npm start`; `npm run deploy:cf`. Keep line numbers OUT of published docs. |
 | **Anything touching Plaud / BLE / audio integrity** | STOP and read `references/safety-invariants.md` + `CLAUDE.md` first — these are the brick / data-loss paths. |
 
-## MANDATORY pre-flight review (run all 5 rows before you change anything)
+## MANDATORY pre-flight review (run all 6 rows before you change anything)
 
 Fill this in for the task at hand. If any row is unchecked, stop and resolve it first.
 
@@ -53,7 +53,8 @@ Fill this in for the task at hand. If any row is unchecked, stop and resolve it 
 | 2 | **Plaud device-lock safety** | If it touches Plaud connect/identity/Keychain/BLE lifecycle/account/sync at all, re-read `CLAUDE.md` RULE #1 and `doc/08-plaud.md`. A mis-bound Plaud is **permanently bricked**. Preserve all 5 invariants (stable `sate_<uid>` identity, bind-guard, Keychain binding, no auto-depair, ACK-before-forget). |
 | 3 | **Shared BLE radio** | If it touches SATE/Pendant BLE, honor `CLAUDE.md` RULE #2: SATE + Pendant **share one `BleManager`**; handoff is `stopScan()` only, **never destroy** (destroying → zero-device scans). Only `src/ble/radio.ts` hands the radio over; `acquireRadio()` is called synchronously in the `App.tsx` nav handler, never in an effect. |
 | 4 | **Data-integrity & no-stuck** | Will this risk losing/mismatching patient audio or wedging a feature? Keep audio the device's only copy until server-verified; SD reclaim is **server-verified** (`GET /api/sessions/verify`, byte-exact) never on the `.synced` marker alone; never move the long AI call into an edge/Worker fetch (~150 s edge / ~100 s 524 kills it — it lives in the `cf-processor` container). |
-| 5 | **Build + verify path + regression** | Know how you'll compile and verify BEFORE editing (commands below). Firmware changes must be checked with the **hardware-in-the-loop harness** (`hwtest/`) on a real board — a compiler can't catch reboot-mid-record, dropped-BLE truncation, delete-during-upload splicing, verified trim, or crash-safe delete. **Regression rule: any new feature/fix re-runs `sate ci` (the standard suite) before it lands; backend-touching changes add `sate e2e`** — the 1.5.16→1.5.18 chain (each fix exposed the next latent bug) is why the FULL suite re-runs every time, not just the changed scenario. |
+| 5 | **Build + verify path + regression** | Know how you'll compile and verify BEFORE editing (commands below). Firmware changes must be checked with the **hardware-in-the-loop harness** (`hwtest/`) on a real board — a compiler can't catch reboot-mid-record, dropped-BLE truncation, delete-during-upload splicing, verified trim, or crash-safe delete. **Regression rule: any new feature/fix re-runs `sate ci` (the standard suite) before it lands; backend-touching changes add `sate e2e`** — the 1.5.16→1.5.18 chain (each fix exposed the next latent bug) is why the FULL suite re-runs every time, not just the changed scenario. **And when the user reports a symptom, look at the DEVICE before you read the code** (`sate debug` / the serial `DIAG` dump): three audit rounds missed a retention bug that one `sd used=161 MB` line exposed immediately. |
+| 6 | **Reachability of what you're adding** | If your change adds or relies on a guard, cleanup, recovery, or reclaim path, answer **"when is this NEVER called?"** before you write it. A path reachable from only one caller — or behind an event that may never arrive (no upload, no Wi-Fi, no app connected, no take) — is the defect class that survived two full audits here. See `references/auditing-firmware.md` §1. |
 
 ## Build / run / verify (real commands)
 
@@ -132,6 +133,10 @@ Deeper, task-specific playbooks live alongside this file in `references/`:
   the firmware-release + OTA recipe and the flash gotchas.
 - **`references/backend-and-testing.md`** — the async AI pipeline shape, edge-fn deploy commands,
   the `process-device-session` hazard, and the `hwtest/` hardware-in-the-loop harness.
+- **`references/auditing-firmware.md`** — how to audit this system so it actually finds bugs:
+  the reachability blind spot ("when is this NEVER called?"), why a wrong spec verifies clean,
+  why static audit misses what a `DIAG` dump shows in one line, and why you must re-audit a
+  fix campaign. Read before running or trusting any audit here.
 
 ## Doc conventions (so this stays maintainable)
 

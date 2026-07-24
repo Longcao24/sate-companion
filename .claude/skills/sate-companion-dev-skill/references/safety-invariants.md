@@ -74,7 +74,35 @@ the take's start sequence, cleared when capture returns). Do not "clear stale st
 start instead — that swallows a stop issued during the take's own start, which left resumed
 takes running unbounded (fw 1.5.18).
 
-## 6. Firmware flash traps that silently brick
+## 6. A destructive path proves its case AT the deletion site — and "unknown" means keep
+
+Reclaim frees the device's only copy of a recording, so the proof obligation lives where
+the delete happens, not in the caller: `trimPatientSyncedAudio()` frees a take's audio only
+after `verifySessionStored()` gets a byte-exact `stored:true` from the server. During the
+2026-07-23 audit rounds the retention logic was wrong more than once — wrong floor, wrong
+"live directory", once reclaiming every directory — and **no recording was ever lost**,
+because the gate held every time. Keep it that way:
+
+- Never free audio on a `.synced` marker alone; the marker only means "a POST returned 2xx".
+- Any doubt — offline, non-2xx, parse fail, byte mismatch — KEEPS the audio.
+- **A fail-safe default must be "keep everything", never "keep nothing".** One cut treated an
+  unknown live directory as keep-0 and reclaimed the whole card. Write the safe direction
+  explicitly; do not let it fall out of a zero-initialised variable.
+- A byte count is not an identity. `(patient, session_number, bytes)` can match a *different*
+  take once numbers are reused and durations are exact — a per-take id is the real fix
+  (still open; see `references/auditing-firmware.md` §6).
+
+## 7. Sessions are never renumbered — numbers are monotonic and wrap at 99
+
+A delete removes only its own session's files and leaves a hole; numbers come from a
+per-directory NVS high-water (`"sate-seq"`) so a deleted number is not recycled, and at the
+99 wrap the allocator recycles the oldest **audio-free** tombstone (its recording is already
+on the server). Do not reintroduce renumbering, and do not add code that assumes contiguous
+`1..N` — that machinery was the single largest source of critical bugs in the audit
+(splicing two takes into one server WAV, deleting the wrong recording, power-cut slot reuse).
+See the memory note `no-renumber-sessions`.
+
+## 8. Firmware flash traps that silently brick
 
 - **`PartitionScheme=default_8MB`** (dual OTA slots). `huge_app` silently disables OTA.
 - **`lv_conf.h` `LV_TICK_CUSTOM=1`.** If `0`, the boot spinner freezes at frame 1 while

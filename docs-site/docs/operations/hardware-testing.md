@@ -67,6 +67,9 @@ flowchart TD
 | `reboot_resume` | A take interrupted by a reboot **auto-resumes**, and stays remote-controllable while it does | Recorder |
 | `byte_match` | Uploaded bytes on the server **== bytes the device sent** | Recorder |
 | `verified_trim` | SD audio is freed **only after** the server confirms it | Recorder |
+| `unsynced_kept` | A take the server has **not** confirmed is never freed, at any age | Recorder |
+| `reclaim_idle` | Synced audio beyond the newest 5 **is actually reclaimed** while the device sits idle | Recorder |
+| `standalone_default` | A server roster is **not** an assignment — recordings stay Standalone | Recorder |
 | `delete_journal` | A delete interrupted by a reboot **heals** (no hidden takes) | Recorder |
 | `delete_during_upload` | Delete during an upload doesn't **splice two takes** | Recorder |
 | `pendant_advertise` | Pendant is discoverable + connects | Pendant |

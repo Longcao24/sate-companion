@@ -297,7 +297,72 @@ get its ~40 KB contiguous block on a heap fragmented by hours of 1 MB chunks. **
 
 ---
 
-## 5. Recording & upload data flow
+## 5. Session numbering, retention and reclaim {#numbering-and-retention}
+
+Two rules govern what the card holds. Both were rebuilt in July 2026 after an audit
+found the old machinery was the single largest source of critical defects.
+
+### Numbers are never renumbered
+
+Session numbers are allocated **monotonically** per directory and **wrap at 99**.
+Deleting a session removes **only that session's own files** and leaves a hole —
+nothing shifts. A number is not handed straight back either: a per-directory
+high-water in NVS (`sate-seq`) keeps a spent number spent, because the server keeps
+its row for a deleted take and a remote take of the same duration produces the same
+byte count, which would make `(patient, number, bytes)` ambiguous.
+
+At the wrap, the allocator recycles the **oldest audio-free tombstone** — a slot whose
+audio was already reclaimed after the server confirmed it. A slot that still holds real
+audio is never reused.
+
+:::danger Do not reintroduce renumbering
+The old design shifted later sessions down to keep numbering contiguous, journaled to
+NVS so a reboot mid-shift could heal. It produced: a renumber running under a live
+upload that **spliced two takes into one server WAV**, a trash tap that deleted the
+**wrong recording** after the shift, a wait-for-the-uploader guard shorter than the net
+task's critical section, and power-cut slot reuse. Removing the mechanism removed all of
+them. Anything that assumes contiguous `1..N` is a bug — iterate the directory.
+:::
+
+### Retention: the 5 newest, and only what the server has
+
+The card keeps the **5 newest recordings** device-wide. Older audio is freed **only**
+when both hold:
+
+1. the session carries a `.synced` marker, **and**
+2. `GET /api/sessions/verify` confirms that exact byte count is durably stored.
+
+**A recording that is not yet synced is never freed, at any age.** Any doubt — offline,
+non-2xx, parse failure, byte mismatch — keeps the audio; the next cycle retries. The
+marker alone is never sufficient: it only means "a POST returned 2xx".
+
+Freeing removes the audio and keeps the `.synced` marker as a tombstone, so the slot
+stays accounted for. Full deletion stays user-only (the Delete button).
+
+Retention runs in two places: after every successful upload (for that recording's
+directory), and on an **idle sweep** across every directory. The sweep exists because
+reclaim used to run *only* on the upload path — so once everything was uploaded, nothing
+was ever reclaimed again, and the card filled while the screen said "all synced". The
+sweep is bounded per pass (each freed session costs one verify round-trip while it holds
+the SD bus) and it logs a per-directory inventory:
+
+```
+[CONN] card: Standalone holds 5 take(s) with audio, 31 MB
+```
+
+That line is the fastest way to answer "why is my card still full?" — retention keeps the
+live directory's newest 5 and fully reclaims stale directories, so a directory nothing
+records into any more should trend to zero.
+
+### Standalone is the default
+
+The recorder records **standalone audio reports**. A roster arriving from the server is
+**not** an assignment: the active target stays Standalone unless a patient is explicitly
+assigned (from the app/server, or picked on the device). One function
+(`selectPatientIndex`) changes the selection and publishes the live directory to
+retention — publishing it from anywhere else races the selection at boot.
+
+## 6. Recording & upload data flow
 
 **Capture (Core 1).**
 
@@ -377,7 +442,7 @@ synced+purged (tombstone) slot looks like "no session here" and every later take
 
 ---
 
-## 6. Concurrency model {#concurrency-model}
+## 7. Concurrency model {#concurrency-model}
 
 Two cores, one deliberate split (fw 1.2.5+):
 
@@ -451,7 +516,7 @@ hooks (`sateHook*`); `loop()` renders. Upload progress is likewise flag-driven
 
 ---
 
-## 7. Configuration
+## 8. Configuration
 
 ### Mandatory flash config (verified fw 1.5.12–1.5.17)
 
@@ -509,7 +574,7 @@ Persisted config (NVS namespaces): `sate` (Wi-Fi SSID/pass, server, device id/ke
 
 ---
 
-## 8. Key files
+## 9. Key files
 
 | File | Responsibility |
 |---|---|
@@ -522,7 +587,7 @@ Persisted config (NVS namespaces): `sate` (Wi-Fi SSID/pass, server, device id/ke
 
 ---
 
-## 9. Known issues & current status
+## 10. Known issues & current status
 
 Audit of **2026-07-22**. Priorities, in order: (1) never lose or **mismatch** patient audio;
 (2) no feature ever **stuck**; security noted but deprioritized.

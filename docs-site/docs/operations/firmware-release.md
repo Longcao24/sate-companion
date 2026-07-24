@@ -107,7 +107,8 @@ One command runs the whole gate on a real recorder:
 2. Compiles and flashes the **debug** (USB-CDC) build, because the harness asserts
    on the firmware's own serial log.
 3. Runs the standard hands-off scenarios — `boot_health`, `reboot_resume`,
-   `byte_match`, `verified_trim` — driving the device with remote
+   `byte_match`, `verified_trim`, `unsynced_kept`, `reclaim_idle`,
+   `standalone_default` — driving the device with remote
    `record` / `stop` / `reboot`, so nobody has to be at the bench.
 4. Writes a durable report to `hwtest/ci-reports/fw-<version>_<stamp>.json` and
    exits non-zero on any FAIL/ERROR, so it drops into scripts and release checklists.
