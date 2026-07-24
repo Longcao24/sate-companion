@@ -63,6 +63,9 @@ bool        connUploadingSession(char *pidOut, size_t pidLen, uint32_t *numOut);
 // Percent (0-100) of the in-flight upload, or -1 when idle.
 int         connUploadPercent();
 void        connNotifyNewSession();  // a recording was just saved
+// Which patient dir new takes go into. Retention keeps the newest takes THERE;
+// every other dir is stale and gets fully reclaimed (still verify-gated).
+void        connSetActivePatientDir(const char *pid);
 // A session was deleted on the SD card. Deletes never renumber (numbers keep
 // their holes and are reused only after a delete), so only the uploader's
 // memory of THIS (patient, number) must be dropped before the number is reused.

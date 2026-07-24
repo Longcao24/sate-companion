@@ -128,6 +128,11 @@ static uint32_t nextHeartbeat  = 0;   // next full pending-scan
 static uint32_t nextCmdPoll    = 0;   // next fast command poll
 static uint32_t nextAdvRefresh = 0;
 static bool     uploadSweepDue = false;
+// Idle reclaim cadence. Trim walks every patient dir and does one verify round-trip
+// per candidate, so it runs only when there is nothing to upload — not per heartbeat.
+static const uint32_t TRIM_SWEEP_PERIOD_MS = 5UL * 60UL * 1000UL;
+static uint32_t nextTrimSweep = 0;
+static char     activePid[24] = {0};   // patient dir new takes are written to
 static bool     patientsFetchDue = false;
 static bool     rebootRequested = false;
 static uint32_t rebootAtMs     = 0;
@@ -564,7 +569,7 @@ static void freeSessionAudioKeepMarker(const char *pid, uint32_t n)
 // (a delete leaves its hole; a number is only reused once its old take is fully
 // gone), so among occupied slots a HIGHER number is a newer take: keep the
 // KEEP_AUDIO_SESSIONS highest occupied slots and consider the rest.
-static void trimPatientSyncedAudio(const char *pid)
+static void trimPatientSyncedAudio(const char *pid, uint32_t keep = KEEP_AUDIO_SESSIONS)
 {
   PatientDirScan ps;
   scanPatientDir(pid, &ps);
@@ -572,9 +577,9 @@ static void trimPatientSyncedAudio(const char *pid)
   uint32_t cnt = 0;
   for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++)
     if (ps.mark[i] || ps.audio[i]) occ[cnt++] = (uint8_t)i;  // tombstone = occupied
-  if (cnt <= KEEP_AUDIO_SESSIONS) return;             // nothing beyond the newest N
+  if (cnt <= keep) return;                            // nothing beyond the newest N
   char mark[200];
-  for (uint32_t j = 0; j < cnt - KEEP_AUDIO_SESSIONS; j++) {
+  for (uint32_t j = 0; j < cnt - keep; j++) {
     uint32_t n = occ[j];
     sessionPath(mark, sizeof(mark), pid, n, "synced");
     if (!SD_MMC.exists(mark)) continue;               // not synced -> only copy, keep
@@ -593,7 +598,7 @@ static void trimPatientSyncedAudio(const char *pid)
     }
     freeSessionAudioKeepMarker(pid, n);
     Serial.printf("[CONN] freed synced audio %s session %lu (server-confirmed, keep newest %u)\n",
-                  pid, (unsigned long)n, (unsigned)KEEP_AUDIO_SESSIONS);
+                  pid, (unsigned long)n, (unsigned)keep);
   }
 }
 
@@ -647,6 +652,56 @@ static int resyncAll()
   uploadSweepDue = true;
   Serial.printf("[CONN] resync_all: cleared %d marker(s)\n", cleared);
   return cleared;
+}
+
+// Reclaim across EVERY patient dir, not just the one that happens to have uploaded.
+// trimPatientSyncedAudio() used to run in exactly one place — the upload-success
+// path, for that upload's patient — so once the backlog drained (pending=0) nothing
+// ever trimmed again: Home said "all synced" while every synced take beyond the
+// newest KEEP_AUDIO_SESSIONS kept its audio forever, and a patient dir that never
+// uploaded again was never reclaimed at all. This sweep runs on an idle cadence so
+// the card converges on "newest N per patient" without needing a new recording.
+// It is verify-gated exactly like the per-upload path: an unsynced or
+// server-unconfirmed take is never freed.
+static void trimAllPatients()
+{
+  // Fail safe: until the sketch has told us which dir is live, "keep the newest N
+  // there" is unanswerable - and treating that as keep-0 would reclaim EVERY dir.
+  // Unknown must mean keep everything, never keep nothing.
+  if (!activePid[0]) return;
+  File root = SD_MMC.open("/sate/patients");
+  if (!root) return;
+  File entry;
+  while ((entry = root.openNextFile())) {
+    if (!entry.isDirectory()) { entry.close(); continue; }
+    const char *full = entry.name();
+    const char *p = strrchr(full, '/');
+    char pid[24];
+    snprintf(pid, sizeof(pid), "%s", p ? p + 1 : full); // copy: name() dies with entry
+    entry.close();
+    // "Keep only the 5 newest recordings" is a DEVICE-wide rule, not per folder.
+    // New takes only ever land in the active dir, so keeping the newest N there
+    // and fully reclaiming every stale dir is that rule. A stale dir used to pin
+    // its own 5 takes forever - 31 MB on this bench - even though nothing records
+    // into it any more. Reclaim stays verify-gated either way: an unsynced or
+    // server-unconfirmed take is never freed, in any dir.
+    const bool isActive = !strcmp(pid, activePid);
+    trimPatientSyncedAudio(pid, isActive ? KEEP_AUDIO_SESSIONS : 0);
+
+    // Inventory, so "why is my card still full?" is answerable from the log:
+    // retention is per patient dir, so N dirs each keep their own newest
+    // KEEP_AUDIO_SESSIONS takes. A stale dir from earlier use holds 5 takes
+    // forever even though nobody records into it any more.
+    PatientDirScan ps;
+    scanPatientDir(pid, &ps);
+    uint32_t withAudio = 0; uint64_t bytes = 0;
+    for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++)
+      if (ps.audio[i]) { withAudio++; bytes += ps.partBytes[i] ? ps.partBytes[i] : ps.wavBytes[i]; }
+    if (withAudio)
+      Serial.printf("[CONN] card: %s holds %lu take(s) with audio, %lu MB\n",
+                    pid, (unsigned long)withAudio, (unsigned long)(bytes / 1048576ULL));
+  }
+  root.close();
 }
 
 // =============================================================================
@@ -1082,6 +1137,12 @@ static void uploadAbortInFlight()
 // only REQUESTS the drop; uploadStep() honours it at the top of its next pass,
 // before touching any file.
 static bool     upDropReq = false;
+
+// Deferred strike drop: filled by connNotifySessionDeleted() on the UI core,
+// consumed by the net task (upStrikes[] is net-task-owned state).
+static char     strikeDropPid[24] = {0};
+static uint32_t strikeDropNum     = 0;
+static volatile bool strikeDropReq = false;
 static char     upDropPid[24] = "";
 static uint32_t upDropNum = 0;
 
@@ -2504,6 +2565,12 @@ void connLoop()
       // if the UI observes netSdBusy false after setting its flag, this task is
       // guaranteed to see uiSdBusy on its next arrival here and stay out.
       netSdBusy = true;
+      // A delete on the UI core deferred its strike drop to us (upStrikes[] is
+      // net-task state). Runs every pass, upload or not.
+      if (strikeDropReq) {
+        strikeDropReq = false;
+        strikeClear(strikeDropPid, strikeDropNum);
+      }
       if (!uiSdBusy) {
         if (timeAfter(now, nextHeartbeat)) {
           nextHeartbeat = now + HEARTBEAT_PERIOD_MS;
@@ -2514,6 +2581,12 @@ void connLoop()
           // exactly the "stuck at uploading" we saw. Re-arm it here so anything
           // pending drains on its own, at the heartbeat cadence.
           if (pendCount > 0 && !upActive) uploadSweepDue = true;
+          // Nothing left to send: this is the moment to give the card back its
+          // space. Verify-gated, so it can only free what the server confirms.
+          if (pendCount == 0 && !upActive && timeAfter(now, nextTrimSweep)) {
+            nextTrimSweep = now + TRIM_SWEEP_PERIOD_MS;
+            trimAllPatients();
+          }
         }
         if (patientsFetchDue) {
           patientsFetchDue = false;
@@ -2737,12 +2810,24 @@ void connNotifySessionDeleted(const char *patientId, uint32_t num)
 {
   pendDirty = true;
   if (upResumeNum == num && !strcmp(upResumePid, patientId)) upResumeClear();
-  strikeClear(patientId, num);
+  // strikeClear() memmoves upStrikes[], which belongs to the net task. This
+  // function runs on the UI core, so calling it directly raced the net task's own
+  // strike walk (torn count -> out-of-bounds move). Defer it: the net task drops
+  // the strike on its next pass. A momentarily stale strike is harmless - it names
+  // a session that no longer exists, so nothing can select it.
+  snprintf(strikeDropPid, sizeof(strikeDropPid), "%s", patientId);
+  strikeDropNum = num;
+  strikeDropReq = true;
   if (upActive && upNum == num && !strcmp(upPid, patientId)) {
     snprintf(upDropPid, sizeof(upDropPid), "%s", patientId);
     upDropNum = num;
     upDropReq = true;
   }
+}
+
+void connSetActivePatientDir(const char *pid)
+{
+  if (pid && *pid) snprintf(activePid, sizeof(activePid), "%s", pid);
 }
 
 void connNotifyNewSession()

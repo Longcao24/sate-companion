@@ -116,7 +116,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.20";   // no-renumber sessions (monotonic, wrap 99) + 55 audited fixes: mark-synced/keep-5, OTA rollback, crash-resume, visible status, PSRAM buffers, DIAG
+static const char    *FIRMWARE_VERSION  = "1.5.24";   // keep-newest-5 device-wide, fail-safe when the live dir is unknown (never reclaim-all)
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -445,6 +445,10 @@ static void ensureStandalonePatient()
   g_patientCount       = 1;
   currentPatientIndex  = 0;
   g_standalonePatient  = true;
+  // Tell connectivity which dir is live straight away. Retention refuses to run
+  // until it knows, so leaving this to whoever calls patientDirPath() first meant
+  // an idle unit never reclaimed anything (and, briefly, reclaimed everything).
+  connSetActivePatientDir(g_patients[0].patientId);
 }
 
 // The recorder is usable once it has been claimed to a SATE account. Patient
@@ -1398,7 +1402,12 @@ static void loadPatientsFromSd()
 
 static void patientDirPath(char *out, size_t outSize)
 {
-  snprintf(out, outSize, "/sate/patients/%s", g_patients[currentPatientIndex].patientId);
+  // The recorder records STANDALONE: in practice this is always the one
+  // "Standalone" dir. Retention still needs to know which dir is live, and it
+  // refuses to reclaim anything until it does, so publish it on every use.
+  const char *pid = g_patients[currentPatientIndex].patientId;
+  snprintf(out, outSize, "/sate/patients/%s", pid);
+  connSetActivePatientDir(pid);
 }
 
 static void sessionWavPath(char *out, size_t outSize, const char *dir, uint32_t n)
@@ -1502,6 +1511,21 @@ static void deleteSessionFiles(const char *dir, uint32_t n)
 // only after the SLP explicitly deleted that session - which keeps the server's
 // (device_serial, session_number, patient) identity unambiguous. Returns 0 only
 // when all SESSION_NUM_MAX numbers are taken.
+// A deleted number must NOT come straight back. The server keeps its row for a
+// deleted take (the device never deletes server-side), and a remote timed take of
+// the same duration produces the SAME byte count - so handing the number back
+// makes (patient, number, bytes) ambiguous, and trim's verify could match the old
+// take's row and free the new take's only local copy. A per-patient high-water in
+// NVS keeps allocation monotonic across deletes; it only resets at the 99 wrap, by
+// which point 99 further takes have gone by.
+static uint32_t sessionSeqKey(const char *dir, char *out, size_t n)
+{
+  uint32_t h = 2166136261u;                       // FNV-1a over the patient dir
+  for (const char *c = dir; *c; c++) { h ^= (uint8_t)*c; h *= 16777619u; }
+  snprintf(out, n, "hw%08lx", (unsigned long)h);  // <=15 chars: NVS key limit
+  return h;
+}
+
 static uint32_t findNextSessionIndex(const char *dir)
 {
   bool present[SESSION_NUM_MAX + 1];
@@ -1509,10 +1533,28 @@ static uint32_t findNextSessionIndex(const char *dir)
   uint32_t highest = 0;
   for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++)
     if (present[i]) highest = i;
-  if (highest < SESSION_NUM_MAX) return highest + 1;   // empty dir starts at 1
-  for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++)
-    if (!present[i]) return i;                         // wrap: lowest free slot
-  return 0;
+
+  char key[16];
+  sessionSeqKey(dir, key, sizeof(key));
+  g_prefs.begin("sate-seq", true);
+  uint32_t mark = g_prefs.getUInt(key, 0);        // highest number ever used here
+  g_prefs.end();
+  if (mark > highest) highest = mark;             // a deleted number stays spent
+
+  uint32_t next = 0;
+  if (highest < SESSION_NUM_MAX) {
+    next = highest + 1;                           // empty dir starts at 1
+  } else {
+    for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++)
+      if (!present[i]) { next = i; break; }       // wrap: lowest free slot
+    if (!next) return 0;                          // all 99 numbers occupied
+  }
+  g_prefs.begin("sate-seq", false);
+  // At the wrap the high-water restarts from the number we just handed out, so
+  // the counter tracks the new cycle instead of pinning itself at 99.
+  g_prefs.putUInt(key, next);
+  g_prefs.end();
+  return next;
 }
 
 // --- SD card capacity (auto-detected from the mounted card) ----------------
