@@ -116,7 +116,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.27";   // one place changes the active patient and publishes it — the boot race made the sweep reclaim the LIVE dir
+static const char    *FIRMWARE_VERSION  = "1.5.28";   // SD handshake covers resync/fetch/BLE ops; standalone slot guaranteed; button takes report state; delete race reported
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -372,12 +372,32 @@ static void isrFlagBtn();
 
 void sateHookPatientsUpdated() { connPatientsReq = true; }
 void sateHookConnChanged()     { connStateReq = true; }
-void sateHookRecord()          { connRecordReq = true; }
+// A remote "record" that arrives while a take is ALREADY armed/running is
+// DROPPED, never latched: the operator was acting on stale state (a
+// button-started take used to report state=idle), and a latched request fired
+// an unwanted, unattended second take the instant the first one ended -
+// running to the ~62-minute ceiling with nobody at the device.
+void sateHookRecord()
+{
+  if (recTakeArmed) {
+    Serial.println("[REC] remote record dropped - a take is already in progress");
+    return;
+  }
+  connRecordReq = true;
+}
 // [fw 1.5.19] Timed remote take: capture exactly `seconds` of PCM and stop by
 // itself (byte-exact cap on the capture loop). Racing a remote "stop" through
 // the poll channel added 3-12 s of slop on every timed test.
 static volatile uint32_t connRecordSecs = 0;
-void sateHookRecordTimed(uint32_t seconds) { connRecordSecs = seconds; connRecordReq = true; }
+void sateHookRecordTimed(uint32_t seconds)
+{
+  if (recTakeArmed) {
+    Serial.println("[REC] remote timed record dropped - a take is already in progress");
+    return;
+  }
+  connRecordSecs = seconds;
+  connRecordReq = true;
+}
 // Only latch a stop while a take is armed, so a stop that arrives with nothing to
 // stop cannot sit around and kill the NEXT take. Armed covers the whole start
 // sequence (mark, status screen, GUI pump), not just the capture loop — a stop that
@@ -460,14 +480,27 @@ static int standaloneIndex()
 static void ensureStandalonePatient()
 {
   if (standaloneIndex() >= 0) return;          // already in the roster
-  if (g_patientCount >= MAX_PATIENTS) return;  // no room: roster is full of real patients
-  SatePatient &p = g_patients[g_patientCount];
+  int idx;
+  if (g_patientCount >= MAX_PATIENTS) {
+    // Roster is full of real patients (an account with >= MAX_PATIENTS is a
+    // normal clinic). Standalone must STILL exist: returning here left
+    // standaloneIndex() == -1, the selection fell back to slot 0, and every
+    // standalone report was silently filed under a real patient's chart — while
+    // Home showed no patient at all. The roster is only a cache of the server
+    // list, so repurpose the last non-selected slot for the Standalone bucket;
+    // the evicted patient can still be assigned from the app (which replaces a
+    // slot itself) or returns on the next roster fetch's reserved-slot parse.
+    idx = g_patientCount - 1;
+    if (idx == currentPatientIndex && idx > 0) idx--;  // never evict the selection
+  } else {
+    idx = g_patientCount++;
+  }
+  SatePatient &p = g_patients[idx];
   snprintf(p.patientId,   sizeof(p.patientId),   "%s", "Standalone");
   snprintf(p.displayName, sizeof(p.displayName), "%s", "Standalone");
   snprintf(p.age,         sizeof(p.age),         "%s", "-");
   snprintf(p.sessionType, sizeof(p.sessionType), "%s", "Standalone");
   snprintf(p.clinician,   sizeof(p.clinician),   "%s", "-");
-  const int idx = g_patientCount++;
   // Standalone is the DEFAULT target: the recorder records standalone audio
   // reports unless someone explicitly assigns a patient. Only take the selection
   // if nothing is selected yet - never steal it from an explicit assignment.
@@ -1402,7 +1435,13 @@ static void loadPatientsFromSd()
 
   int n = 0;
   for (JsonObject p : arr) {
-    if (n >= MAX_PATIENTS) break;
+    // Cap at MAX_PATIENTS - 1: one slot is RESERVED for the "Standalone" bucket.
+    // Filling all six with server patients left ensureStandalonePatient() no
+    // room, standaloneIndex() returned -1, and the fallback selected the
+    // account's first patient - so standalone reports landed on a real
+    // patient's chart. A 6th+ server patient is still reachable by assigning
+    // them from the app (applyActivePatient replaces a slot when full).
+    if (n >= MAX_PATIENTS - 1) break;
     SatePatient &dst = g_patients[n];
     snprintf(dst.patientId,   sizeof(dst.patientId),   "%s", (const char *)(p["patient_id"] | "PT-????"));
     snprintf(dst.displayName, sizeof(dst.displayName), "%s", (const char *)(p["name"] | "Unknown"));
@@ -3393,6 +3432,11 @@ static void runRecordSavePlaySession(bool review = true,
   // maybeResumeRecording() still applies. Cleared the instant capture returns.
   recTakeArmed = true;      // from here a remote "stop" belongs to this take
   recCrashMark(g_patients[currentPatientIndex].patientId, sessionNum, pcmTotal);
+  // Report the live state HERE, for EVERY take - button, on-screen, and remote
+  // alike. Only the remote branch used to report, so a button-started take
+  // kept the heartbeat at "idle" for its whole duration and the app happily
+  // queued a second record against a recorder that was already recording.
+  connSetLiveState("recording");
 
   uint32_t pcmBytes = 0;
   bool ok = recordWavStreamToSd(wavPath, &pcmBytes, pcmTotal);
@@ -3402,6 +3446,16 @@ static void runRecordSavePlaySession(bool review = true,
   // which is already over, and left set it would end the NEXT take at ~32 ms.
   // Order matters: disarm first so sateHookStop can't re-latch in between.
   connStopReq = false;
+  connSetLiveState("idle");
+  // Belt-and-braces for the arm race: a remote record that slipped in between
+  // the loop() consuming a request and recTakeArmed going up (sateHookRecord
+  // drops anything after that) is stale - the operator saw a pre-take state.
+  // Left latched it would start an unattended take the moment we return Home.
+  if (connRecordReq) {
+    connRecordReq  = false;
+    connRecordSecs = 0;
+    Serial.println("[REC] remote record dropped - arrived during a take");
+  }
   recCrashClear();   // every take is marked now, so every take clears its mark
 
   if (!ok) {
@@ -3561,6 +3615,7 @@ static void maybeResumeRecording()
   // Tell the SLP the take is continuing and give them a beat to hit Stop.
   recTakeArmed = true;      // arm BEFORE the status screen: the remote stop that
                             // ends this take often arrives during the pump below
+  connSetLiveState("recording");   // a resumed take reports live state too
   Serial.printf("[REC] resume session %lu from part %d (%lu bytes already on card, cap %lu)\n",
                 (unsigned long)sess, startPart, (unsigned long)existingBytes, (unsigned long)cap);
   showStatus("Resuming recording", "Interrupted take - press RECORD to stop");
@@ -3572,6 +3627,12 @@ static void maybeResumeRecording()
   bool ok = recordWavStreamToSd(wavPath, &pcmBytes, cap, startPart, existingBytes);
   recTakeArmed = false;
   connStopReq = false;   // same stale-stop drop as the normal take path above
+  connSetLiveState("idle");
+  if (connRecordReq) {   // same stale remote-record drop as the normal take path
+    connRecordReq  = false;
+    connRecordSecs = 0;
+    Serial.println("[REC] remote record dropped - arrived during a take");
+  }
   recCrashClear();
 
   if (!ok || pcmBytes == 0) {
@@ -3993,9 +4054,11 @@ void loop()
           uint64_t want = (uint64_t)secs * PCM_BYTES_PER_SEC;
           if (want < cap) cap = (uint32_t)want;
         }
-        connSetLiveState("recording");
+        // Live state ("recording"/"idle") is reported by
+        // runRecordSavePlaySession() itself now, for every start path alike -
+        // reporting it here too would claim "recording" even when the take is
+        // refused (SD error / low battery / full card) before it ever arms.
         runRecordSavePlaySession(false /*review*/, cap);
-        connSetLiveState("idle");
       } else if (!deviceReady()) {
         // Unclaimed unit can't record. Drop the request rather than latch it:
         // a stale record firing whenever the device is finally claimed would
@@ -4133,6 +4196,14 @@ void loop()
           Serial.println("[UI] delete aborted - net task never released the SD bus");
         }
         connSetUiSdBusy(false);   // uploads resume; the aborted one restarts later
+        if (!netIdle) {
+          // Say what happened. Silently repainting the unchanged list (after the
+          // user watched "Finishing current sync first..." for two minutes) made
+          // Delete look broken with no diagnostic. The session is intact; the
+          // net task was just still holding the card - a retry usually succeeds.
+          showStatus("Couldn't delete", "Sync is busy - try again in a moment");
+          pumpGuiMs(1800);
+        }
         showSessionsScreen();     // rebuild the list from disk
       }
       break;

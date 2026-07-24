@@ -134,6 +134,11 @@ static const uint32_t TRIM_SWEEP_PERIOD_MS = 5UL * 60UL * 1000UL;
 static uint32_t nextTrimSweep = 0;
 static char     activePid[24] = {0};   // patient dir new takes are written to
 static bool     patientsFetchDue = false;
+// resync_all walks + mutates every patient dir on the card, so it must run
+// inside connLoop's netSdBusy/!uiSdBusy bracket like every other net-task SD
+// op. runRemoteCommand() (called from pollCommands, OUTSIDE the bracket) only
+// latches this flag; connLoop consumes it next to patientsFetchDue.
+static bool     resyncDue = false;
 static bool     rebootRequested = false;
 static uint32_t rebootAtMs     = 0;
 static bool     factoryResetRequested = false;  // BLE factory_reset op pending
@@ -574,6 +579,16 @@ static void freeSessionAudioKeepMarker(const char *pid, uint32_t n)
 // take or a delete for minutes; the next sweep continues where this one stopped.
 static const uint32_t TRIM_MAX_FREES_PER_PASS = 2;
 
+// Each verify is an HTTPS round trip (2-4.5 s), and a candidate the server
+// keeps answering stored:false for is re-verified on EVERY sweep - so with a
+// long candidate list a single sweep could hold netSdBusy for minutes and
+// starve the UI's 120 s delete guard. Cap the verify ATTEMPTS per pass too
+// (the free budget alone never decremented on a failed verify); the next
+// sweep continues where this one stopped. trimAllPatients() resets the shared
+// budget once per sweep so the cap spans every patient dir it walks.
+static const uint32_t TRIM_MAX_VERIFIES_PER_PASS = 8;
+static uint32_t s_trimVerifyBudget = TRIM_MAX_VERIFIES_PER_PASS;
+
 static uint32_t trimPatientSyncedAudio(const char *pid, uint32_t keep = KEEP_AUDIO_SESSIONS,
                                        uint32_t budget = TRIM_MAX_FREES_PER_PASS)
 {
@@ -598,6 +613,8 @@ static uint32_t trimPatientSyncedAudio(const char *pid, uint32_t keep = KEEP_AUD
     // upload/trim cycle retries. Deleting an unconfirmed take is unrecoverable.
     uint32_t bytes = sessionAssembledBytes(pid, n);
     if (bytes == 0) continue;                         // nothing measurable -> keep
+    if (s_trimVerifyBudget == 0) break;               // verify quota spent this pass
+    s_trimVerifyBudget--;
     if (!verifySessionStored(pid, n, bytes)) {
       Serial.printf("[CONN] keep %s session %lu — server did not confirm %lu bytes\n",
                     pid, (unsigned long)n, (unsigned long)bytes);
@@ -681,6 +698,7 @@ static void trimAllPatients()
   File root = SD_MMC.open("/sate/patients");
   if (!root) return;
   uint32_t budget = TRIM_MAX_FREES_PER_PASS;
+  s_trimVerifyBudget = TRIM_MAX_VERIFIES_PER_PASS;   // one verify quota per sweep
   File entry;
   while ((entry = root.openNextFile())) {
     if (!entry.isDirectory()) { entry.close(); continue; }
@@ -1555,6 +1573,7 @@ static void uploadStep()
       // trim (as this used to), a delete tapped during trim's verify network call
       // could race trim's own walk of this patient dir. Keep the flag up until the
       // whole SD-reclaim tail is done.
+      s_trimVerifyBudget = TRIM_MAX_VERIFIES_PER_PASS;  // fresh quota for this tail
       trimPatientSyncedAudio(upPid);
       strikeClear(upPid, upNum);
       upResumeClearIf(upPid, upNum);
@@ -1712,6 +1731,12 @@ static void sendSessionOverBle(int tableIdx)
   // app concatenates the blocks and rebuilds the file. `sent` counts every
   // byte actually notified so a dropped packet / lost link can never end in a
   // file_done claim over a truncated WAV.
+  //
+  // The stream can run for minutes, and a take can START mid-stream (the
+  // record path claims the card with uiSdBusy but only waits for the net task
+  // when its probe fails). Bail out the moment the UI core claims the card:
+  // sent stays < total, so no file_done claim is ever made over the partial
+  // transfer and the app discards it. The session stays pending and re-sends.
   uint32_t sent = 0;
   bool txOk = true;
   if (segmented) {
@@ -1722,14 +1747,14 @@ static void sendSessionOverBle(int tableIdx)
     buildWavHeader(hdr, total > 44 ? total - 44 : 0);
     txOk = notifyFramed(chData, hdr, sizeof(hdr));
     if (txOk) sent += sizeof(hdr);
-    for (int k = 0; txOk && bleClientConnected; k++) {
+    for (int k = 0; txOk && bleClientConnected && !uiSdBusy; k++) {
       sessionPartFile(pp, sizeof(pp), pe.patientId, pe.num, k);
       if (!SD_MMC.exists(pp)) break;
       File f = SD_MMC.open(pp, FILE_READ);
       if (!f) { txOk = false; break; }
       if (f.size() > 44) {
         f.seek(44);
-        while (f.available() && bleClientConnected) {
+        while (f.available() && bleClientConnected && !uiSdBusy) {
           size_t got = f.read(ioChunk, sizeof(ioChunk));
           if (!got) break;
           if (!notifyFramed(chData, ioChunk, got)) { txOk = false; break; }
@@ -1744,7 +1769,7 @@ static void sendSessionOverBle(int tableIdx)
       statusErr("send_session", "session not found");
       return;
     }
-    while (wf.available() && bleClientConnected) {
+    while (wf.available() && bleClientConnected && !uiSdBusy) {
       size_t got = wf.read(ioChunk, sizeof(ioChunk));
       if (!got) break;
       if (!notifyFramed(chData, ioChunk, got)) { txOk = false; break; }
@@ -2057,6 +2082,13 @@ static void handleBleOp(const char *json)
     statusOk("cancel_wifi");
 
   } else if (!strcmp(op, "list_sessions")) {
+    // uiSdBusy gate (same contract as connLoop's online SD block): while the UI
+    // core owns the card (recording / saving / playback / delete), a BLE bridge
+    // sync must not walk it - a list taken mid-take reports the in-progress
+    // session as pending, and the send/mark that follow would stream a partial
+    // file and tombstone a take that is still being recorded. Refuse with a
+    // clean error; the app simply retries once the take is over.
+    if (uiSdBusy) { statusErr("list_sessions", "recorder busy - try again"); return; }
     scanPending();
     char out[2048];
     size_t o = snprintf(out, sizeof(out), "{\"ev\":\"sessions\",\"items\":[");
@@ -2070,11 +2102,19 @@ static void handleBleOp(const char *json)
     statusNotify(out);
 
   } else if (!strcmp(op, "send_session")) {
+    // Same uiSdBusy gate as list_sessions: never stream session files while the
+    // UI core owns the card (the reads would fight a live capture's writes).
+    if (uiSdBusy) { statusErr("send_session", "recorder busy - try again"); return; }
     int n = doc["n"] | 0;
     if (n >= 1 && n <= pendCount) sendSessionOverBle(n - 1);
     else statusErr("send_session", "unknown session");
 
   } else if (!strcmp(op, "mark_synced")) {
+    // uiSdBusy gate: a marker written while the UI core is mid-take could
+    // tombstone the very session being recorded - the finished take would then
+    // be skipped by every pending scan forever while the server only holds the
+    // fragment the app pulled. Refuse; the app retries after the take.
+    if (uiSdBusy) { statusErr("mark_synced", "recorder busy - try again"); return; }
     // Resolve the session by IDENTITY (patient_id + session number), never by a
     // bare table position: the app may send an index from a list that a
     // device-side delete has since invalidated, and a marker written on the
@@ -2102,6 +2142,8 @@ static void handleBleOp(const char *json)
     }
 
   } else if (!strcmp(op, "set_patients")) {
+    // uiSdBusy gate: patients.json is on the same card the UI core owns.
+    if (uiSdBusy) { statusErr("set_patients", "recorder busy - try again"); return; }
     JsonArray arr = doc["patients"].as<JsonArray>();
     if (!arr.isNull()) {
       File f = SD_MMC.open("/sate/patients.json", FILE_WRITE);
@@ -2145,9 +2187,13 @@ static void runRemoteCommand(const char *op)
     // Full re-backup: re-send every session whose audio is still on the card,
     // including ones already marked synced. Recovers sessions the server
     // acknowledged but never actually stored.
-    resyncAll();
+    // DEFERRED: pollCommands() runs outside the netSdBusy/!uiSdBusy bracket, so
+    // walking + mutating the card right here made connNetSdIdle() lie to the UI
+    // core (its delete/remount handshake proceeded mid-walk). connLoop consumes
+    // the flag inside the bracket, next to patientsFetchDue.
+    resyncDue = true;
   } else if (!strcmp(op, "reload_patients")) {
-    fetchPatients();
+    patientsFetchDue = true;  // deferred into the SD bracket (writes patients.json)
   } else if (!strcmp(op, "record")) {
     sateHookRecord();        // loop() runs the capture when the UI is idle
   } else if (!strcmp(op, "stop")) {
@@ -2603,6 +2649,10 @@ void connLoop()
             trimAllPatients();
           }
         }
+        if (resyncDue) {
+          resyncDue = false;
+          resyncAll();           // remote resync_all, deferred into the SD bracket
+        }
         if (patientsFetchDue) {
           patientsFetchDue = false;
           fetchPatients();
@@ -2677,9 +2727,14 @@ void connLoop()
         }
         if (timeAfter(now, nextAdvRefresh)) {
           nextAdvRefresh = now + ADV_REFRESH_PERIOD_MS;
-          netSdBusy = true;
-          scanPending();
-          netSdBusy = false;
+          // Same uiSdBusy contract as the online SD block: never walk the card
+          // while the UI core owns it (a BLE-mode take blocks loop(), not us).
+          // The advert just reuses the cached pending count until the take ends.
+          if (!uiSdBusy) {
+            netSdBusy = true;
+            scanPending();
+            netSdBusy = false;
+          }
           bleUpdateAdvertising();
         }
       }
