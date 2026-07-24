@@ -210,7 +210,10 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   meant the net task never started and the unit went off the air for the whole take: no heartbeat, no
   remote `stop`, no serial, unstoppable except at the button or the ~62-min ceiling. A server-started
   take, with nobody at the device, just goes dark. `setup()` sets a pending flag; `loop()` resumes once
-  the net task is up (or ~8 s in, if offline). This shipped and was caught on the bench - don't undo it.
+  the net task is up — and if Wi-Fi hasn't associated in ~8 s, the offline fallback STARTS the net
+  task itself (provisioned + real crash-mark only) before entering the blocking capture, so the
+  resumed take keeps Wi-Fi retries/BLE, the remote `stop`, the heartbeat, and the OTA health-confirm
+  even when the AP is down at boot. This shipped and was caught on the bench - don't undo it.
   The same rule applies to anything else that blocks for a user-controlled duration.
 - **Remote `stop` (fw >=1.5.15) is latched only while a take is ARMED** (`recTakeArmed`, set before the
   take's start sequence, cleared when capture returns). Do NOT "drop stale stops" by clearing the flag

@@ -116,7 +116,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.29";   // Sessions list shows only recordings with audio on the card — synced+reclaimed tombstones no longer clutter it as phantom records
+static const char    *FIRMWARE_VERSION  = "1.5.30";   // offline crash-resume starts the net task before blocking, so a take resumed with Wi-Fi down stays stoppable (heartbeat/BLE/OTA-confirm)
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -288,6 +288,7 @@ static void loadTotalRecordings();
 static void bumpTotalRecordings();
 static void recCrashMark(const char *patientId, uint32_t sessionNum, uint32_t pcmCap);
 static void recCrashClear();
+static bool recCrashMarkPresent();
 static void updateConnBadge();
 static void hideProgressOverlay();
 static void showSavingOverlay();
@@ -921,6 +922,17 @@ static void recCrashClear()
   g_prefs.begin("sate-rec", false);
   g_prefs.clear();   // drops active/pid/sess/tries in one shot
   g_prefs.end();
+}
+
+// Cheap probe: does an interrupted take's crash-mark sit in NVS? Used by
+// loop()'s resume gate to decide whether the offline fallback must bring the
+// net task up before the resume (which BLOCKS inside the capture until Stop).
+static bool recCrashMarkPresent()
+{
+  g_prefs.begin("sate-rec", true);
+  bool present = g_prefs.getUChar("active", 0) == 1 && g_prefs.getUInt("sess", 0) != 0;
+  g_prefs.end();
+  return present;
 }
 
 static lv_obj_t *makeActionButton(lv_obj_t *parent, const char *text,
@@ -3974,6 +3986,19 @@ void loop()
   if (g_resumePending && (currentState == HOME || !deviceReady()) &&
       (connNetTaskStarted() || (millis() - g_bootMs) > 8000)) {
     g_resumePending = false;
+    // Offline fallback (8 s and the net task never came up): the resume BLOCKS
+    // loop() inside the capture until Stop, and the net task normally starts
+    // only after Wi-Fi associates (enterWifiOnline -> g_wantNetTask, evaluated
+    // by connLoop, which only THIS loop drives until then). Start it NOW, so
+    // core 0 keeps driving Wi-Fi retries / the BLE fallback, the remote "stop",
+    // the heartbeat, and the OTA health-confirm for the whole resumed take - a
+    // boot where the AP is down (mains outage that killed recorder and AP
+    // together) must not go dark until the ~62-min ceiling (the 1.5.17 failure,
+    // offline flavour). Skipped when there is nothing resumable or the device
+    // is unprovisioned: those paths return without blocking, and provisioning
+    // needs connLoop() on the main loop for the register TLS heap headroom.
+    if (!connNetTaskStarted() && deviceReady() && recCrashMarkPresent())
+      connStartNetTask();
     maybeResumeRecording();
   }
   serviceFactoryResetButton(); // hold BOOT 5 s -> wipe config + reboot
