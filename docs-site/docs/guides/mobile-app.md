@@ -27,7 +27,7 @@ commands, and shows processed reports.
 <div class="spec-tile"><div class="k">Device families</div><div class="v">3</div></div>
 </div>
 
-:::warning Dev build required
+:::warning[Dev build required]
 `react-native-ble-plx` and the Plaud SDK are native modules, so **Expo Go cannot load them** — run
 `npx expo run:ios`. `getSharedBleManager()` throws a descriptive error outside a dev build
 (`src/ble/bleManager.ts`). JS changes hot-reload via Metro; native changes need a rebuild.

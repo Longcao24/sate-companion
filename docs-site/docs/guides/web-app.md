@@ -39,7 +39,7 @@ to `src/`.
 | Analytics | PostHog (`posthog-js`) |
 | Version | `package.json` `1.5.9` |
 
-:::warning Deploy-breaker: `noUnusedLocals` + `noUnusedParameters`
+:::warning[Deploy-breaker: `noUnusedLocals` + `noUnusedParameters`]
 `tsconfig.app.json` sets both to `true`, and the build script is `tsc -b && vite build` — so `tsc`
 runs as a real build gate, not just an editor hint. A merely-unused variable or import is `TS6133`
 and **fails the production build**, even though `vite dev` and most editors won't flag it as an

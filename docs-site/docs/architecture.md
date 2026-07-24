@@ -51,7 +51,7 @@ call. So the path is **edge fn → Cloudflare → Storage**: Cloudflare reads th
 Storage; the edge function never streams audio to it, and the device never uploads to
 Cloudflare directly.
 
-:::note Upload transport history
+:::note[Upload transport history]
 Firmware **before 1.2.10** streamed device audio to Supabase over a **WebSocket**. **From
 fw 1.2.10 onward** the transport is **resumable chunked HTTPS** (`POST /sessions/chunk`) —
 the server reassembles the ~1 MB slices and byte-verifies before accepting. The change was
@@ -84,7 +84,7 @@ stateDiagram-v2
     error --> [*]
 ```
 
-:::warning Never move the AI call back into an edge/Worker fetch
+:::warning[Never move the AI call back into an edge/Worker fetch]
 Any serverless request (Supabase edge **or** a plain CF Worker with its ~100 s 524
 origin timeout) will kill a long transcription. The long call must live in the
 container. See [Backend pipeline](guides/backend).

@@ -52,7 +52,7 @@ core-0 network task (`connLoop()`) polls the server for commands, uploads pendin
 in ~1 MB resumable chunks over HTTPS, and — when Wi-Fi is unavailable — advertises over BLE
 so the companion app can provision, bridge-sync, and control the device.
 
-:::danger The resume must run from `loop()`, never from `setup()`
+:::danger[The resume must run from `loop()`, never from `setup()`]
 Resuming re-enters the capture, which **blocks until Stop**. Calling it at the end of
 `setup()` therefore means `loop()` never runs — and `connStartNetTask()` lives in
 `loop()`. The unit records on with **no heartbeat, no remote `stop`, and no serial**:
@@ -150,7 +150,7 @@ set to **+30 dB** (`ES8311_MIC_GAIN_30DB`, `es8311.cpp`). The I2S link runs in
 `SATE_Recorder.ino`). Capture and playback both stream through a single static
 4 KB buffer (`audioChunk`) — no length-proportional allocation.
 
-:::danger Do not move battery sense to GPIO34
+:::danger[Do not move battery sense to GPIO34]
 GPIO34 is a classic-ESP32 ADC pin, wrong on the S3, and it bootloops the board (the fw 1.0.6
 mistake). GPIO9 is the fix.
 :::
@@ -198,7 +198,7 @@ online **or** BLE), while USB serial is always available when tethered.
 | Chunked upload | `POST /api/sessions/chunk?...&offset=&final=&total=` | `beginUpload()`, `uploadStep()`, `sendSessionChunk()` |
 | Verify durable storage | `GET /api/sessions/verify?patient_id=&session_number=&bytes=` | `verifySessionStored()` |
 
-:::note Upload transport history
+:::note[Upload transport history]
 Earlier firmware streamed audio to Supabase over a **WebSocket**. The current path is the
 **resumable chunked HTTPS** upload above (`POST /sessions/chunk`, `HTTPClient`): the server
 reassembles the ~1 MB slices and byte-verifies before accepting, so a dropped connection or a
@@ -270,7 +270,7 @@ The poll query string doubles as the **heartbeat**: it carries `pending`, `state
 - **Dual-slot requirement:** OTA only works because the partition scheme is `default_8MB`
   (two app slots). **Never** `huge_app` — see §7. See §9 for the rollback caveat.
 
-:::warning OTA with a large upload backlog
+:::warning[OTA with a large upload backlog]
 On a device with a big upload backlog, OTA fails `err-get-1`: the second TLS handshake can't
 get its ~40 KB contiguous block on a heap fragmented by hours of 1 MB chunks. **Queue
 `reboot` first, wait for it to come back, then queue `ota`** (runbook recipe).
@@ -315,7 +315,7 @@ At the wrap, the allocator recycles the **oldest audio-free tombstone** — a sl
 audio was already reclaimed after the server confirmed it. A slot that still holds real
 audio is never reused.
 
-:::danger Do not reintroduce renumbering
+:::danger[Do not reintroduce renumbering]
 The old design shifted later sessions down to keep numbering contiguous, journaled to
 NVS so a reboot mid-shift could heal. It produced: a renumber running under a live
 upload that **spliced two takes into one server WAV**, a trash tap that deleted the

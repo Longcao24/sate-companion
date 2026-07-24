@@ -19,7 +19,7 @@ Project **SATE**, ref `zlgdpivcbmaodgokkdvz`, `https://zlgdpivcbmaodgokkdvz.supa
 
 ## 1. Overview — why processing is ASYNC
 
-:::danger The single most important rule in this pipeline
+:::danger[The single most important rule in this pipeline]
 Never run the AI transcription from an edge function or a plain Worker `fetch`.
 :::
 
@@ -154,7 +154,7 @@ Two more service-only identities exist for the async back-half:
 - The Worker `/tick` is gated on a shared `TICK_SECRET` (constant string compare) shared with the
   pg_cron caller.
 
-:::warning `verify_jwt` MUST stay `false`
+:::warning[`verify_jwt` MUST stay `false`]
 On `device-api`, `process-device-session`, and `finalize-session` — the device has no Supabase user
 JWT; it presents a device key the function validates itself. Redeploying with the MCP/CLI default
 `verify_jwt:true` breaks recorder registration and the pipeline. Always pass `--no-verify-jwt` /

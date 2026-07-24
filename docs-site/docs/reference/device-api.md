@@ -270,7 +270,7 @@ this endpoint.
 
 ## Auth gaps {#auth-gaps}
 
-:::warning Known gaps (audit 2026-07-22) — fix before GA
+:::warning[Known gaps (audit 2026-07-22) — fix before GA]
 - **`POST /firmware` (`publishFirmware`) is registered above the `/admin` gate.** It only requires
   a valid user JWT, not `isAdmin()`, so any authenticated user can publish a fleet-wide OTA image
   today. `publishFirmware` does validate the upload itself (plain semver version, `0xE9` ESP32

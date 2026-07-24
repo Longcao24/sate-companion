@@ -18,7 +18,7 @@ It drives a real device and asserts on the firmware's **own serial log** plus th
 <span class="sate-badge">sate CLI</span>
 </div>
 
-:::tip Use the `sate` CLI
+:::tip[Use the `sate` CLI]
 Everything below is wrapped by a single professional command — `sate` — which also
 flashes firmware and diagnoses hardware faults:
 
@@ -93,7 +93,7 @@ equivalent.
 | `reboot` | — | interrupt a take mid-capture |
 | `sync_now` / `resync_all` | — | drive the upload + verified-trim paths |
 
-:::danger A serial reset cannot reboot a recording device
+:::danger[A serial reset cannot reboot a recording device]
 On the debug build `Serial` is USB-CDC, and its DTR/RTS reset is handled **in
 software** by the CDC stack. The capture loop never services USB, so the reset pulse
 is simply never seen — the board keeps recording and the test sees nothing at all.

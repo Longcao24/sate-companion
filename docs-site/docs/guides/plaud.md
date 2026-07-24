@@ -23,7 +23,7 @@ What makes Plaud different from every other integration in this codebase is risk
   (`CLAUDE.md`: "no native rebuild, no binding/lock concern"). Worst case is a dropped BLE
   session.
 
-:::danger Plaud device-lock
+:::danger[Plaud device-lock]
 **Plaud**: the device binds to a caller-supplied identity (`deviceToken` / `user_id`) at the
 SDK level. **If that identity is inconsistent across binds — e.g. the same physical device
 gets bound to a different account or a randomly-regenerated identity — the device can become

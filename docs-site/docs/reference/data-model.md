@@ -20,7 +20,7 @@ Grounding: `cloudflare/schema.sql`, `cloudflare/src/policy.ts`,
 
 <div class="badge-row"><span class="sate-badge">Supabase Postgres + Cloudflare D1</span><span class="sate-badge">project zlgdpivcbmaodgokkdvz</span><span class="sate-badge">RLS deny-by-default</span></div>
 
-:::warning No committed SQL for the live async state machine
+:::warning[No committed SQL for the live async state machine]
 The live Postgres schema has columns and an RPC (`sate_device_sessions.status`, `attempts`,
 `processing_started_at`, `claim_next_session()`, `requeue_stale_sessions()`, `requeue_session()`)
 that were added by a migration named `async_processor_state_machine` (per `CLAUDE.md` /

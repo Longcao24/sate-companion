@@ -94,7 +94,7 @@ why drops only appeared at low battery. It must go through the
 SoftDevice API (the SoftDevice owns POWER); the XIAO populates the required DC/DC
 inductors, so it is safe.
 
-:::danger Seeed-core flash trap (0x27000 vs 0x26000)
+:::danger[Seeed-core flash trap (0x27000 vs 0x26000)]
 Build **only** with the Seeed core (`FQBN Seeeduino:nrf52:xiaonRF52840SensePlus`),
 never `adafruit:nrf52:feather52840sense`. The Adafruit Feather variant links the
 app at **`0x26000`** (S140 6.1.1 layout), which overwrites the last flash page of

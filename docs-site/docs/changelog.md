@@ -37,7 +37,7 @@ timeline
 | Web app | `react_app_sate-ui_update/package.json` `version` | **1.5.9** |
 | Backend (`device-api`) | in-comment `[vNN]` header of `.../functions/device-api/index.ts` | **v18** |
 
-:::note Pendant version field (new)
+:::note[Pendant version field (new)]
 `SATE_Pendant.ino` now has a `FIRMWARE_VERSION` constant (`1.0.0`, added 2026-07-22)
 so releases can be logged here. It is **not yet exposed over BLE** — add a version
 characteristic (or a Device Information Service firmware-revision string) so the app
@@ -78,7 +78,7 @@ can read/verify what's flashed. The device already ships a `BLEDfu` OTA service.
 | 1.0.1 | 2026-06-14 | Companion app → Supabase; chunk-upload path fix. |
 | 0.8.2 | 2026-06-13 | Record long sessions as 1-min segments + merge. |
 
-:::note Upload transport migration
+:::note[Upload transport migration]
 Firmware **before 1.2.10** streamed device audio to Supabase over a **WebSocket**. **From
 fw 1.2.10 onward** it uses **resumable chunked HTTPS** (`POST /sessions/chunk`, byte-verified
 on assembly) for a more **stable transfer** — it survives connection drops and mid-upload

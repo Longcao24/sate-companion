@@ -39,7 +39,7 @@ Bump `FIRMWARE_VERSION` in `SATE_Recorder/SATE_Recorder.ino`, then compile with 
 arduino-cli compile --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi" SATE_Recorder
 ```
 
-:::danger Partition scheme
+:::danger[Partition scheme]
 `PartitionScheme` MUST be `default_8MB` (two OTA slots `ota_0`+`ota_1`). **Never
 `huge_app`** — it's a single slot; flashing it silently kills OTA (the device still
 records/registers but can't self-update).
@@ -69,7 +69,7 @@ Two ways:
   `execute_sql`). Then verify the public URL returns 200 and its SHA-256 matches the
   local bin.
 
-:::warning Publish validation & the admin-gate gap
+:::warning[Publish validation & the admin-gate gap]
 `publishFirmware` now validates the version is plain semver and the image is a real
 ESP32 app bin (`0xE9` magic, ≤4 MB). **But** the `POST /firmware` route is still
 registered above the `/admin` gate — any authenticated user can publish fleet
@@ -83,7 +83,7 @@ can't get the ~40 KB for the 2nd TLS handshake). The recipe is: queue **`reboot`
 wait for it to come back, **then** queue **`ota`** — the first poll after boot
 flashes with a clean heap.
 
-:::danger No device-side rollback (open)
+:::danger[No device-side rollback (open)]
 The firmware doesn't override `verifyOta()`, so the Arduino core marks a new image
 valid in early init **before** `setup()` runs. A well-formed-but-bad image (wrong
 build, the `LV_TICK_CUSTOM=0` trap, `huge_app`) is committed and **never rolls back**
@@ -123,7 +123,7 @@ The two delete scenarios (`delete_journal`, `delete_during_upload`) stay outside
 gate because they need a human tap on the Sessions screen — run them from the
 desktop Debugger before a release that touches delete/renumber code.
 
-:::danger Regression rule — every new feature
+:::danger[Regression rule — every new feature]
 Any change — firmware, harness, backend — re-runs the standard suite **before it
 merges**, not just before a release. `sate ci` *is* the regression suite: the
 1.5.16 → 1.5.18 chain is the proof, where each fix exposed the next latent bug

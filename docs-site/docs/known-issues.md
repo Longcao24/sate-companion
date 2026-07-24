@@ -32,7 +32,7 @@ pie showData
 
 These can lose or mismatch a patient's recording — the worst outcomes.
 
-:::tip Recorder firmware — 55 audited defects fixed in fw 1.5.20 (2026-07-23)
+:::tip[Recorder firmware — 55 audited defects fixed in fw 1.5.20 (2026-07-23)]
 An 84-agent adversarial audit of the recorder firmware found 55 confirmed defects
 (12 critical); all are fixed in **fw 1.5.20**, re-verified (56 verdicts, 0 still-broken),
 compiles clean. Highlights: **sessions no longer renumber** (monotonic, wrap at 99 — this

@@ -80,7 +80,7 @@ arduino-cli compile --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=de
 arduino-cli upload -p <port> --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi" SATE_Recorder
 ```
 
-:::danger Two silent bricks — check these first
+:::danger[Two silent bricks — check these first]
 - **`PartitionScheme` MUST be `default_8MB`** (dual OTA slots). `huge_app` silently kills OTA.
 - **`lv_conf.h` `LV_TICK_CUSTOM` MUST be `1`.** If `0`, the boot spinner freezes at
   frame 1 while `setup()` still finishes — looks like a bad flash, isn't. Reinstalling
@@ -136,7 +136,7 @@ Deploy is a **git subtree** to a separate repo that Vercel builds:
 git subtree push --prefix=react_app_sate-ui_update webapp <branch>
 ```
 
-:::warning Deploy-breaker
+:::warning[Deploy-breaker]
 The web build runs `tsc -b` with `noUnusedLocals`, so a merely-unused variable fails
 Vercel even though a plain typecheck passes. Always `npm run build` before pushing the
 web subtree.
@@ -156,7 +156,7 @@ supabase functions deploy mint-plaud-token --no-verify-jwt
   holds the transcription call — deployed as a Cloudflare Container, never an edge fn.
 - **cloudflare/** is the Workers port of the backend.
 
-:::warning Never redeploy with `verify_jwt:true`
+:::warning[Never redeploy with `verify_jwt:true`]
 The MCP default is `verify_jwt:true`; redeploying `device-api` or `mint-plaud-token` that
 way breaks recorder registration and Plaud token minting. Always pass `--no-verify-jwt`.
 :::
