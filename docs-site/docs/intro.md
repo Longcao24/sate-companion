@@ -18,7 +18,7 @@ slug: /
 <div class="badge-row">
   <span class="sate-badge">Recorder · fw 1.5.20</span>
   <span class="sate-badge">Pendant · fw 1.0.0</span>
-  <span class="sate-badge">device-api · v17</span>
+  <span class="sate-badge">device-api · v18</span>
   <span class="sate-badge ok"><span class="dot ok"></span> pipeline: async</span>
 </div>
 

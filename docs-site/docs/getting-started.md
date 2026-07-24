@@ -26,7 +26,7 @@ Each component is versioned independently. These are read directly from the code
 <div class="spec-tile"><div class="k">Pendant fw</div><div class="v">1.0.0</div></div>
 <div class="spec-tile"><div class="k">Mobile app</div><div class="v">0.1.0</div></div>
 <div class="spec-tile"><div class="k">Web app</div><div class="v">1.5.9</div></div>
-<div class="spec-tile"><div class="k">device-api</div><div class="v">v17</div></div>
+<div class="spec-tile"><div class="k">device-api</div><div class="v">v18</div></div>
 <div class="spec-tile"><div class="k">Expo SDK</div><div class="v">54</div></div>
 <div class="spec-tile"><div class="k">React Native</div><div class="v">0.81.5</div></div>
 <div class="spec-tile"><div class="k">React</div><div class="v">19.1.0</div></div>
