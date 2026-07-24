@@ -52,10 +52,12 @@ Storage; the edge function never streams audio to it, and the device never uploa
 Cloudflare directly.
 
 :::note Upload transport history
-Earlier firmware streamed device audio to Supabase over a **WebSocket**. The current path is
-**resumable chunked HTTPS** (`POST /sessions/chunk`) — the server reassembles the ~1 MB
-slices and byte-verifies before accepting, which survives drops and mid-upload reboots that a
-single long-lived socket could not.
+Firmware **before 1.2.10** streamed device audio to Supabase over a **WebSocket**. **From
+fw 1.2.10 onward** the transport is **resumable chunked HTTPS** (`POST /sessions/chunk`) —
+the server reassembles the ~1 MB slices and byte-verifies before accepting. The change was
+made for a more **stable transfer**: chunked HTTPS survives connection drops and mid-upload
+reboots that a single long-lived WebSocket could not (it just re-sends the missing slices
+from the last acked offset).
 :::
 
 ## Why processing is asynchronous

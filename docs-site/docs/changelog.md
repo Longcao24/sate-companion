@@ -20,7 +20,7 @@ recorder firmware, the app, and the web app do **not** share a number).
 ```mermaid
 timeline
   title Recorder firmware timeline
-  2026-06 : 0.8.2 segmented WAV : 1.0.1 chunk upload : 1.0.6 GPIO9 battery fix
+  2026-06 : 0.8.2 segmented WAV : 1.0.1 chunk upload : 1.0.6 GPIO9 battery fix : 1.2.10 WS to chunked HTTPS
   2026-06 to 07 : 1.5.0 SLP UI + telemetry : 1.5.1-1.5.8 battery/mic/loudness
   2026-07 : 1.5.9 device-holds-only-copy : 1.5.12 reclaim keep-newest-5
   2026-07-22 : 1.5.13 server-verified trim + auto-resume + crash-safe delete : 1.5.14 screen mirror
@@ -71,16 +71,18 @@ can read/verify what's flashed. The device already ships a `BLEDfu` OTA service.
 | 1.5.5 – 1.5.8 | 2026-07-01 | Battery calibration, Wi-Fi TX power, mic gain, loudness. |
 | 1.5.1 – 1.5.4 | 2026-07-01 | Unstick save; charging + battery fix; add cell-mV telemetry. |
 | 1.5.0 | 2026-06-30 | SLP-focused recorder UI, auto-dim, device telemetry to admin. |
+| 1.2.10 | 2026-06 | **Upload transport: WebSocket → resumable chunked HTTPS** (`POST /sessions/chunk`) for a more stable transfer — survives drops and mid-upload reboots by resuming from the last acked offset, which a single long-lived socket could not. |
 | 1.0.6 | 2026-06 | Battery ADC on GPIO34 (wrong for S3) → bootloop; fixed by moving to GPIO9. |
 | 1.0.x | 2026-06-16 | OTA firmware updates, battery %, MAC onboarding, web update UI. |
 | 1.0.1 | 2026-06-14 | Companion app → Supabase; chunk-upload path fix. |
 | 0.8.2 | 2026-06-13 | Record long sessions as 1-min segments + merge. |
 
 :::note Upload transport migration
-Early builds streamed device audio to Supabase over a **WebSocket**. That was replaced by
-the current **resumable chunked HTTPS** upload (`POST /sessions/chunk`, byte-verified on
-assembly), which survives connection drops and mid-upload reboots a single long-lived socket
-could not. See [Architecture → Who triggers what](architecture).
+Firmware **before 1.2.10** streamed device audio to Supabase over a **WebSocket**. **From
+fw 1.2.10 onward** it uses **resumable chunked HTTPS** (`POST /sessions/chunk`, byte-verified
+on assembly) for a more **stable transfer** — it survives connection drops and mid-upload
+reboots a single long-lived WebSocket could not, resuming from the last acked offset. See
+[Architecture → Who triggers what](architecture).
 :::
 
 ## Pendant firmware
