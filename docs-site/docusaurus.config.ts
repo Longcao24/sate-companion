@@ -85,7 +85,6 @@ const config: Config = {
       },
       items: [
         {type: 'docSidebar', sidebarId: 'docs', position: 'left', label: 'Docs'},
-        {href: 'https://sate-monitor.pages.dev', label: 'Monitor', position: 'right'},
         {href: 'https://sate-status.longcao.workers.dev', label: 'Status', position: 'right'},
       ],
     },
@@ -121,7 +120,6 @@ const config: Config = {
         {
           title: 'Operations',
           items: [
-            {label: 'Service monitor', href: 'https://sate-monitor.pages.dev'},
             {label: 'Status page', href: 'https://sate-status.longcao.workers.dev'},
             {label: 'Firmware release', to: '/operations/firmware-release'},
             {label: 'Hardware testing', to: '/operations/hardware-testing'},
