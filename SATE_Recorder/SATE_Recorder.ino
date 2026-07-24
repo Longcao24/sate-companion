@@ -116,7 +116,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.24";   // keep-newest-5 device-wide, fail-safe when the live dir is unknown (never reclaim-all)
+static const char    *FIRMWARE_VERSION  = "1.5.25";   // Standalone is the DEFAULT target — a server roster is not an assignment; only an explicit assign picks a patient
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -413,9 +413,10 @@ void sateHookSetActivePatient(const char *id, const char *name, const char *age,
 // current slot). Runs only from loop() (UI task).
 static void applyActivePatient()
 {
-  // A real patient supersedes the standalone placeholder: drop it first so the
-  // pushed patient takes slot 0 instead of sitting next to "Standalone".
-  if (g_standalonePatient) { g_patientCount = 0; g_standalonePatient = false; }
+  // An explicit assignment selects that patient. Standalone STAYS in the roster
+  // so the user can go back to recording standalone reports without waiting for
+  // the server to push anything.
+  g_standalonePatient = false;
   for (int i = 0; i < g_patientCount; i++) {
     if (!strcmp(g_patients[i].patientId, g_activePatientReq.patientId)) {
       g_patients[i] = g_activePatientReq;
@@ -433,18 +434,30 @@ static void applyActivePatient()
 // (or app) to assign a patient. Sessions upload with patient_id "Standalone";
 // any real patient pushed later replaces this (see applyActivePatient /
 // loadPatientsFromSd). Idempotent.
+// Index of the standalone bucket in g_patients, or -1.
+static int standaloneIndex()
+{
+  for (int i = 0; i < g_patientCount; i++)
+    if (!strcmp(g_patients[i].patientId, "Standalone")) return i;
+  return -1;
+}
+
 static void ensureStandalonePatient()
 {
-  if (g_patientCount > 0) return;
-  SatePatient &p = g_patients[0];
+  if (standaloneIndex() >= 0) return;          // already in the roster
+  if (g_patientCount >= MAX_PATIENTS) return;  // no room: roster is full of real patients
+  SatePatient &p = g_patients[g_patientCount];
   snprintf(p.patientId,   sizeof(p.patientId),   "%s", "Standalone");
   snprintf(p.displayName, sizeof(p.displayName), "%s", "Standalone");
   snprintf(p.age,         sizeof(p.age),         "%s", "-");
   snprintf(p.sessionType, sizeof(p.sessionType), "%s", "Standalone");
   snprintf(p.clinician,   sizeof(p.clinician),   "%s", "-");
-  g_patientCount       = 1;
-  currentPatientIndex  = 0;
-  g_standalonePatient  = true;
+  const int idx = g_patientCount++;
+  // Standalone is the DEFAULT target: the recorder records standalone audio
+  // reports unless someone explicitly assigns a patient. Only take the selection
+  // if nothing is selected yet - never steal it from an explicit assignment.
+  if (g_patientCount == 1) currentPatientIndex = idx;
+  g_standalonePatient  = (currentPatientIndex == idx);
   // Tell connectivity which dir is live straight away. Retention refuses to run
   // until it knows, so leaving this to whoever calls patientDirPath() first meant
   // an idle unit never reclaimed anything (and, briefly, reclaimed everything).
@@ -1373,7 +1386,7 @@ static void loadPatientsFromSd()
   // old index would silently point the next — possibly remote — take at a
   // different patient.
   char selId[20] = "";
-  if (!g_standalonePatient && g_patientCount > 0)
+  if (g_patientCount > 0)
     snprintf(selId, sizeof(selId), "%s", g_patients[currentPatientIndex].patientId);
 
   int n = 0;
@@ -1389,14 +1402,21 @@ static void loadPatientsFromSd()
   }
   if (n > 0) {
     g_patientCount = n;
-    g_standalonePatient = false;   // real roster supersedes the placeholder
-    int sel = 0;                   // id gone from the roster -> fall back to 0
+    // A roster arriving from the server is NOT an assignment. Standalone stays in
+    // the roster and stays selected unless a patient was explicitly assigned
+    // (applyActivePatient) or picked on-device - otherwise the recorder silently
+    // filed every standalone report under whichever patient happened to be first.
+    ensureStandalonePatient();
+    int sel = standaloneIndex();
+    if (sel < 0) sel = 0;
     if (selId[0]) {
-      for (int i = 0; i < n; i++)
+      for (int i = 0; i < g_patientCount; i++)
         if (!strcmp(g_patients[i].patientId, selId)) { sel = i; break; }
     }
     currentPatientIndex = sel;
-    Serial.printf("[SD] loaded %d patient(s)\n", n);
+    g_standalonePatient = (sel == standaloneIndex());
+    Serial.printf("[SD] loaded %d patient(s); active=%s\n",
+                  n, g_patients[currentPatientIndex].patientId);
   }
 }
 
