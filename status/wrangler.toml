@@ -1,0 +1,34 @@
+name = "sate-status"
+main = "src/worker.js"
+compatibility_date = "2026-07-01"
+
+# Probe every 5 minutes and record each service's status to D1.
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "sate-status"
+database_id = "42490c64-29fe-4380-a80b-2dcb68566891"
+
+# Optional: set a secret to gate the on-demand /check endpoint:
+#   npx wrangler secret put CHECK_KEY
+# Optional per-target auth (e.g. an admin JWT for device-api /admin/status):
+#   npx wrangler secret put <SECRET_NAME>   # then reference it via authSecret in TARGETS
+
+# ── Error-alert email ──────────────────────────────────────────────────────
+# Sends an email to the operator on any NEW error (a service down, an AI/audio/
+# processing error, a stuck job), and an all-clear when it resolves. Uses the
+# Cloudflare Email Sending binding — the EMAIL_FROM domain (mail.long-cao.dev)
+# must already be onboarded (Dashboard → Compute → Email Service). An un-onboarded
+# sender fails at send() time, not deploy time.
+[[send_email]]
+name = "EMAIL"
+
+[vars]
+EMAIL_FROM = "noreply@mail.long-cao.dev"
+EMAIL_FROM_NAME = "SATE Alerts"
+
+# Secrets (set with `npx wrangler secret put <NAME>`):
+#   HEALTH_ALERT_KEY  — the shared key gating device-api GET /health/alerts (see below)
+#   SUPA_ANON         — the Supabase anon apikey (device-api requires an apikey header)
