@@ -339,6 +339,43 @@ static void saveConfig()
   provisioned = true;
 }
 
+// --- session ownership --------------------------------------------------------
+// cfgDeviceId is the server-assigned identity of the CLAIM, not the hardware:
+// it changes on every (re)claim, including a claim by a DIFFERENT account.
+// connFactoryReset() clears only the "sate" namespace and touches nothing on
+// the SD card, so takes recorded under a previous claim survive an unclaim -
+// and must never upload under the next claim's key (another clinic's account
+// would durably receive this clinic's patient audio). Each take is therefore
+// stamped with the claiming device id at record time ("owner_dev" in the
+// session JSON, see saveMetadataToSd in the .ino), and the pending scan skips
+// any session whose stamp is not the current id.
+//
+// An UNSTAMPED take (pre-stamp firmware, or an unreadable JSON) has an UNKNOWN
+// owner, and the device cannot tell "clean device, first claim ever" from
+// "re-flashed at a depot and claimed by a NEW account while a prior owner's
+// unstamped audio still sits on the card" - no NVS record exists in either
+// case. So unknown never defaults to "current": unstamped takes are never
+// auto-uploaded. They stay on the card (never deleted) until the CURRENT
+// owner deliberately runs resync_all, the one licensed adoption point
+// (adoptSessionOwner below), which stamps them to the current claim.
+//
+// The "sate-own" namespace deliberately survives the factory reset: it
+// remembers the last claim's id so a change of hands is at least visible in
+// the boot log - it is diagnostics only, never an upload gate.
+static void ownerTrackId()
+{
+  char prev[48] = "";
+  prefs.begin("sate-own", false);
+  prefs.getString("id", prev, sizeof(prev));
+  if (cfgDeviceId[0] && strcmp(prev, cfgDeviceId)) {
+    if (prev[0])
+      Serial.printf("[CONN] claim id changed (%s -> %s) - prior takes stay parked\n",
+                    prev, cfgDeviceId);
+    prefs.putString("id", cfgDeviceId);
+  }
+  prefs.end();
+}
+
 static void sessionPath(char *out, size_t n, const char *pid, uint32_t num, const char *ext)
 {
   snprintf(out, n, "/sate/patients/%s/session_%04lu.%s", pid, (unsigned long)num, ext);
@@ -412,6 +449,34 @@ static bool pendDirty = true;
 // as the reassuring "all synced" / pending==0.
 static volatile bool sdFaultFlag = false;
 
+// True when session (pid, n) may upload under the CURRENT claim: only a take
+// whose "owner_dev" stamp IS the current device id. A take stamped with
+// another claim's id is another account's audio: skip it, never delete it -
+// unsynced audio is never dropped; it simply stays on the card, invisible to
+// the pending sweep (and to the BLE bridge, which lists from the same table).
+// An unstamped take (pre-stamp firmware, or an unreadable JSON) is UNKNOWN-
+// owner and is skipped too: a depot re-flash + re-claim by a new account
+// looks identical to a genuine first claim, so "owner unknown" must never
+// default to "upload to whoever holds it now" (see the ownership note above).
+// Recovery is the explicit resync_all, which adopts such takes to the
+// current claim.
+static bool sessionOwnedByCurrent(const char *pid, uint32_t n)
+{
+  char jp[160];
+  sessionPath(jp, sizeof(jp), pid, n, "json");
+  File jf = SD_MMC.open(jp, FILE_READ);
+  if (jf) {
+    JsonDocument meta(&s_jsonPsram);
+    DeserializationError err = deserializeJson(meta, jf);
+    jf.close();
+    if (err == DeserializationError::Ok) {
+      const char *owner = meta["owner_dev"] | "";
+      if (owner[0]) return strcmp(owner, cfgDeviceId) == 0;
+    }
+  }
+  return false;
+}
+
 // Scan all patient dirs for WAVs without a .synced marker. Cheap no-op when the
 // cached count is still valid. scanPending() wraps this in pendMux so the GUI
 // core and the net task never tear pendTable/pendCount when both walk at once.
@@ -443,6 +508,7 @@ static int scanPendingLocked()
     for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++) {
       if (ps.mark[i]) continue;                   // already on the server
       if (!ps.audio[i]) continue;                 // empty slot
+      if (!sessionOwnedByCurrent(pid, i)) continue; // another claim's take: never upload
       PendingEntry &pe = pendTable[pendCount++];
       snprintf(pe.patientId, sizeof(pe.patientId), "%s", pid);
       pe.num = i;
@@ -569,11 +635,16 @@ static void freeSessionAudioKeepMarker(const char *pid, uint32_t n)
   pendDirty = true;
 }
 
-// After a session in `pid` syncs, free the audio of any SYNCED session older than
-// the newest KEEP_AUDIO_SESSIONS in that patient dir. Allocation is monotonic
-// (a delete leaves its hole; a number is only reused once its old take is fully
-// gone), so among occupied slots a HIGHER number is a newer take: keep the
-// KEEP_AUDIO_SESSIONS highest occupied slots and consider the rest.
+// After a session in `pid` syncs, free the audio of any SYNCED take older than
+// the newest KEEP_AUDIO_SESSIONS audio-bearing takes in that patient dir.
+// "Newest" is by RECORDING ORDER, not session number: numbers wrap at
+// SESSION_NUM_MAX and recycle audio-free tombstones, so past the wrap the
+// newest takes carry the LOWEST numbers - ranking by number there kept stale
+// high-numbered tombstones and freed the genuinely newest takes' audio right
+// after each sync. Each take's JSON carries take_seq, a global monotonic
+// counter that never wraps (stamped by saveMetadataToSd in the .ino); rank the
+// audio-bearing slots by it. Tombstones hold no audio, so they are irrelevant
+// to what is kept and are not ranked at all.
 // Each freed session costs one HTTPS verify round-trip, and the sweep holds the
 // SD bus while it runs. Bound the work per pass so a big backlog cannot block a
 // take or a delete for minutes; the next sweep continues where this one stopped.
@@ -589,16 +660,50 @@ static const uint32_t TRIM_MAX_FREES_PER_PASS = 2;
 static const uint32_t TRIM_MAX_VERIFIES_PER_PASS = 8;
 static uint32_t s_trimVerifyBudget = TRIM_MAX_VERIFIES_PER_PASS;
 
+// Recency rank of an audio-bearing slot: the take_seq stamped into the session
+// JSON, offset past SESSION_NUM_MAX so any stamped take outranks every legacy
+// one (it was necessarily recorded after them). A take without take_seq
+// (legacy firmware) falls back to its session number, which pre-take_seq
+// firmwares only ever counted up.
+static uint32_t trimRecencyKey(const char *pid, uint32_t n)
+{
+  char jp[160];
+  sessionPath(jp, sizeof(jp), pid, n, "json");
+  File jf = SD_MMC.open(jp, FILE_READ);
+  if (jf) {
+    JsonDocument meta(&s_jsonPsram);
+    DeserializationError err = deserializeJson(meta, jf);
+    jf.close();
+    if (err == DeserializationError::Ok) {
+      uint32_t seq = meta["take_seq"] | 0;
+      if (seq) return SESSION_NUM_MAX + seq;
+    }
+  }
+  return n;
+}
+
 static uint32_t trimPatientSyncedAudio(const char *pid, uint32_t keep = KEEP_AUDIO_SESSIONS,
                                        uint32_t budget = TRIM_MAX_FREES_PER_PASS)
 {
   PatientDirScan ps;
   scanPatientDir(pid, &ps);
-  uint8_t  occ[SESSION_NUM_MAX];
   uint32_t cnt = 0;
   for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++)
-    if (ps.mark[i] || ps.audio[i]) occ[cnt++] = (uint8_t)i;  // tombstone = occupied
+    if (ps.audio[i]) cnt++;                           // only audio counts against keep
   if (cnt <= keep) return 0;                          // nothing beyond the newest N
+  // Insertion-sort the audio-bearing slots oldest-first by recency key; the
+  // JSON read per slot is why the cheap count above short-circuits first.
+  uint8_t  occ[SESSION_NUM_MAX];
+  uint32_t key[SESSION_NUM_MAX];
+  cnt = 0;
+  for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++) {
+    if (!ps.audio[i]) continue;
+    uint32_t k = trimRecencyKey(pid, i), j = cnt;
+    while (j > 0 && key[j - 1] > k) { key[j] = key[j - 1]; occ[j] = occ[j - 1]; j--; }
+    key[j] = k;
+    occ[j] = (uint8_t)i;
+    cnt++;
+  }
   char mark[200];
   uint32_t freed = 0;
   for (uint32_t j = 0; j < cnt - keep && freed < budget; j++) {
@@ -632,8 +737,50 @@ static uint32_t trimPatientSyncedAudio(const char *pid, uint32_t keep = KEEP_AUD
 static void upResumeClear();
 static void strikeClearAll();
 
+// Stamp session (pid, n) with the CURRENT claim's device id ("owner_dev"),
+// rewriting its JSON in place, so the pending sweep will upload it under the
+// current account. ONLY resyncAll may call this: adoption turns unknown-owner
+// (or prior-claim) audio into the current account's, which is safe only as a
+// deliberate act of the person physically holding the currently-claimed
+// device - never on a silent boot or claim. An unreadable JSON is replaced
+// with a minimal one (the uploader defaults every field it needs); the audio
+// itself is never touched. Returns true when the session is provably stamped
+// as ours; a failed stamp leaves the take parked, never guessed.
+static bool adoptSessionOwner(const char *pid, uint32_t n)
+{
+  if (!cfgDeviceId[0]) return false;   // unclaimed: nobody to adopt to
+  char jp[160];
+  sessionPath(jp, sizeof(jp), pid, n, "json");
+  JsonDocument meta(&s_jsonPsram);
+  File jf = SD_MMC.open(jp, FILE_READ);
+  if (jf) {
+    DeserializationError err = deserializeJson(meta, jf);
+    jf.close();
+    if (err != DeserializationError::Ok) meta.clear();   // junk JSON: rebuild minimal
+  }
+  const char *owner = meta["owner_dev"] | "";
+  if (owner[0] && !strcmp(owner, cfgDeviceId)) return true;   // already ours
+  meta["owner_dev"] = cfgDeviceId;
+  File out = SD_MMC.open(jp, FILE_WRITE);
+  if (!out) {
+    sdFaultFlag = true;
+    Serial.printf("[CONN] resync_all: cannot rewrite %s\n", jp);
+    return false;
+  }
+  size_t put = serializeJson(meta, out);
+  out.close();
+  if (!put) return false;
+  Serial.printf("[CONN] resync_all: adopted %s session %lu (owner_dev -> %s)\n",
+                pid, (unsigned long)n, cfgDeviceId);
+  return true;
+}
+
 // Re-upload everything the card still holds: drop the .synced marker of every
-// session that STILL HAS AUDIO, so the sweep picks it up again.
+// session that STILL HAS AUDIO, so the sweep picks it up again - and, since
+// this is an explicit act by the current owner, first ADOPT any unstamped or
+// prior-claim take to the current claim (adoptSessionOwner above) so legacy /
+// pre-reclaim audio parked by the ownership gate becomes recoverable here,
+// and only here.
 //
 // Only sessions with audio. A session whose audio was reclaimed after upload is
 // left alone: its .synced marker is a TOMBSTONE that keeps its number occupied,
@@ -664,7 +811,11 @@ static int resyncAll()
     scanPatientDir(pid, &ps);
     char mark[160];
     for (uint32_t i = 1; i <= SESSION_NUM_MAX; i++) {
-      if (ps.mark[i] && ps.audio[i]) {               // audio still here - resend it
+      if (!ps.audio[i]) continue;                    // empty slot / audio-free tombstone
+      // Adopt before resending: without a current-owner stamp the pending
+      // sweep would skip the session again the moment its marker is gone.
+      if (!adoptSessionOwner(pid, i)) continue;      // could not stamp - stays parked
+      if (ps.mark[i]) {                              // audio still here - resend it
         sessionPath(mark, sizeof(mark), pid, i, "synced");
         SD_MMC.remove(mark);
         cleared++;
@@ -1928,6 +2079,7 @@ static void handleProvisionTick()
             snprintf(cfgDeviceId, sizeof(cfgDeviceId), "%s", did);
             snprintf(cfgDeviceKey, sizeof(cfgDeviceKey), "%s", dkey);
             saveConfig();
+            ownerTrackId();   // a differing prior id = the device changed hands
             ok = true;
           } else {
             Serial.printf("[CONN] register 2xx but no device_id/key in body - treating as failure\n");
@@ -2186,7 +2338,9 @@ static void runRemoteCommand(const char *op)
   } else if (!strcmp(op, "resync_all")) {
     // Full re-backup: re-send every session whose audio is still on the card,
     // including ones already marked synced. Recovers sessions the server
-    // acknowledged but never actually stored.
+    // acknowledged but never actually stored - and, as the one explicit
+    // owner action, adopts unstamped / prior-claim takes to the current
+    // claim (see adoptSessionOwner) so they become uploadable again.
     // DEFERRED: pollCommands() runs outside the netSdBusy/!uiSdBusy bracket, so
     // walking + mutating the card right here made connNetSdIdle() lie to the UI
     // core (its delete/remount handshake proceeded mid-walk). connLoop consumes
@@ -2464,6 +2618,7 @@ void connInit(const char *fw)
   WiFi.mode(WIFI_STA); // also powers up the radio so the MAC is readable
   buildSerial();
   loadConfig();
+  ownerTrackId();   // seed/refresh the reset-surviving owner record (see above)
   Serial.printf("[CONN] serial=%s provisioned=%d\n", serialStr, provisioned);
 
   if (provisioned) enterWifiTrying();
@@ -2747,6 +2902,7 @@ void connLoop()
 
 ConnMode connGetMode() { return mode; }
 const char *connSerial() { return serialStr; }
+const char *connDeviceId() { return cfgDeviceId; }
 
 // Full Wi-Fi STA MAC ("AA:BB:CC:DD:EE:FF") - the address the router sees, for
 // MAC-allowlist Wi-Fi. Valid once the radio is up (connInit starts STA mode).

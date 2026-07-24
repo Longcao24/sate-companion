@@ -53,6 +53,10 @@ bool        connSdFault();
 ConnMode    connGetMode();
 const char *connSerial();            // "SATE-XXXXXX" (from eFuse MAC)
 const char *connMac();               // "AA:BB:CC:DD:EE:FF" Wi-Fi STA MAC
+// Server-assigned device id ("" until claimed). It changes on every (re)claim -
+// including a claim by a DIFFERENT account - so it is the on-device proxy for
+// which account owns a recording (stamped into each session JSON as owner_dev).
+const char *connDeviceId();
 bool        connProvisioned();
 uint32_t    connPendingTotal();      // unsynced sessions across all patients
 // Byte progress of the session uploading right now. true while in flight;

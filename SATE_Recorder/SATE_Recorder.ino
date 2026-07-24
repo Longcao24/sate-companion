@@ -116,7 +116,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.30";   // offline crash-resume starts the net task before blocking, so a take resumed with Wi-Fi down stays stoppable (heartbeat/BLE/OTA-confirm)
+static const char    *FIRMWARE_VERSION  = "1.5.31";   // per-session owner_dev stamp blocks cross-account audio upload; keep-newest-5 ranks by monotonic take_seq (correct past the 99 wrap)
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -1683,6 +1683,21 @@ static uint32_t findNextSessionIndex(const char *dir)
   return next;
 }
 
+// Lifetime take counter, stamped into every session JSON as take_seq. Session
+// NUMBERS wrap at SESSION_NUM_MAX and recycle tombstones, so past the wrap a
+// LOWER number can be the newer take - retention (trimPatientSyncedAudio in
+// connectivity.cpp) ranks by this instead. A uint32 at clinical cadence never
+// wraps in practice. Lives in "sate-seq" beside the per-dir hw%08x high-waters
+// (distinct key, no collision) and is never reset.
+static uint32_t nextTakeSeq()
+{
+  g_prefs.begin("sate-seq", false);
+  uint32_t seq = g_prefs.getUInt("gseq", 0) + 1;
+  g_prefs.putUInt("gseq", seq);
+  g_prefs.end();
+  return seq;
+}
+
 // --- SD card capacity (auto-detected from the mounted card) ----------------
 
 // Card usage is CACHED. `SD_MMC.usedBytes()` runs `f_getfree`, a full FAT
@@ -1979,6 +1994,13 @@ static bool saveMetadataToSd(const char *jsonPath, const char *wavPath,
   file.printf("  \"session_type\": \"%s\",\n", typeEsc);
   file.printf("  \"clinician\": \"%s\",\n", clinEsc);
   file.printf("  \"session_number\": %lu,\n", (unsigned long)sessionNum);
+  // Recording-order rank for retention: numbers wrap at 99, take_seq never
+  // does. A crash-resumed take re-stamps a fresh value - still the newest.
+  file.printf("  \"take_seq\": %lu,\n", (unsigned long)nextTakeSeq());
+  // The claim (account) this take belongs to. The uploader skips any session
+  // whose stamp is not the CURRENT device id, so a factory-reset unit claimed
+  // by another account can never upload this audio under the new key.
+  file.printf("  \"owner_dev\": \"%s\",\n", connDeviceId());
   file.printf("  \"audio_path\": \"%s\",\n", wavPath);
   file.printf("  \"audio_pcm_bytes\": %lu,\n", (unsigned long)pcmBytes);
   file.printf("  \"duration_seconds\": %lu,\n", (unsigned long)durationSec);
