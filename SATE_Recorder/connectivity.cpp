@@ -618,7 +618,11 @@ static uint32_t sessionAssembledBytes(const char *pid, uint32_t n)
 // `bytes`. Defined further down (needs httpJson); declared here for the trim.
 // Returns true ONLY on a clean 2xx whose body says stored:true. Offline, any
 // non-2xx, a parse failure, or stored:false all return false -> keep the audio.
-static bool verifySessionStored(const char *pid, uint32_t n, uint32_t bytes);
+// `definitiveNo` (optional) is set true only when a clean, parsed 2xx answered
+// stored:false - the server positively does NOT hold this take, as opposed to
+// a transient failure where it might. Only that answer earns a verify strike.
+static bool verifySessionStored(const char *pid, uint32_t n, uint32_t bytes,
+                                bool *definitiveNo = nullptr);
 
 // Free a session's AUDIO (every segment part + legacy wav + json) but KEEP its
 // .synced marker so the slot stays numbered and the pending scan is unchanged.
@@ -659,6 +663,86 @@ static const uint32_t TRIM_MAX_FREES_PER_PASS = 2;
 // budget once per sweep so the cap spans every patient dir it walks.
 static const uint32_t TRIM_MAX_VERIFIES_PER_PASS = 8;
 static uint32_t s_trimVerifyBudget = TRIM_MAX_VERIFIES_PER_PASS;
+
+// A marked take the server keeps answering stored:false for (the false-2xx /
+// BLE mark_synced ghosts described above) is a PERMANENT verify candidate: it
+// is never freed (verify fails) and never re-uploaded (the pending scan skips
+// marked takes), so it re-spends the shared verify budget on EVERY sweep.
+// Enough of them in dirs iterated before the active one consumed the whole
+// budget before the sweep got there, so the active dir was never reclaimed at
+// all - the exact unreachable-reclaim failure trimAllPatients() exists to fix.
+// So, mirroring the uploader's strikes: a take is PARKED after
+// VERIFY_MAX_STRIKES definitive stored:false answers - only a clean 2xx that
+// says "not stored" strikes; offline / non-2xx / parse failures stay free
+// retries - and a parked take spends no budget until its cooldown re-checks
+// it, so a take that becomes verifiable later (resync_all re-upload) is still
+// freed. Parking skips only the VERIFY: a parked take always keeps its audio.
+struct VerifyStrike {
+  char     pid[20];
+  uint32_t num;
+  int      strikes;
+  uint32_t retryAt;
+};
+static const int      VERIFY_STRIKE_MAX    = 32;
+static VerifyStrike   s_verifyStrikes[VERIFY_STRIKE_MAX];   // net-task only
+static int            s_verifyStrikeCount  = 0;
+static const int      VERIFY_MAX_STRIKES   = 3;
+static const uint32_t VERIFY_PARK_RETRY_MS = 21600000;  // 6 h
+
+static VerifyStrike *verifyStrikeFind(const char *pid, uint32_t num)
+{
+  for (int i = 0; i < s_verifyStrikeCount; i++)
+    if (s_verifyStrikes[i].num == num && !strcmp(s_verifyStrikes[i].pid, pid))
+      return &s_verifyStrikes[i];
+  return nullptr;
+}
+
+static void verifyStrikeAdd(const char *pid, uint32_t num)
+{
+  VerifyStrike *s = verifyStrikeFind(pid, num);
+  if (!s) {
+    if (s_verifyStrikeCount >= VERIFY_STRIKE_MAX) {
+      // Table full: drop the oldest entry rather than stop tracking new ghosts.
+      memmove(&s_verifyStrikes[0], &s_verifyStrikes[1],
+              sizeof(s_verifyStrikes[0]) * (s_verifyStrikeCount - 1));
+      s_verifyStrikeCount--;
+    }
+    s = &s_verifyStrikes[s_verifyStrikeCount++];
+    snprintf(s->pid, sizeof(s->pid), "%s", pid);
+    s->num = num;
+    s->strikes = 0;
+  }
+  s->strikes++;
+  s->retryAt = millis() + VERIFY_PARK_RETRY_MS;
+}
+
+static void verifyStrikeClear(const char *pid, uint32_t num)
+{
+  for (int i = 0; i < s_verifyStrikeCount; i++) {
+    if (s_verifyStrikes[i].num == num && !strcmp(s_verifyStrikes[i].pid, pid)) {
+      memmove(&s_verifyStrikes[i], &s_verifyStrikes[i + 1],
+              sizeof(s_verifyStrikes[0]) * (s_verifyStrikeCount - i - 1));
+      s_verifyStrikeCount--;
+      return;
+    }
+  }
+}
+
+// Wipe every park - resync_all drops the markers and re-uploads, after which
+// the takes verify for real, so stale parks would only delay their trim.
+static void verifyStrikeClearAll() { s_verifyStrikeCount = 0; }
+
+// A take is skipped only while parked AND inside its cooldown.
+static bool verifyStrikeParked(const char *pid, uint32_t num, uint32_t now)
+{
+  VerifyStrike *s = verifyStrikeFind(pid, num);
+  if (!s || s->strikes < VERIFY_MAX_STRIKES) return false;
+  if ((int32_t)(now - s->retryAt) >= 0) {   // cooldown elapsed - give it another go
+    s->strikes = 0;
+    return false;
+  }
+  return true;
+}
 
 // Recency rank of an audio-bearing slot: the take_seq stamped into the session
 // JSON, offset past SESSION_NUM_MAX so any stamped take outranks every legacy
@@ -711,6 +795,7 @@ static uint32_t trimPatientSyncedAudio(const char *pid, uint32_t keep = KEEP_AUD
     sessionPath(mark, sizeof(mark), pid, n, "synced");
     if (!SD_MMC.exists(mark)) continue;               // not synced -> only copy, keep
     if (!sessionHasAudioLocal(pid, n)) continue;      // already freed
+    if (verifyStrikeParked(pid, n, millis())) continue; // stored:false ghost: keep, spend no budget
     // The .synced marker is necessary but NOT sufficient to delete: it can be
     // set before the audio is durably on the server (BLE mark_synced, or the old
     // false-2xx). Confirm the server really holds THIS take, byte-for-byte,
@@ -720,11 +805,14 @@ static uint32_t trimPatientSyncedAudio(const char *pid, uint32_t keep = KEEP_AUD
     if (bytes == 0) continue;                         // nothing measurable -> keep
     if (s_trimVerifyBudget == 0) break;               // verify quota spent this pass
     s_trimVerifyBudget--;
-    if (!verifySessionStored(pid, n, bytes)) {
+    bool storedNo = false;
+    if (!verifySessionStored(pid, n, bytes, &storedNo)) {
+      if (storedNo) verifyStrikeAdd(pid, n);          // definitive "not stored": ramp to a park
       Serial.printf("[CONN] keep %s session %lu — server did not confirm %lu bytes\n",
                     pid, (unsigned long)n, (unsigned long)bytes);
       continue;
     }
+    verifyStrikeClear(pid, n);
     freeSessionAudioKeepMarker(pid, n);
     freed++;
     Serial.printf("[CONN] freed synced audio %s session %lu (server-confirmed, keep newest %u)\n",
@@ -826,6 +914,7 @@ static int resyncAll()
   pendDirty = true;
   upResumeClear();
   strikeClearAll();
+  verifyStrikeClearAll();
   uploadSweepDue = true;
   Serial.printf("[CONN] resync_all: cleared %d marker(s)\n", cleared);
   return cleared;
@@ -1149,8 +1238,10 @@ static bool httpJson(const char *method, const char *path, const char *body,
 // same identity the take was uploaded under - avoiding a mismatch. patient_id +
 // session_number + bytes together identify the exact take; the server answers
 // stored:true only when the row AND its storage object are both present.
-static bool verifySessionStored(const char *pid, uint32_t n, uint32_t bytes)
+static bool verifySessionStored(const char *pid, uint32_t n, uint32_t bytes,
+                                bool *definitiveNo)
 {
+  if (definitiveNo) *definitiveNo = false;
   if (WiFi.status() != WL_CONNECTED) return false;
   char path[224];
   snprintf(path, sizeof(path),
@@ -1161,7 +1252,11 @@ static bool verifySessionStored(const char *pid, uint32_t n, uint32_t bytes)
   if (!httpJson("GET", path, nullptr, resp, sizeof(resp), &code)) return false;
   JsonDocument doc(&s_jsonPsram);
   if (deserializeJson(doc, resp) != DeserializationError::Ok) return false; // parse fail -> keep
-  return doc["stored"].as<bool>() == true;
+  if (doc["stored"].as<bool>() == true) return true;
+  // A clean 2xx whose body carries stored:false is the server positively
+  // saying "I do not hold this take" - the only answer that may strike.
+  if (definitiveNo && doc["stored"].is<bool>()) *definitiveNo = true;
+  return false;
 }
 
 // POST one ~1 MB slice of the WAV at byte `offset` to /api/sessions/chunk. The
@@ -1725,6 +1820,7 @@ static void uploadStep()
       // could race trim's own walk of this patient dir. Keep the flag up until the
       // whole SD-reclaim tail is done.
       s_trimVerifyBudget = TRIM_MAX_VERIFIES_PER_PASS;  // fresh quota for this tail
+      verifyStrikeClear(upPid, upNum);  // just re-uploaded: an old stored:false park is stale
       trimPatientSyncedAudio(upPid);
       strikeClear(upPid, upNum);
       upResumeClearIf(upPid, upNum);
@@ -2781,6 +2877,9 @@ void connLoop()
       if (strikeDropReq) {
         strikeDropReq = false;
         strikeClear(strikeDropPid, strikeDropNum);
+        // Drop any verify park too: the number can be reused by a NEW take,
+        // which must not inherit the deleted one's stored:false cooldown.
+        verifyStrikeClear(strikeDropPid, strikeDropNum);
       }
       if (!uiSdBusy) {
         if (timeAfter(now, nextHeartbeat)) {

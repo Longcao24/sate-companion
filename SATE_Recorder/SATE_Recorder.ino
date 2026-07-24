@@ -116,7 +116,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.31";   // per-session owner_dev stamp blocks cross-account audio upload; keep-newest-5 ranks by monotonic take_seq (correct past the 99 wrap)
+static const char    *FIRMWARE_VERSION  = "1.5.32";   // reclaim no longer starved by unverifiable takes (strike/park); crash-give-up stamps owner_dev so segments still upload
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -3539,6 +3539,43 @@ static int prepareResumeSegments(const char *wavPath, uint32_t *outBytes)
   return part;                                   // == count of existing segments
 }
 
+// A crash-interrupted take has segments but NO session JSON - saveMetadataToSd
+// runs only after a take fully ends - and the pending sweep skips any session
+// whose owner_dev it cannot read ("owner unknown must never default to
+// upload"). So a resume give-up branch that only clears the crash mark strands
+// the audio invisibly: never uploaded, yet counted in no pending total. Stamp
+// the minimal JSON the sweep needs (owner_dev; the uploader defaults the rest)
+// so the take uploads as a normal unsynced session. This is NOT the silent
+// adoption resync_all guards against: the NVS crash mark proves the take was
+// captured under the CURRENT claim - a factory reset / server unclaim clears
+// the mark on its own (unprovisioned) boot before any other account can get
+// here. An existing JSON is never touched.
+static void stampInterruptedTakeOwner(const char *pid, uint32_t sess)
+{
+  if (!deviceReady()) return;                    // no claim to stamp under
+  char dir[96], jsonPath[160];
+  // Built from the NVS pid, not patientDirPath(): the patient may no longer be
+  // in the roster (that give-up branch runs before any selectPatientIndex).
+  snprintf(dir, sizeof(dir), "/sate/patients/%s", pid);
+  sessionJsonPath(jsonPath, sizeof(jsonPath), dir, sess);
+  if (SD_MMC.exists(jsonPath)) return;           // full metadata already there
+  if (!sessionHasAudio(dir, sess)) return;       // nothing on the card to upload
+  File f = SD_MMC.open(jsonPath, FILE_WRITE);
+  if (!f) {
+    Serial.printf("[REC] resume: cannot stamp owner on %s\n", jsonPath);
+    return;
+  }
+  f.println("{");
+  f.printf("  \"session_number\": %lu,\n", (unsigned long)sess);
+  f.printf("  \"take_seq\": %lu,\n", (unsigned long)nextTakeSeq());
+  f.printf("  \"owner_dev\": \"%s\"\n", connDeviceId());
+  f.println("}");
+  f.close();
+  connNotifyNewSession();   // pending cache must re-see this dir
+  Serial.printf("[REC] resume: stamped session %lu for upload (owner %s)\n",
+                (unsigned long)sess, connDeviceId());
+}
+
 // Called once at boot: if a local take was interrupted mid-capture (NVS mark
 // survived the reboot), continue recording into the SAME session instead of
 // leaving it for the sync uploader. Audio is never lost either way - this just
@@ -3567,16 +3604,21 @@ static void maybeResumeRecording()
   // Unprovisioned boot with a live mark: the reboot came from a factory reset /
   // server unclaim mid-take. The mark must not survive to fire on a LATER
   // provisioned boot (it would append a fresh take onto a session that may be
-  // synced by then). The segments still upload as a normal unsynced session.
+  // synced by then). With no claim there is nobody to stamp as owner, so the
+  // segments stay parked by the ownership gate until an explicit resync_all
+  // under the next claim adopts them - never uploaded to whoever claims next.
   if (!deviceReady()) {
-    Serial.println("[REC] resume: ABORT - device unprovisioned; mark cleared, segments upload via sync");
+    Serial.println("[REC] resume: ABORT - device unprovisioned; mark cleared, segments parked until resync_all");
     recCrashClear(); return;
   }
 
   // Boot-loop guard: if resuming has itself crashed the board a couple of times,
-  // stop trying. The captured segments still upload as a normal unsynced session.
+  // stop trying. The captured segments still upload as a normal unsynced session
+  // - but only once stamped with an owner (no JSON exists yet mid-capture, and
+  // the pending sweep skips an owner-less session).
   if (tries >= 2) {
     Serial.println("[REC] resume: ABORT - boot-loop guard (tries>=2); segments upload via sync");
+    stampInterruptedTakeOwner(pid, sess);
     recCrashClear(); return;
   }
   g_prefs.begin("sate-rec", false);
@@ -3589,7 +3631,8 @@ static void maybeResumeRecording()
     if (!strcmp(g_patients[i].patientId, pid)) { idx = i; break; }
   if (idx < 0) {
     Serial.printf("[REC] resume: ABORT - patient '%s' not in roster (%d loaded)\n", pid, g_patientCount);
-    recCrashClear(); return;                     // patient gone -> sync handles it
+    stampInterruptedTakeOwner(pid, sess);        // sync handles it - once owned
+    recCrashClear(); return;
   }
   selectPatientIndex(idx);
 
@@ -3649,6 +3692,7 @@ static void maybeResumeRecording()
 
   // Refuse to resume onto a (nearly) full card - same rule as starting a take.
   if (sdFreeBytes() < SD_MIN_FREE_BYTES) {
+    stampInterruptedTakeOwner(pid, sess);   // "saved" must mean uploadable, not stranded
     connSetUiSdBusy(false);
     recCrashClear();
     showStatus("Recording recovered", "Interrupted take saved - card is full");
@@ -3681,7 +3725,9 @@ static void maybeResumeRecording()
   recCrashClear();
 
   if (!ok || pcmBytes == 0) {
-    // Never delete captured audio: the segments stay and upload via sync.
+    // Never delete captured audio: the segments stay and upload via sync
+    // (finalizeSavedSession is skipped, so stamp the owner JSON here too).
+    stampInterruptedTakeOwner(pid, sess);
     connSetUiSdBusy(false);
     showHomeScreen();
     return;
