@@ -396,16 +396,28 @@ export class BleLink implements SateLink {
       onProgress(received, total);
     };
 
-    await this.writeControl({ op: "send_session", n });
-    const head = await header;
-    total = head.bytes;
-    await done;
-    this.dataHandler = null;
+    try {
+      await this.writeControl({ op: "send_session", n });
+      const head = await header;
+      total = head.bytes;
+      await done;
 
-    return {
-      wavBase64: Buffer.concat(chunks).toString("base64"),
-      meta: head.meta,
-    };
+      // BLE notifications are unacknowledged: a dropped data notify silently
+      // truncates the stream. The device tells us the exact byte count up front,
+      // so reconcile before we hand this back — otherwise a short WAV gets
+      // uploaded and markSynced'd as a complete take, permanently losing the tail
+      // of the only copy. On mismatch, reject so the caller retries the pull.
+      const assembled = Buffer.concat(chunks);
+      if (assembled.length !== total) {
+        throw new Error(
+          `session ${n} transfer incomplete: got ${assembled.length} of ${total} bytes`
+        );
+      }
+
+      return { wavBase64: assembled.toString("base64"), meta: head.meta };
+    } finally {
+      this.dataHandler = null;
+    }
   }
 
   async markSynced(n: number): Promise<void> {

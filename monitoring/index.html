@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SATE — service monitor</title>
+<style>
+  :root{
+    --bg:#0f1417; --panel:#161d21; --panel2:#131a1e; --ink:#e7eeea; --ink2:#a9b6bc;
+    --ink3:#74838a; --hair:#26302f; --accent:#2fb39c;
+    --ok:#5cc183; --warn:#e0a23c; --bad:#e8695b; --info:#6e9bd6; --violet:#a395c9;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--mono);font-size:13px;line-height:1.5}
+  a{color:var(--accent)}
+  header{display:flex;align-items:center;gap:14px;padding:14px 20px;border-bottom:1px solid var(--hair);flex-wrap:wrap}
+  h1{font-size:15px;margin:0;letter-spacing:.02em}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--ink3)}
+  .dot.live{background:var(--ok)} .dot.demo{background:var(--warn)} .dot.err{background:var(--bad)}
+  .grow{flex:1}
+  .meta{color:var(--ink3);font-size:12px}
+  button,input{font:inherit;color:var(--ink);background:var(--panel);border:1px solid var(--hair);border-radius:8px;padding:6px 10px}
+  button{cursor:pointer} button:hover{border-color:var(--ink3)}
+  button.pri{background:var(--accent);color:#0b0f11;border-color:var(--accent);font-weight:600}
+  .wrap{padding:18px 20px;max-width:1200px;margin:0 auto}
+  .cfg{display:none;gap:8px;flex-wrap:wrap;align-items:center;padding:12px 20px;border-bottom:1px solid var(--hair);background:var(--panel2)}
+  .cfg.show{display:flex}
+  .cfg input{min-width:240px}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:16px}
+  .tile{background:var(--panel);border:1px solid var(--hair);border-radius:12px;padding:14px 16px;position:relative;overflow:hidden}
+  .tile .rail{position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--ink3)}
+  .tile .n{font-size:30px;font-weight:680;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+  .tile .l{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink3);margin-top:6px}
+  .tile.ok .rail{background:var(--ok)} .tile.ok .n{color:var(--ok)}
+  .tile.warn .rail{background:var(--warn)} .tile.warn .n{color:var(--warn)}
+  .tile.bad .rail{background:var(--bad)} .tile.bad .n{color:var(--bad)}
+  .tile.info .rail{background:var(--info)} .tile.info .n{color:var(--info)}
+  .tile.accent .rail{background:var(--accent)} .tile.accent .n{color:var(--accent)}
+  h2{font-size:13px;letter-spacing:.04em;color:var(--accent);text-transform:uppercase;margin:24px 0 10px}
+  .panel{background:var(--panel);border:1px solid var(--hair);border-radius:12px;overflow:hidden}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:left;padding:9px 14px;border-bottom:1px solid var(--hair);font-size:12.5px;white-space:nowrap}
+  th{color:var(--ink3);font-weight:600;font-size:11px;letter-spacing:.05em;text-transform:uppercase}
+  tr:last-child td{border-bottom:none}
+  td.wrap{white-space:normal}
+  .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600}
+  .pill.on{color:var(--ok);background:#5cc18320} .pill.off{color:var(--ink3);background:#74838a20}
+  .pill.rec{color:var(--bad);background:#e8695b20} .pill.idle{color:var(--ink2);background:#a9b6bc18}
+  .vgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+  .vcard{background:var(--panel);border:1px solid var(--hair);border-radius:10px;padding:12px 14px}
+  .vcard .k{color:var(--ink3);font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+  .vcard .v{font-size:18px;font-weight:640;margin-top:4px}
+  .vcard .v.small{font-size:13px;font-weight:500;color:var(--ink2)}
+  .empty{color:var(--ink3);padding:14px;text-align:center}
+  #banner{display:none;margin:0 0 14px;padding:10px 14px;border-radius:10px;border:1px solid var(--bad);background:#e8695b14;color:var(--bad)}
+  #banner.show{display:block}
+  .muted{color:var(--ink3)}
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="statusDot"></span>
+  <h1>🩺 SATE — service monitor</h1>
+  <span class="meta" id="mode">not configured</span>
+  <span class="grow"></span>
+  <span class="meta" id="stamp"></span>
+  <button id="refreshBtn">↻ Refresh</button>
+  <button id="demoBtn">Demo</button>
+  <button id="cfgBtn">⚙ Settings</button>
+</header>
+
+<div class="cfg" id="cfg">
+  <label class="meta">device-api base URL</label>
+  <input id="baseUrl" placeholder="https://<ref>.functions.supabase.co/device-api">
+  <label class="meta">admin JWT</label>
+  <input id="token" type="password" placeholder="Bearer token (Supabase session, admin)">
+  <label class="meta">anon key</label>
+  <input id="anon" type="password" placeholder="apikey header">
+  <button class="pri" id="saveBtn">Save &amp; connect</button>
+  <span class="meta muted">Stored in this browser only. Get the JWT from your admin web session.</span>
+</div>
+
+<div class="wrap">
+  <div id="banner"></div>
+
+  <div class="tiles" id="tiles"></div>
+
+  <h2>Versions</h2>
+  <div class="vgrid" id="versions"></div>
+
+  <h2>Device fleet</h2>
+  <div class="panel"><table id="fleet"><thead><tr>
+    <th>Serial</th><th>Status</th><th>Firmware</th><th>State</th><th>Pending</th><th>Last seen</th><th>SLP</th>
+  </tr></thead><tbody></tbody></table></div>
+
+  <h2>Stuck sessions <span class="muted" id="stuckNote"></span></h2>
+  <div class="panel"><table id="stuck"><thead><tr>
+    <th>Device</th><th>Session</th><th>Attempts</th><th>Processing since</th>
+  </tr></thead><tbody></tbody></table></div>
+
+  <h2>Recent errors</h2>
+  <div class="panel"><table id="errors"><thead><tr>
+    <th>Device</th><th>Session</th><th>Attempts</th><th>Error</th><th>When</th>
+  </tr></thead><tbody></tbody></table></div>
+</div>
+
+<script>
+// App/web versions aren't in the DB (they're build-time). Bump on each release —
+// keep in sync with the docs Version log.
+const STATIC_VERSIONS = { mobile_app: "0.1.0", web_app: "1.5.9", device_api: "v15" };
+const REFRESH_MS = 15000;
+const LS = "sate.monitor.cfg";
+
+const $ = (s) => document.querySelector(s);
+let cfg = load();
+let timer = null, demo = false;
+
+function load(){ try{ return JSON.parse(localStorage.getItem(LS)) || {}; }catch{ return {}; } }
+function save(){ localStorage.setItem(LS, JSON.stringify(cfg)); }
+
+function setMode(kind, text){
+  $("#statusDot").className = "dot " + kind;
+  $("#mode").textContent = text;
+}
+function banner(msg){
+  const b = $("#banner");
+  if(!msg){ b.classList.remove("show"); return; }
+  b.textContent = msg; b.classList.add("show");
+}
+function ago(iso){
+  if(!iso) return "—";
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime())/1000);
+  if(s<60) return Math.round(s)+"s ago";
+  if(s<3600) return Math.round(s/60)+"m ago";
+  if(s<86400) return Math.round(s/3600)+"h ago";
+  return Math.round(s/86400)+"d ago";
+}
+
+async function fetchStatus(){
+  const url = (cfg.baseUrl||"").replace(/\/$/,"") + "/admin/status";
+  const r = await fetch(url, { headers: {
+    "Authorization": "Bearer " + (cfg.token||""),
+    "apikey": cfg.anon || "",
+  }});
+  if(!r.ok) throw new Error("HTTP " + r.status + " — check the base URL / admin token");
+  return r.json();
+}
+
+function render(s){
+  $("#stamp").textContent = "updated " + ago(s.generated_at);
+  const p = s.pipeline || {}, f = s.fleet || {};
+  const tile = (cls,n,l) => `<div class="tile ${cls}"><div class="rail"></div><div class="n">${n}</div><div class="l">${l}</div></div>`;
+  $("#tiles").innerHTML =
+    tile("info", p.queued ?? 0, "Queued") +
+    tile("accent", p.processing ?? 0, "Processing") +
+    tile("ok", p.done ?? 0, "Done") +
+    tile((p.error>0?"bad":"ok"), p.error ?? 0, "Error") +
+    tile((p.stuck>0?"bad":"ok"), p.stuck ?? 0, "Stuck") +
+    tile((f.online>0?"ok":"warn"), (f.online??0)+"/"+(f.total??0), "Devices online") +
+    tile("accent", (s.firmware?.latest)||"—", "Latest firmware") +
+    tile("info", s.recordings_total ?? 0, "Recordings");
+
+  // versions
+  const fwb = f.fw_breakdown || {};
+  const fwbStr = Object.keys(fwb).length
+    ? Object.entries(fwb).sort().map(([v,n])=>`${v}: ${n}`).join(" · ") : "—";
+  $("#versions").innerHTML =
+    vcard("Recorder firmware (latest published)", s.firmware?.latest || "—") +
+    vcard("Recorder fleet firmware", fwbStr, true) +
+    vcard("Pendant firmware", "1.0.0", true) +
+    vcard("Mobile app", STATIC_VERSIONS.mobile_app) +
+    vcard("Web app", STATIC_VERSIONS.web_app) +
+    vcard("Backend (device-api)", STATIC_VERSIONS.device_api);
+
+  // fleet
+  rows("#fleet", f.devices || [], d => `
+    <td>${esc(d.serial||d.id)}</td>
+    <td>${d.online?'<span class="pill on">online</span>':'<span class="pill off">offline</span>'}</td>
+    <td>${esc(d.fw||"—")}</td>
+    <td>${statePill(d.state)}</td>
+    <td>${d.pending_sessions ?? 0}</td>
+    <td class="muted">${ago(d.last_seen)}</td>
+    <td class="muted">${esc(d.slp||"—")}</td>`,
+    "No devices.");
+
+  // stuck
+  const stuck = p.stuck_list || [];
+  $("#stuckNote").textContent = stuck.length ? `(${stuck.length} — pipeline may be wedged)` : "(none)";
+  rows("#stuck", stuck, x => `
+    <td>${esc(x.device_serial||"—")}</td>
+    <td>${x.session_number ?? "—"}</td>
+    <td>${x.attempts ?? 0}</td>
+    <td class="muted">${ago(x.processing_started_at)}</td>`,
+    "No stuck sessions. ✓");
+
+  // errors
+  rows("#errors", p.recent_errors || [], x => `
+    <td>${esc(x.device_serial||"—")}</td>
+    <td>${x.session_number ?? "—"}</td>
+    <td>${x.attempts ?? 0}</td>
+    <td class="wrap">${esc(x.process_error||"—")}</td>
+    <td class="muted">${ago(x.created_at)}</td>`,
+    "No recent errors. ✓");
+}
+
+function vcard(k,v,small){ return `<div class="vcard"><div class="k">${k}</div><div class="v ${small?'small':''}">${esc(String(v))}</div></div>`; }
+function statePill(s){ if(s==='recording')return '<span class="pill rec">recording</span>'; return `<span class="pill idle">${esc(s||'idle')}</span>`; }
+function esc(s){ return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function rows(sel, arr, fn, empty){
+  const tb = $(sel).querySelector("tbody");
+  tb.innerHTML = arr.length ? arr.map(x=>`<tr>${fn(x)}</tr>`).join("")
+    : `<tr><td colspan="9" class="empty">${empty}</td></tr>`;
+}
+
+async function tick(){
+  if(demo){ render(MOCK); setMode("demo","demo data"); banner(""); return; }
+  if(!cfg.baseUrl || !cfg.token){ setMode("", "not configured — open Settings or click Demo"); return; }
+  try{
+    const s = await fetchStatus();
+    render(s); setMode("live","live"); banner("");
+  }catch(e){ setMode("err","error"); banner(e.message); }
+}
+
+function start(){ if(timer) clearInterval(timer); tick(); timer = setInterval(tick, REFRESH_MS); }
+
+// UI wiring
+$("#cfgBtn").onclick = () => $("#cfg").classList.toggle("show");
+$("#refreshBtn").onclick = () => tick();
+$("#demoBtn").onclick = () => { demo = !demo; if(demo){$("#cfg").classList.remove("show");} start(); };
+$("#saveBtn").onclick = () => {
+  cfg = { baseUrl: $("#baseUrl").value.trim(), token: $("#token").value.trim(), anon: $("#anon").value.trim() };
+  save(); demo=false; $("#cfg").classList.remove("show"); start();
+};
+$("#baseUrl").value = cfg.baseUrl||""; $("#token").value = cfg.token||""; $("#anon").value = cfg.anon||"";
+
+// demo payload so the page renders with no backend
+const MOCK = {
+  generated_at: new Date(Date.now()-8000).toISOString(),
+  pipeline: { queued:2, processing:1, done:1487, error:3, stuck:1,
+    stuck_list:[{device_serial:"SATE-A1B2C3", session_number:6, attempts:2, processing_started_at:new Date(Date.now()-52*60000).toISOString()}],
+    recent_errors:[
+      {device_serial:"SATE-A1B2C3", session_number:4, attempts:3, process_error:"download failed: Object not found", created_at:new Date(Date.now()-3600000).toISOString()},
+      {device_serial:"pendant-9F2A", session_number:1712000000, attempts:1, process_error:"no segments", created_at:new Date(Date.now()-7200000).toISOString()},
+    ]},
+  fleet: { total:4, online:2, offline:2,
+    fw_breakdown:{"1.5.13":1,"1.5.12":2,"unknown":1},
+    devices:[
+      {serial:"SATE-A1B2C3", online:true, fw:"1.5.13", state:"recording", pending_sessions:1, last_seen:new Date(Date.now()-4000).toISOString(), slp:"dr.smith@clinic.com"},
+      {serial:"SATE-D4E5F6", online:true, fw:"1.5.12", state:"idle", pending_sessions:0, last_seen:new Date(Date.now()-12000).toISOString(), slp:"dr.smith@clinic.com"},
+      {serial:"SATE-778899", online:false, fw:"1.5.12", state:"idle", pending_sessions:2, last_seen:new Date(Date.now()-3*3600000).toISOString(), slp:"dr.jones@clinic.com"},
+      {serial:"SATE-OLD001", online:false, fw:"unknown", state:"idle", pending_sessions:0, last_seen:new Date(Date.now()-5*86400000).toISOString(), slp:""},
+    ]},
+  firmware: { latest:"1.5.13", recent:[] },
+  recordings_total: 1487,
+};
+
+start();
+</script>
+</body>
+</html>

@@ -29,6 +29,15 @@ ota_build/
 # firmware publish admin creds (never commit)
 scripts/.publish.env
 
+# secrets — NEVER commit (contains SUPABASE_SERVICE_ROLE_KEY etc.)
+.env
+.env.local
+.env.*.local
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+
 # Plaud SDK binaries — proprietary, copied in per-machine (see plaud-integration.md)
 modules/plaud-sate/ios/Frameworks/
 

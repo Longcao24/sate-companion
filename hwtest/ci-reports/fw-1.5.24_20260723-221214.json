@@ -1,0 +1,30 @@
+{
+  "firmware": "1.5.24",
+  "date": "2026-07-23T22:12:14",
+  "device": "SATE-D0FDD4",
+  "port": "/dev/cu.usbmodem1101",
+  "flashed": false,
+  "scenarios": [
+    {
+      "key": "boot_health",
+      "status": "PASS",
+      "detail": "reached [MEM] ready, no crash within 5s. NOTE: a frozen LVGL (the LV_TICK_CUSTOM=0 trap) can still print [MEM] ready \u2014 for full coverage add a post-boot UI-liveness marker."
+    },
+    {
+      "key": "reboot_resume",
+      "status": "PASS",
+      "detail": "auto-resumed session 49 after the reboot"
+    },
+    {
+      "key": "byte_match",
+      "status": "PASS",
+      "detail": "session 50: 374828 bytes confirmed byte-exact on the server"
+    },
+    {
+      "key": "verified_trim",
+      "status": "PASS",
+      "detail": "no un-verified free observed; any reclaim was server-confirmed"
+    }
+  ],
+  "verdict": "PASS"
+}

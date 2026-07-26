@@ -311,6 +311,13 @@ class NativePendantLink implements PendantLink {
   }
 
   start(): Promise<void> {
+    // Clear any leftover PCM before a new take. Only takeWav()/teardown() reset
+    // these, so a start that follows a stop-without-takeWav (e.g. an upload error
+    // dropped the link, or a reconnect) would otherwise PREFIX the new recording
+    // with the previous take's audio and inflate capturedMs — cross-take
+    // contamination. Reset here so every start() begins from an empty buffer.
+    this.chunks = [];
+    this.capturedBytes = 0;
     this.capturing = true;
     return this.writeControl(CMD_START);
   }
@@ -360,6 +367,9 @@ class NativePendantLink implements PendantLink {
       /* ignore */
     }
     this.device = null;
+    // Drop any un-taken PCM so it can't leak into the next connection's take.
+    this.chunks = [];
+    this.capturedBytes = 0;
   }
 
   teardown(): void {

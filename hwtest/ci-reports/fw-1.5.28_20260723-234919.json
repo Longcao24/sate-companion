@@ -1,0 +1,45 @@
+{
+  "firmware": "1.5.28",
+  "date": "2026-07-23T23:49:19",
+  "device": "SATE-D0FDD4",
+  "port": "/dev/cu.usbmodem1101",
+  "flashed": false,
+  "scenarios": [
+    {
+      "key": "boot_health",
+      "status": "PASS",
+      "detail": "reached [MEM] ready, no crash within 5s. NOTE: a frozen LVGL (the LV_TICK_CUSTOM=0 trap) can still print [MEM] ready \u2014 for full coverage add a post-boot UI-liveness marker."
+    },
+    {
+      "key": "reboot_resume",
+      "status": "PASS",
+      "detail": "auto-resumed session 16 after the reboot"
+    },
+    {
+      "key": "byte_match",
+      "status": "PASS",
+      "detail": "session 17: 377900 bytes confirmed byte-exact on the server"
+    },
+    {
+      "key": "verified_trim",
+      "status": "PASS",
+      "detail": "no un-verified free observed; any reclaim was server-confirmed"
+    },
+    {
+      "key": "reclaim_idle",
+      "status": "FAIL",
+      "detail": "no reclaim sweep ran in 90s \u2014 the sweep is unreachable again (it must run on an idle heartbeat, not only after an upload)"
+    },
+    {
+      "key": "unsynced_kept",
+      "status": "PASS",
+      "detail": "no unconfirmed free in the window; unsynced takes were kept"
+    },
+    {
+      "key": "standalone_default",
+      "status": "PASS",
+      "detail": "active target is Standalone and the take uploaded under it"
+    }
+  ],
+  "verdict": "FAIL"
+}
