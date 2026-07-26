@@ -16,9 +16,11 @@ The AI call uses a 1-hour read ceiling (AI_READ_TIMEOUT_S): a 32-min take can tr
 minutes and that is fine here.
 """
 
+import io
 import os
 import time
 import traceback
+import wave
 
 import requests
 
@@ -28,6 +30,12 @@ AI_PROCESS_URL = os.environ.get("AI_PROCESS_URL", "")
 FINALIZE_URL = os.environ.get("FINALIZE_URL", "")
 STUCK_MINUTES = int(os.environ.get("STUCK_MINUTES", "45"))
 MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))
+# A recording shorter than this holds no speech (an accidental button-tap: a ~32 ms,
+# 1 KB WAV). The AI service returns HTTP 500 on such a near-empty file instead of an
+# empty transcript, and a 5xx is classified transient — so it retry-loops 3x into a
+# permanently stuck 'error'. Finalize these as no_text WITHOUT ever calling the AI.
+# 0.4 s is far below any real clinical utterance. See _has_text for the post-AI case.
+MIN_AUDIO_SEC = float(os.environ.get("MIN_AUDIO_SEC", "0.4"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "10"))
 # Ceiling on how long ONE AI read may hang. The old value was None (unbounded,
 # deliberate for long takes) — but if the AI service accepts the connection and
@@ -163,6 +171,16 @@ def finalize(payload):
     return r.json()
 
 
+def _wav_seconds(data):
+    """Duration in seconds of a WAV byte string, or None if it can't be parsed."""
+    try:
+        with wave.open(io.BytesIO(data)) as wf:
+            fr = wf.getframerate()
+            return wf.getnframes() / float(fr) if fr else None
+    except Exception:
+        return None
+
+
 def _has_text(t):
     for seg in (t.get("segments") or []):
         for w in (seg.get("words") or []):
@@ -182,6 +200,15 @@ def process(s):
 
     file_name = f"device_{s['device_serial']}_s{s['session_number']}.wav"
     wav = download_wav(path)
+
+    # Guard: a too-short/empty take has no speech, and the AI service returns 500 on it
+    # (not an empty transcript) — which would retry-loop into a permanently stuck
+    # 'error'. Finalize it as no_text up front and never call the AI.
+    dur = _wav_seconds(wav)
+    if dur is not None and dur < MIN_AUDIO_SEC:
+        finalize({"session_id": sid, "no_text": True})
+        _log(f"{sid}: audio {dur:.3f}s < {MIN_AUDIO_SEC}s — finalized no_text, skipped AI")
+        return
 
     transcript = call_ai(file_name, wav)
     if not transcript or not isinstance(transcript.get("segments"), list):
