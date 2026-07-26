@@ -1315,7 +1315,8 @@ def build_parser() -> argparse.ArgumentParser:
     t.set_defaults(func=cmd_test)
 
     f = sub.add_parser("flash", help="build + flash firmware")
-    f.add_argument("target", choices=["recorder", "pendant"])
+    f.add_argument("target", nargs="?", choices=["recorder", "pendant"], default="recorder",
+                   help="what to flash (default: recorder)")
     f.add_argument("-p", "--port", help="serial port (recorder; auto-detected if omitted)")
     f.add_argument("--compile-only", action="store_true", help="compile, do not upload")
     f.add_argument("--upload-only", action="store_true", help="upload the last build, skip compile")
