@@ -64,7 +64,7 @@ From `PendantConnectScreen.uploadTake()` → `SateApi.uploadSession()`:
 |------|------|
 | `SATE_Pendant/SATE_Pendant.ino` | Pendant firmware (nRF52840, Seeed core / Bluefruit) |
 | `SATE_Pendant/HARDWARE.md` | Hard-won flash/BLE/SoftDevice notes (some stale — see below) |
-| `SATE_Pendant/INTEGRATION.md` | Vendor-neutral BLE integration guide (some stale advertised name) |
+| `SATE_Pendant/INTEGRATION.md` | Vendor-neutral BLE integration guide (advertised name is current; only its title still reads "Sona / Nuna") |
 | `SATE_Pendant/flash_xiao.sh` | Compile (Seeed core) → UF2 → raw-write; **aborts on `0x26000`** |
 | `src/pendant/PendantLink.ts` | BLE scan/connect/stream/control + PCM→WAV + gain/loudness |
 | `src/pendant/PendantStore.ts` | Remembered pendants in AsyncStorage (`pendant.known`) |
@@ -351,9 +351,10 @@ advertising that service. Blue LED blink = advertising, brief periodic blip = co
 battery is attached, unplug it while debugging** — USB won't power-cycle it, so resets/boots get
 unpredictable and you chase ghosts. USB-only = clean, repeatable state.
 
-**Stale docs to watch:** `SATE_Pendant/HARDWARE.md` and `INTEGRATION.md` predate the rename and in
-places still show the old advertised name **"Nuna-Necklace"**; the shipped firmware advertises
-**"SATE Pendant"** (`Bluefruit.setName`). `PendantLink.ts`'s comment also references an old sketch
+**Stale docs to watch:** `SATE_Pendant/HARDWARE.md` (line ~200) still shows the old advertised name
+**"Nuna-Necklace"**; the shipped firmware advertises **"SATE Pendant"** (`Bluefruit.setName`).
+(`INTEGRATION.md` already uses "SATE Pendant" as the advertised name — only its *product title* reads
+"Sona / Nuna".) `PendantLink.ts`'s comment also references an old sketch
 name `xiao_audio_ble.ino` — the real file is `SATE_Pendant.ino`. Trust the `.ino`.
 
 ## Version log

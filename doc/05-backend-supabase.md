@@ -52,9 +52,10 @@ Two generations of columns coexist on this table:
   **`processing_started_at`**. New rows are `queued` by column default. These are what
   `device-api`, `healthAlerts`, `adminStatus`, and the Cloudflare container read/write.
 
-Idempotency index: `(device_serial, patient_id, session_number)` — the exact triple the uploader's
-dedup probe looks a take up by. ⚠️ **There is no DB *unique* constraint on that triple yet** — the
-probe in `storeSessionRecord` / the chunk final-slice is the only guard against a duplicate row.
+Idempotency key: `(user_id, device_serial, patient_id, session_number, bytes)` — the tuple the
+uploader's dedup probe in `storeSessionRecord` matches on (the chunk final-slice probe omits
+`patient_id`). ⚠️ **There is no DB *unique* constraint on it yet** — that probe (plus an
+`objectExists` check) is the only guard against a duplicate row.
 
 > ⚠️ **The D1 port (`cloudflare/schema.sql`) is behind.** Its `sate_device_sessions` has only
 > `processed / processed_at / process_error / no_text` — **not** `status / attempts /

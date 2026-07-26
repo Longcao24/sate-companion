@@ -362,7 +362,8 @@ Cloudflare cron (5 min) → runChecks() probe TARGETS (device-api, Supabase API,
 - `device-api` `healthAlerts()` is **read-only**, gated on `HEALTH_ALERT_KEY` (no
   user JWT). It flips 45 s-stale devices offline, then returns the digest + a
   `signature` so the worker only mails on a CHANGE (a lingering error doesn't mail
-  every 5 minutes; ongoing problems re-notify every 6 h).
+  every 5 minutes; a settled error is mailed ONCE, and only an active outage / stuck
+  job re-notifies, at most every 24 h).
 - The email transport is the **Cloudflare Email binding** (`env.EMAIL.send`), from
   `EMAIL_FROM` / `EMAIL_FROM_NAME`. A missing binding logs instead of throwing.
 - The 90-day status page renders from the same D1 history at the Worker's root path.

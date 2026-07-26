@@ -149,8 +149,10 @@ App wrappers live in `BleLink` (`SateBle.ts`): `scanWifi`, `provision`, `changeW
 `listSessions`, `pullSession`, `markSynced`, `setPatients`, and `sendCommand(op)` for the direct
 `BleCommand = "reboot" | "factory_reset" | "cancel_wifi"` set (`protocol.ts:208`).
 
-> ⚠️ **`mark_synced` resolves by identity, not by index.** Newer apps pass `{patient_id, session}`;
-> the legacy `{n}` is still accepted but re-validated against the card (`connectivity.cpp:2366`).
+> ⚠️ **`mark_synced` — firmware accepts identity OR a legacy index; the current app sends the index.**
+> The companion app writes the legacy `{op:mark_synced, n}` (`SateBle.ts` `markSynced(n)`), which the
+> firmware re-validates against the card (`connectivity.cpp:2366`); the firmware *also* accepts
+> `{patient_id, session}` to resolve by identity, but the app does not currently send that.
 > A device-side delete can invalidate a stale index, and a marker written on the wrong slot silently
 > drops a real recording from the pending set forever. The firmware also refuses with `"session gone"`
 > if the audio is no longer local (`sessionHasAudioLocal`).
@@ -234,7 +236,7 @@ App ── write {op:send_session, n} ── ◄ ev:file {n, bytes, meta}
                                    ── ◄ raw WAV bytes (180-B framed) on CHAR_DATA …
                                    ── ◄ ev:file_done {n}      (only if sent == bytes)
 App ── upload WAV to backend (same recordings path as a manual upload)
-App ── write {op:mark_synced, patient_id, session} ── ◄ ev:ok
+App ── write {op:mark_synced, n} ── ◄ ev:ok      (firmware re-validates n against the card)
 ```
 
 **Firmware side** (`sendSessionOverBle`, `connectivity.cpp:~1930`): the take may be a single legacy
