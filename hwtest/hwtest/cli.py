@@ -675,7 +675,7 @@ def cmd_flash(args: argparse.Namespace) -> int:
         # straight to esptool — there is nothing to compile.
         if getattr(args, "version", None) or getattr(args, "image", None):
             from . import firmware as FW
-            port = args.port or _auto_port()
+            port = _resolve_port(args.port)
             if not port:
                 bad("no serial port found — pass --port /dev/cu.usbmodemXXX (see `sate devices`)."); return 2
             if args.image:
@@ -697,7 +697,7 @@ def cmd_flash(args: argparse.Namespace) -> int:
             ok("compiled")
         if args.compile_only:
             return 0
-        port = args.port or _auto_port()
+        port = _resolve_port(args.port)
         if not port:
             bad("no serial port found — pass --port /dev/cu.usbmodemXXX (see `sate devices`)."); return 2
         rc = _run(["arduino-cli", "upload", "-p", port, "--fqbn", fqbn, "SATE_Recorder"], cwd=REPO)
@@ -713,15 +713,64 @@ def cmd_flash(args: argparse.Namespace) -> int:
     return _run(["bash", str(script), "SATE_Pendant"], cwd=REPO)
 
 
-def _auto_port() -> str | None:
+# Espressif USB-Serial-JTAG vendor id — the ESP32-S3 recorder enumerates under this,
+# so it's the strongest signal for "this port is the recorder" when several USB serial
+# devices are plugged in at once.
+ESP32S3_VID = 0x303A
+
+
+def _serial_candidates():
+    """(esp_ports, other_usb_serial_ports) from pyserial, or None if pyserial is
+    unavailable (caller should glob). The recorder's own port sorts into esp_ports."""
     try:
         from serial.tools import list_ports
     except ImportError:
+        return None
+    ports = list(list_ports.comports())
+    esp = [p for p in ports if p.vid == ESP32S3_VID]
+    esp_devs = {p.device for p in esp}
+    other = [p for p in ports if p.device not in esp_devs
+             and ("usbmodem" in p.device or "ACM" in p.device or "ttyUSB" in p.device)]
+    return esp, other
+
+
+def _auto_port() -> str | None:
+    """Best-effort recorder serial port (no logging). Prefers the ESP32-S3
+    USB-Serial-JTAG (Espressif VID) over any other USB serial device."""
+    cands = _serial_candidates()
+    if cands is None:
         import glob
-        cands = glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*")
-        return cands[0] if cands else None
-    ports = [p.device for p in list_ports.comports() if "usbmodem" in p.device or "ACM" in p.device or "USB" in p.device]
-    return ports[0] if ports else None
+        g = glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*")
+        return g[0] if g else None
+    esp, other = cands
+    if esp:
+        return esp[0].device
+    if other:
+        return other[0].device
+    return None
+
+
+def _resolve_port(explicit: str | None, log=info) -> str | None:
+    """Resolve the recorder serial port for a command: honor --port if given, else
+    auto-detect AND announce the choice — warning when several ports match so the
+    user knows to pass --port if the wrong one was picked."""
+    if explicit:
+        return explicit
+    cands = _serial_candidates()
+    if cands is None:
+        p = _auto_port()
+        if p:
+            log(f"auto-detected serial port {p}")
+        return p
+    esp, other = cands
+    chosen = esp[0].device if esp else (other[0].device if other else None)
+    if not chosen:
+        return None
+    log(f"auto-detected {'ESP32-S3 recorder' if esp else 'USB serial device'} on {chosen}")
+    extras = [p.device for p in (esp + other) if p.device != chosen]
+    if extras:
+        warn(f"other serial port(s) present: {', '.join(extras)} — pass --port to override")
+    return chosen
 
 
 def cmd_devices(args: argparse.Namespace) -> int:
