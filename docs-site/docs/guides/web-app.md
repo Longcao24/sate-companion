@@ -11,12 +11,12 @@ speech and language annotations, refine it in a SALT-aware editor, and produce c
 metrics and reports. It runs in the browser as a modern single-page application and shares
 its backend with the mobile app.
 
-<div class="badge-row"><span class="sate-badge">React + Vite</span><span class="sate-badge">TypeScript</span><span class="sate-badge">Supabase</span><span class="sate-badge">Clinician console</span></div>
+<div class="badge-row"><span class="sate-badge">React + Vite</span><span class="sate-badge">TypeScript</span><span class="sate-badge">Cloud backend</span><span class="sate-badge">Clinician console</span></div>
 
 <div class="spec-grid">
 <div class="spec-tile"><div class="k">Type</div><div class="v">Web SPA</div></div>
 <div class="spec-tile"><div class="k">Runs in</div><div class="v">Browser</div></div>
-<div class="spec-tile"><div class="k">Backend</div><div class="v">Supabase</div></div>
+<div class="spec-tile"><div class="k">Backend</div><div class="v">Cloud backend</div></div>
 <div class="spec-tile"><div class="k">Audience</div><div class="v">SLP clinicians</div></div>
 <div class="spec-tile"><div class="k">Billing</div><div class="v">Stripe</div></div>
 <div class="spec-tile"><div class="k">Sits alongside</div><div class="v">Mobile app</div></div>
@@ -24,7 +24,7 @@ its backend with the mobile app.
 
 :::note[One system, two front ends]
 The web app is a separate deployment from the mobile app, but both are backed by the same
-cloud project and the same edge API. The web console focuses on manual uploads, transcript
+cloud project and the same Device API. The web console focuses on manual uploads, transcript
 results, patient management, and device administration; the mobile app focuses on capture
 and on-the-go review.
 :::
@@ -38,7 +38,7 @@ into a report a family or a school can read. At a glance:
 | Aspect | Detail |
 |---|---|
 | Kind | Browser-based single-page app |
-| Backend | Shared cloud project (database, storage, edge API) — same as mobile |
+| Backend | Shared cloud project (database, storage, Device API) — same as mobile |
 | Auth | Clinician sign-in; can also mint a QR hand-off for the mobile app |
 | Payments | Subscription billing and invoices |
 | Focus | Transcript review, clinical metrics, patient CRM, device & firmware management |
@@ -64,7 +64,7 @@ public URLs.
 
 ### The device API
 
-For anything to do with hardware, the web app calls the system's **edge API** as the
+For anything to do with hardware, the web app calls the system's **Device API** as the
 signed-in clinician. Through it, the console can:
 
 - list the recorders claimed to the account and provision a new one,
@@ -177,7 +177,7 @@ flowchart TD
 
 The web app and the mobile app are deployed independently but share one backend. The web
 console is published as a static single-page app to a web host, while the backend (database,
-storage, and edge API) is shared across the whole SATE system. New firmware for the fleet is
+storage, and Device API) is shared across the whole SATE system. New firmware for the fleet is
 published from the administrator area of the console itself.
 
 ## 6. Status

@@ -126,7 +126,7 @@ The clusters we're prioritizing, roughly in order:
 
 ## Backend
 
-The backend spans a hosted database, an edge API for devices, and a long-running container
+The backend spans a hosted database, an Device API for devices, and a long-running container
 service that handles AI transcription and analysis asynchronously (a queue with retries, so
 long recordings are never cut off by short serverless time limits).
 

@@ -33,7 +33,7 @@ implementation internals required.
 ## Start here
 
 <div class="card-grid">
-  <a class="doc-card" href="/getting-started"><strong>Getting started</strong><span>Toolchain, build, flash, and run each part end-to-end.</span></a>
+  <a class="doc-card" href="/getting-started"><strong>Getting started</strong><span>The one core idea, and the fastest reading path for your task.</span></a>
   <a class="doc-card" href="/architecture"><strong>Architecture</strong><span>Data-flow diagrams, transports, and why processing is async.</span></a>
   <a class="doc-card" href="/known-issues"><strong>Known issues</strong><span>Current limitations and status.</span></a>
 </div>
@@ -62,7 +62,7 @@ flowchart LR
   APP["Mobile app<br/>device bridge"]
 
   subgraph Cloud
-    API["Edge API<br/>upload & records"]
+    API["Device API<br/>upload & records"]
     STG[("Audio storage<br/>sessions & recordings")]
     PROC["Processing service<br/>long-running worker"]
     AI["AI engine<br/>transcribe & analyse"]

@@ -24,7 +24,7 @@ function.
 ```mermaid
 sequenceDiagram
   participant D as Recorder
-  participant API as Edge API
+  participant API as Device API
   participant S as Storage
   participant DB as Database
   participant P as Container processor
@@ -47,11 +47,11 @@ sequenceDiagram
 ```
 
 **Who triggers what.** The audio never flows *through* the AI infrastructure directly.
-The edge API is the single entry point that devices talk to: it stores the assembled
+The Device API is the single entry point that devices talk to: it stores the assembled
 recording, queues the session, and signals that new work is waiting. The long-lived
 container processor is woken by that signal — and kept warm by a periodic heartbeat — then
 **claims the queued session and pulls the audio from storage itself** before holding the AI
-call. In other words, the container reads the audio out of storage; the edge API never
+call. In other words, the container reads the audio out of storage; the Device API never
 streams audio to it, and the device never uploads to the processing layer directly.
 
 :::note[Upload transport history]
@@ -107,7 +107,7 @@ flowchart TD
     P1["BLE audio stream"] --> P2["App assembles WAV"]
     P2 --> P3["App uploads over HTTPS"]
   end
-  R4 --> API["Edge API"]
+  R4 --> API["Device API"]
   R5 --> API
   P3 --> API
 ```
@@ -115,7 +115,7 @@ flowchart TD
 - **Recorder (online):** uploads directly over Wi-Fi in small chunks; the server
   reassembles and byte-verifies before accepting.
 - **Recorder (offline):** the mobile app pulls sessions off the device over a Bluetooth
-  bridge and relays them to the edge API.
+  bridge and relays them to the Device API.
 - **Pendant:** always goes through the app — it streams audio over Bluetooth, the app wraps
   it into a WAV file and uploads it through the same pipeline.
 

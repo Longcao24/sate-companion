@@ -37,7 +37,7 @@ timeline
 | Pendant firmware | Firmware for the nRF52840 wearable pendant | **1.0.0** |
 | Mobile app | Companion app for phones (recorder, pendant, and Plaud support) | **0.1.0** |
 | Web app | Clinician web application (reports, editing, analytics, billing) | **1.5.9** |
-| Backend service | The edge API that devices and apps talk to | **v18** |
+| Backend service | The Device API that devices and apps talk to | **v18** |
 
 :::note[About these numbers]
 Each component reports its own version so the field deployment can be checked at a
@@ -112,7 +112,7 @@ The clinician web application for reviewing and working with recordings.
 
 ## Backend service
 
-The edge API that devices and apps communicate with — registration, uploads, remote
+The Device API that devices and apps communicate with — registration, uploads, remote
 commands, and status.
 
 | Version | Date | Notes |

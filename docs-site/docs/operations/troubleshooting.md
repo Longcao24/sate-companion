@@ -59,7 +59,7 @@ flowchart TD
 
 ## Backend
 
-The backend spans an edge API, a long-running container that runs AI processing,
+The backend spans an Device API, a long-running container that runs AI processing,
 and cloud storage. Audio processing is intentionally asynchronous.
 
 | Symptom | Likely cause | What to do |

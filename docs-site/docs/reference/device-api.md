@@ -1,7 +1,9 @@
 ---
-title: device-api endpoints
+title: Device API
 sidebar_position: 1
 ---
+
+# Device API
 
 The **device API** is the cloud service that everything in the SATE system talks to. It sits
 at the edge — close to the network, fast to reach — and acts as the single front door for the
@@ -9,7 +11,7 @@ recorders in the field, the web and mobile apps, and the fleet-management tools.
 being spread across many small services, it is one focused API that routes each request to the
 right handler internally.
 
-<div class="badge-row"><span class="sate-badge">edge API</span><span class="sate-badge">device + app + admin</span><span class="sate-badge">3 caller types</span><span class="sate-badge">audio, sessions, firmware</span></div>
+<div class="badge-row"><span class="sate-badge">Device API</span><span class="sate-badge">device + app + admin</span><span class="sate-badge">3 caller types</span><span class="sate-badge">audio, sessions, firmware</span></div>
 
 ## What it does
 
@@ -163,7 +165,7 @@ dedicated long-running processing service works through that queue on its own sc
 up each queued recording, runs it through the AI transcription and analysis service, and produces
 the finished result the app displays.
 
-This split matters because transcription can take a long time, while the edge API is meant to
+This split matters because transcription can take a long time, while the Device API is meant to
 respond quickly. Keeping the heavy work in a separate, long-lived process — with an async queue,
 automatic retries for transient failures, and a watchdog that re-queues stalled work — means a
 long recording is processed reliably instead of timing out.

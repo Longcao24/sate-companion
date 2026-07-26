@@ -145,7 +145,7 @@ startup and status log. It is never part of normal field operation.
 ### (b) Wi-Fi → SATE Cloud
 
 The primary sync path. When the device is set up and its network is reachable, it talks to
-the cloud edge API over a secure connection. Over this channel the device:
+the cloud Device API over a secure connection. Over this channel the device:
 
 | Purpose | What it does |
 |---|---|

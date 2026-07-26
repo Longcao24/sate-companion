@@ -3,6 +3,8 @@ title: Plaud integration
 sidebar_position: 6
 ---
 
+# Plaud integration
+
 ## Overview
 
 **Plaud** (NotePin S / NotePro) is a third-party pocket recorder that the companion app

@@ -9,7 +9,7 @@ How a recording made on the hardware becomes a finished clinical recording in th
 gives a conceptual tour of the SATE backend: how audio is uploaded, how the AI transcription runs,
 and how the pieces fit together so that no recording is ever lost or left stuck.
 
-<div class="badge-row"><span class="sate-badge">Edge API</span><span class="sate-badge">Async pipeline</span><span class="sate-badge">Long-running processor</span><span class="sate-badge">State machine</span></div>
+<div class="badge-row"><span class="sate-badge">Device API</span><span class="sate-badge">Async pipeline</span><span class="sate-badge">Long-running processor</span><span class="sate-badge">State machine</span></div>
 
 ---
 
@@ -63,17 +63,17 @@ The pipeline is deliberately split so that no single request ever has to hold th
 
 | Component | Role |
 |---|---|
-| **Edge API** | The single REST surface for both devices and the app. It authenticates each caller, accepts chunked audio uploads, assembles and validates the finished audio file, and records a new `queued` entry. It returns immediately — it never waits for transcription. |
+| **Device API** | The single REST surface for both devices and the app. It authenticates each caller, accepts chunked audio uploads, assembles and validates the finished audio file, and records a new `queued` entry. It returns immediately — it never waits for transcription. |
 | **Long-running processor** | A long-lived process with no wall-clock limit. It repeatedly claims the oldest queued recording, downloads its audio, holds the AI transcription call open for as long as needed, copies the finished audio into permanent storage, and hands off the final steps. On failure it never deletes the device's audio. |
 | **Finalizer** | The light back-half, run as a fast serverless function: it resolves which patient the recording belongs to, computes the speech analysis, saves the finished recording, and marks the job `done`. It fits comfortably in the serverless time limit because the slow AI work already happened in the processor. It is safe to run more than once for the same job. |
 | **Keep-warm scheduler** | A scheduled ping (about once a minute) that keeps the processor awake and draining the queue even when there is no other traffic. |
 
-The Edge API enqueues work; the processor is the only place that holds the long AI call; the
+The Device API enqueues work; the processor is the only place that holds the long AI call; the
 finalizer writes the result back; and the keep-warm scheduler makes sure the queue always drains:
 
 ```mermaid
 flowchart LR
-    D["Recorder"] -->|"upload audio"| API["Edge API"]
+    D["Recorder"] -->|"upload audio"| API["Device API"]
     API -->|"store audio"| DS["Storage: device uploads"]
     API -->|"record queued entry"| PG[("Database")]
     CRON["Keep-warm scheduler"] -->|"ping"| C["Long-running processor"]
@@ -118,7 +118,7 @@ stateDiagram-v2
 
 ## 3. Connection & authentication
 
-Three kinds of caller reach the Edge API, and the credential a caller presents decides which part of
+Three kinds of caller reach the Device API, and the credential a caller presents decides which part of
 the API it is allowed to use.
 
 | Identity | Who | What it can reach |
@@ -151,7 +151,7 @@ kept distinct from the signed-in-user half.
 sequenceDiagram
     autonumber
     participant D as Recorder
-    participant API as Edge API
+    participant API as Device API
     participant DS as Device uploads
     participant DB as Database
     participant C as Processor
@@ -202,9 +202,9 @@ A few principles make the upload path safe:
 
 ---
 
-## 5. What the Edge API offers
+## 5. What the Device API offers
 
-The Edge API exposes two families of capabilities, chosen by who is calling.
+The Device API exposes two families of capabilities, chosen by who is calling.
 
 ### For devices
 

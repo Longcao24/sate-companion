@@ -159,7 +159,7 @@ PASSED — the audio travelled recorder → cloud → AI → done.
 ### Is every tier reachable?
 
 A connectivity probe hits each tier of the system in turn — authentication, database,
-the edge API and its verify capability, storage, the cloud processor, the AI queue state,
+the Device API and its verify capability, storage, the cloud processor, the AI queue state,
 and the device's own heartbeat — and reports latency for each. It turns "the pipeline is
 stuck" into "*this* tier is down," and fails if any critical tier is unreachable.
 
@@ -167,7 +167,7 @@ stuck" into "*this* tier is down," and fails if any critical tier is unreachable
 
 A desktop window (also embedded in the debugger) draws the real system architecture and
 animates a recording as it flows through: the recorder feeds the backend container
-(edge API, storage, and the processing queue), which hands off to the cloud processor,
+(Device API, storage, and the processing queue), which hands off to the cloud processor,
 then the AI service, then finalize, and finally the web frontend. Everything on the map
 is **server truth**, not a simulation:
 
