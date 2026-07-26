@@ -27,6 +27,7 @@ export default {
     ctx.waitUntil((async () => {
       const results = await runChecks(env);
       await evaluateAndAlert(env, results);   // email on any NEW error
+      await maybeDailyReport(env, results);   // once/day: a full infrastructure report
     })());
   },
   async fetch(req, env, ctx) {
@@ -47,7 +48,14 @@ async function handle(req, env) {
       }
       const results = await runChecks(env);
       const alerted = await evaluateAndAlert(env, results);
-      return Response.json({ ok: true, checked: TARGETS.map((t) => t.name), alert: alerted });
+      // ?daily=1 force-sends the daily infrastructure report now (test/on-demand),
+      // bypassing the once-a-day hour/date gate.
+      let report = null;
+      if (url.searchParams.get('daily') === '1') {
+        await sendDailyReport(env, results, await fetchDigest(env), new Date().toISOString().slice(0, 10));
+        report = 'sent';
+      }
+      return Response.json({ ok: true, checked: TARGETS.map((t) => t.name), alert: alerted, report });
     }
     if (url.pathname === '/api/history') {
       return Response.json(await history(env));
@@ -215,6 +223,85 @@ function esc(s) {
 // ---------------------------------------------------------------------------
 const ALERT_TO = 'caothohoanglong2404@gmail.com';
 const ALERT_REPEAT_MS = 24 * 60 * 60 * 1000;  // re-remind about an ACTIVE outage at most once a day
+const DAILY_REPORT_HOUR_UTC = 1;              // 01:00 UTC = 08:00 Vietnam (ICT). The cron runs
+                                              // every 5 min; the first tick in this hour mails
+                                              // the daily infrastructure report (de-duped by date).
+
+// Pull the device-api health digest (pipeline errors, stuck jobs, offline devices).
+// Best-effort: a failure just means the digest is unavailable (the device-api probe
+// already covers "device-api unreachable").
+async function fetchDigest(env) {
+  try {
+    const key = env.HEALTH_ALERT_KEY;
+    if (!key) return null;
+    const r = await fetch(`${SUPA}/functions/v1/device-api/api/health/alerts?key=${encodeURIComponent(key)}`,
+      { headers: { apikey: env.SUPA_ANON || '' } });
+    return r.ok ? await r.json() : null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+// Once per day (the first cron tick at/after DAILY_REPORT_HOUR_UTC), email a full
+// infrastructure report — every probed tier + the pipeline health digest — whether or
+// not anything is wrong. De-duped by date via alert_state id=2 so it sends exactly once.
+async function maybeDailyReport(env, results) {
+  const now = new Date();
+  if (now.getUTCHours() !== DAILY_REPORT_HOUR_UTC) return;
+  const today = now.toISOString().slice(0, 10);   // YYYY-MM-DD (UTC)
+  const row = await env.DB.prepare('SELECT sig FROM alert_state WHERE id = 2').first();
+  if (row?.sig === today) return;                  // already sent today
+  const digest = await fetchDigest(env);
+  await sendDailyReport(env, results, digest, today);
+  await env.DB.prepare('INSERT INTO alert_state (id, sig, sent_ms) VALUES (2, ?, ?) ON CONFLICT(id) DO UPDATE SET sig=excluded.sig, sent_ms=excluded.sent_ms')
+    .bind(today, Date.now()).run();
+}
+
+async function sendDailyReport(env, results, digest, dateStr) {
+  if (!env.EMAIL) { console.warn('[daily] EMAIL binding not configured'); return; }
+  const tiers = results || [];
+  const allUp = tiers.length > 0 && tiers.every((r) => r.status === 'up');
+  const errorCount = digest?.error_count ?? 0;
+  const stuckCount = digest?.stuck_count ?? 0;
+  const offline = digest?.offline_devices || [];
+  const healthy = allUp && errorCount === 0 && stuckCount === 0;
+  const when = new Date().toISOString();
+  const word = (s) => s === 'up' ? 'OK' : s === 'degraded' ? 'DEGRADED' : 'DOWN';
+
+  const tierText = tiers.map((r) => `  ${word(r.status).padEnd(9)}${r.name}  (HTTP ${r.code || '—'}, ${r.latency} ms)`).join('\n');
+  const errList = (digest?.recent_errors || []).slice(0, 10)
+    .map((e) => `    - ${e.device_serial} session ${e.session_number} (attempts ${e.attempts}): ${String(e.process_error || '').slice(0, 120)}`).join('\n');
+  const subject = `[SATE] Daily infrastructure report ${dateStr} — ${healthy ? 'all systems healthy' : 'attention needed'}`;
+  const text = [
+    `SATE daily infrastructure report — ${when}`, '',
+    'Tiers:', tierText, '',
+    digest ? `Pipeline: errors=${errorCount}  stuck=${stuckCount}  offline_devices=${offline.length}` : 'Pipeline: (digest unavailable)',
+    errList ? '\nRecent errors:\n' + errList : '',
+    '', 'Status page: https://sate-status.longcao.workers.dev',
+    'You receive this once a day; alerts still fire immediately on any new problem.',
+  ].join('\n');
+
+  const rows = tiers.map((r) => {
+    const c = r.status === 'up' ? '#15803d' : r.status === 'degraded' ? '#b45309' : '#b91c1c';
+    return `<tr><td style="padding:6px 10px;border-bottom:1px solid #eee;color:${c};font-weight:600;">${word(r.status)}</td><td style="padding:6px 10px;border-bottom:1px solid #eee;">${escapeHtml(r.name)}</td><td style="padding:6px 10px;border-bottom:1px solid #eee;color:#666;">HTTP ${r.code || '—'} · ${r.latency} ms</td></tr>`;
+  }).join('');
+  const headColor = healthy ? '#15803d' : '#b45309';
+  const html = `<!doctype html><html><body style="margin:0;padding:24px;background:#f5f5f5;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;">
+      <div style="max-width:600px;margin:0 auto;background:#fff;border-radius:8px;padding:28px;">
+        <h1 style="margin:0 0 4px;font-size:19px;color:${headColor};">SATE — daily infrastructure report</h1>
+        <p style="margin:0 0 16px;font-size:13px;color:#666;">${dateStr} · generated ${when}</p>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;margin:0 0 16px;">${rows}</table>
+        <p style="margin:0 0 6px;font-size:14px;color:#111;"><b>Pipeline:</b> errors=${errorCount} · stuck=${stuckCount} · offline devices=${offline.length}</p>
+        ${errList ? `<pre style="font-size:12px;color:#b91c1c;white-space:pre-wrap;margin:0 0 12px;">${escapeHtml(errList)}</pre>` : ''}
+        <p style="margin:16px 0 0;font-size:12px;color:#888;">You receive this once a day. Real-time alerts still fire immediately on any new problem. <a href="https://sate-status.longcao.workers.dev" style="color:#0c6b74;">Status page</a></p>
+      </div></body></html>`;
+
+  try {
+    await env.EMAIL.send({ to: ALERT_TO, from: { email: env.EMAIL_FROM, name: env.EMAIL_FROM_NAME || 'SATE' }, subject, text, html });
+  } catch (e) {
+    console.error('[daily] send failed:', e && e.message || e);
+  }
+}
 
 async function evaluateAndAlert(env, checkResults) {
   const problems = [];
@@ -227,15 +314,7 @@ async function evaluateAndAlert(env, checkResults) {
   // (b) the pipeline error digest from device-api (AI/audio/processing errors, stuck
   //     jobs, offline devices). Best-effort: a fetch failure just means "device-api
   //     unreachable", already covered by (a).
-  let digest = null;
-  try {
-    const key = env.HEALTH_ALERT_KEY;
-    if (key) {
-      const r = await fetch(`${SUPA}/functions/v1/device-api/api/health/alerts?key=${encodeURIComponent(key)}`,
-        { headers: { apikey: env.SUPA_ANON || '' } });
-      if (r.ok) digest = await r.json();
-    }
-  } catch (_e) { /* covered by the device-api probe */ }
+  const digest = await fetchDigest(env);
 
   if (digest) {
     for (const e of (digest.recent_errors || [])) {
