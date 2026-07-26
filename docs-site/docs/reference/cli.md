@@ -17,6 +17,7 @@ the live diagnostics behind a single `sate` entry point.
 
 ```bash
 pip install -e hwtest      # install once (or run in place with ./hwtest/sate)
+sate --version             # print the CLI version
 sate <command> -h          # per-command help and flags
 ```
 
@@ -61,7 +62,7 @@ touch the backend also run `sate e2e`. When a symptom is reported, look at the d
 | `sate pipeline` | Live animated map of the audio pipeline (desktop window) — real-time upload progress, per-tier health, and the session being processed. |
 | `sate gui` | Launch the native test window. |
 | `sate dashboard` | Launch the browser test dashboard. |
-| `sate version` | Show the CLI and firmware versions. |
+| `sate version` | Show the CLI **and** firmware versions (recorder + pendant). For just the CLI version, use the `sate --version` flag. |
 
 The test harness (`sate ci`, `sate test`, `sate e2e`) is the release gate: it exits non-zero on
 any fault, so it doubles as a pre-flash check in automation. See
