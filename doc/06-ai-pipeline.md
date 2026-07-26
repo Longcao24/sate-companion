@@ -270,6 +270,14 @@ Handling of a claimed job (`attempt` from the row):
 | any other `Exception` | treated as transient: `requeue_session()` if `attempt < MAX_ATTEMPTS`, else `fail_session()`; `traceback` printed |
 | outer-loop `Exception` (RPC/claim itself failed) | `traceback` + `sleep(POLL_INTERVAL)`, loop continues |
 
+- **Empty / too-short take** (guard, added 2026-07-26) → `process()` computes `_wav_seconds(wav)`
+  and if `< MIN_AUDIO_SEC` (env, default **0.4 s**) finalizes `{no_text:true}` and **returns WITHOUT
+  calling the AI**. Rationale: the AI service returns HTTP `500` on a near-empty WAV (a ~32 ms /
+  ~1 KB accidental tap), and a `5xx` is classified `Transient` → it would retry-loop into a stuck
+  `error` (hit real: `SATE-D0FDD4` session 35). The post-AI `no_text` path below only runs after a
+  *successful* AI call, which this input never reaches. NB deploying a new container image doesn't
+  instantly swap the running singleton — an in-flight claim is killed → orphaned in `processing`
+  until the 45-min watchdog; to re-run one now, owner-PATCH its row to `queued` via PostgREST.
 - **No usable speech** (AI returns 0 words) → `finalize({no_text:true})` → session `done`, **no
   `recordings` row** (device tab shows "No text in audio" + delete). Not an error.
 - **User Retry** button → `POST /sessions/:id/retry` (device-api, current in-comment version **v18**;

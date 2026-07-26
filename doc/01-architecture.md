@@ -352,8 +352,11 @@ Cloudflare cron (5 min) → runChecks() probe TARGETS (device-api, Supabase API,
          → digest: recent_errors, stuck_list (processing >45 min), error_count,
            offline_devices, plus a stable `signature`
      build signature; compare to D1 alert_state:
-       problems + (changed OR stale>6 h ALERT_REPEAT_MS) → sendAlertEmail (env.EMAIL binding)
+       new / changed problem set                          → sendAlertEmail (env.EMAIL binding)
+       still-broken, ACTIVE cond only (svc DOWN / stuck)  → re-remind ≤ every 24 h ALERT_REPEAT_MS
+         (a settled `error` is mailed ONCE, never re-reminded — it cannot auto-clear)
        problems==0 after a prior alert                    → sendRecoveredEmail ("all clear")
+       first cron tick at 08:00 America/New_York          → daily infrastructure report (alert_state id=2)
 ```
 
 - `device-api` `healthAlerts()` is **read-only**, gated on `HEALTH_ALERT_KEY` (no

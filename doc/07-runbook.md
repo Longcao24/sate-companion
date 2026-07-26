@@ -249,6 +249,7 @@ base_url/device_serial/device_id/device_key, `[record]`). `PROTECTED_SERIALS = (
 | `sate screenshot -o screen.png` | Capture the recorder's screen (debug build, `SCREENDUMP`). |
 | `sate debug` / `sate gui` / `sate dashboard` | Native Debugger app (screen mirror + remote control + `sate flash --version`) / native test window / browser dashboard. |
 | `sate version` | Show CLI + firmware source versions. |
+| `sate help` | List every command grouped by purpose (bare `sate` shows it too; `sate --version` = CLI version only). |
 
 ### The scenarios (`hwtest/hwtest/scenarios.py`)
 
@@ -476,9 +477,13 @@ the operator on any NEW problem and again when it clears (`evaluateAndAlert`):
   `recent_errors` / `stuck_list` entry into a problem.
 
 Alerts fire only on a **change** in the problem set (a signature of sorted keys — a lingering error
-does not mail every 5 min), with a re-remind every `ALERT_REPEAT_MS = 6 h`; an all-clear email
-when the set empties. Alert recipient: **`caothohoanglong2404@gmail.com`** (`ALERT_TO`). State
-(last signature + last-sent) lives in D1 `alert_state`.
+does not mail every 5 min). A **settled `error`** is mailed ONCE (it can't auto-clear); only an
+**actively-ongoing** condition (a service DOWN or a job stuck in `processing`) re-reminds, at most
+every `ALERT_REPEAT_MS = 24 h` — this killed a repeated-same-error email loop (session 35). An
+all-clear email fires when the set empties. A full **daily infrastructure report** (every tier +
+the health digest) is emailed at **08:00 America/New_York** (DST-aware, `GET /check?daily=1`
+force-sends it). Alert recipient: **`caothohoanglong2404@gmail.com`** (`ALERT_TO`). State lives in D1
+`alert_state` (id=1 = alert signature + last-sent; id=2 = the daily report's last-sent date).
 
 Deploy/secrets:
 ```bash

@@ -148,3 +148,16 @@ Notes on what actually lives where:
 
 The `doc/` folder reorganizes the same material into topic files; the root docs remain as
 deep-dives and history.
+
+## Published doc sites
+
+Two Docusaurus sites are deployed, from two different content sets:
+
+- **Public** — `docs-site/` → **[sate-docs.pages.dev](https://sate-docs.pages.dev)** (no auth). A
+  general/conceptual product & architecture overview: **no source-file names, function names, or
+  line numbers**. Deploy: `cd docs-site && npm run deploy:cf`.
+- **Private** — `docs-site-internal/` → **[sate-docs-internal.pages.dev](https://sate-docs-internal.pages.dev)**,
+  HTTP Basic Auth (user `sate`; password in the Cloudflare `SITE_PASSWORD` secret — never in git; the
+  gate fails closed if unset). This is **the detailed handbook** — it regenerates from THIS `doc/`
+  folder at deploy time (`cd docs-site-internal && npm run deploy:cf` syncs `../doc/*.md` first), so
+  `doc/` stays the single source of truth. Auth logic: `docs-site-internal/functions/_middleware.js`.
