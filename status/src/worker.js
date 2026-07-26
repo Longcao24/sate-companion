@@ -223,9 +223,10 @@ function esc(s) {
 // ---------------------------------------------------------------------------
 const ALERT_TO = 'caothohoanglong2404@gmail.com';
 const ALERT_REPEAT_MS = 24 * 60 * 60 * 1000;  // re-remind about an ACTIVE outage at most once a day
-const DAILY_REPORT_HOUR_UTC = 1;              // 01:00 UTC = 08:00 Vietnam (ICT). The cron runs
-                                              // every 5 min; the first tick in this hour mails
-                                              // the daily infrastructure report (de-duped by date).
+const DAILY_REPORT_TZ = 'America/New_York';   // the daily report is sent at 08:00 LOCAL time in
+const DAILY_REPORT_HOUR = 8;                  // this zone — DST-aware (Intl handles EDT/EST). The
+                                              // cron runs every 5 min; the first tick in this
+                                              // local hour mails it (de-duped per local date).
 
 // Pull the device-api health digest (pipeline errors, stuck jobs, offline devices).
 // Best-effort: a failure just means the digest is unavailable (the device-api probe
@@ -245,16 +246,25 @@ async function fetchDigest(env) {
 // Once per day (the first cron tick at/after DAILY_REPORT_HOUR_UTC), email a full
 // infrastructure report — every probed tier + the pipeline health digest — whether or
 // not anything is wrong. De-duped by date via alert_state id=2 so it sends exactly once.
+// Current wall-clock hour and calendar date in DAILY_REPORT_TZ (DST-aware via Intl).
+function reportLocalParts(now) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: DAILY_REPORT_TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', hour12: false,
+  }).formatToParts(now);
+  const get = (t) => parts.find((p) => p.type === t)?.value;
+  return { date: `${get('year')}-${get('month')}-${get('day')}`, hour: parseInt(get('hour'), 10) % 24 };
+}
+
 async function maybeDailyReport(env, results) {
-  const now = new Date();
-  if (now.getUTCHours() !== DAILY_REPORT_HOUR_UTC) return;
-  const today = now.toISOString().slice(0, 10);   // YYYY-MM-DD (UTC)
+  const { date, hour } = reportLocalParts(new Date());
+  if (hour !== DAILY_REPORT_HOUR) return;
   const row = await env.DB.prepare('SELECT sig FROM alert_state WHERE id = 2').first();
-  if (row?.sig === today) return;                  // already sent today
+  if (row?.sig === date) return;                   // already sent for this local date
   const digest = await fetchDigest(env);
-  await sendDailyReport(env, results, digest, today);
+  await sendDailyReport(env, results, digest, date);
   await env.DB.prepare('INSERT INTO alert_state (id, sig, sent_ms) VALUES (2, ?, ?) ON CONFLICT(id) DO UPDATE SET sig=excluded.sig, sent_ms=excluded.sent_ms')
-    .bind(today, Date.now()).run();
+    .bind(date, Date.now()).run();
 }
 
 async function sendDailyReport(env, results, digest, dateStr) {
