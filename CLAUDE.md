@@ -174,6 +174,19 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   `MAX_ATTEMPTS` then → `error`; transient failures (network/`5xx`/`408`/`429`) requeue with backoff
   (`requeue_session`); permanent (`4xx`, no segments) → `error` immediately; the user Retry button
   (`POST /sessions/:id/retry`, device-api ≥v14) re-queues an `error` session.
+- **Empty/too-short takes are finalized `no_text` BEFORE the AI call (`cf-processor/app/processor.py`,
+  2026-07-26).** The AI service returns HTTP `500` on a near-empty WAV (a ~32 ms / ~1 KB accidental
+  tap), and a `5xx` is transient → it retry-looped into a stuck `error` (hit real: session 35).
+  `process()` now computes `_wav_seconds(wav)` and, if `< MIN_AUDIO_SEC` (env, default `0.4`), calls
+  `finalize({no_text:true})` and returns without hitting the AI. Don't "fix" a stuck empty take by
+  retrying — it's handled up front. NB a new container image doesn't instantly swap the running
+  singleton (an in-flight claim is killed → orphaned in `processing` until the 45-min watchdog); to
+  re-run one now, owner-PATCH its row to `queued` via PostgREST (the retry route only accepts `error`).
+- **Error alerting + daily report (`status/src/worker.js`, Cloudflare `sate-status`).** The 5-min cron
+  probes each tier and emails the operator via the Cloudflare Email binding, using the device-api
+  `GET /api/health/alerts` digest. A settled `error` session is mailed ONCE (it can't auto-clear);
+  only ACTIVE conditions (service DOWN, job stuck in `processing`) re-remind, ≤ every 24h. A full daily
+  infrastructure report is emailed at 08:00 America/New_York; `GET /check?daily=1` force-sends it.
 - **Never move the AI call back into an edge/Worker fetch.** Any serverless request (Supabase edge OR
   a plain CF Worker — the ~100s 524 origin timeout) will kill a long synchronous transcription. The
   long call MUST live in a real long-running process (the container). `finalize-session` and

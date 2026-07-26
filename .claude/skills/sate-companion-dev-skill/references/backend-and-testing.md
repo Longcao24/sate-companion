@@ -43,7 +43,29 @@ recorder registration and Plaud token minting.
 
 `requeue_stale_sessions` auto-requeues stalled `processing` jobs up to `MAX_ATTEMPTS` then →
 `error`. Transient failures (network/5xx/408/429) requeue with backoff; permanent (4xx, no
-segments) → `error`. User Retry button = `POST /sessions/:id/retry` (device-api ≥v14).
+segments) → `error`. User Retry button = `POST /sessions/:id/retry` (device-api ≥v14, only for
+`status='error'`).
+
+**Empty/too-short takes (guard, `cf-processor/app/processor.py`):** the AI service returns HTTP
+**500** on a near-empty WAV (a ~32 ms / ~1 KB accidental tap), and a 5xx is classified transient →
+it would retry-loop into a permanently stuck `error` (hit real: SATE-D0FDD4 session 35). `process()`
+now finalizes any take shorter than `MIN_AUDIO_SEC` (env, default **0.4 s**) as `no_text` WITHOUT
+calling the AI. So don't "fix" a stuck empty take by retrying — it's handled up front. NB deploying a
+new container image doesn't instantly swap the running singleton (an in-flight claim is killed →
+orphaned in `processing` until the 45-min watchdog); to re-run one now, owner-PATCH its row back to
+`queued` via PostgREST.
+
+## Monitoring & alerting
+
+The `sate-status` Cloudflare worker (cron `*/5 * * * *`, `status/src/worker.js`) probes each tier and
+emails `caothohoanglong2404@gmail.com` via the Cloudflare Email binding, pulling the device-api
+`/api/health/alerts` digest (errors / stuck / offline). **Alert policy:** a settled `error` session is
+mailed ONCE (it can't auto-clear); only ACTIVE conditions (a service DOWN, a job stuck in
+`processing`) re-remind, at most every 24h — this killed a repeated-same-error email loop. A full
+**daily infrastructure report** is emailed at **08:00 America/New_York** (DST-aware). `GET /check`
+runs the probe on demand; `GET /check?daily=1` force-sends the daily report. Note: a Worker cannot
+probe same-account Cloudflare resources (error 1042), so the `cf-processor` worker is monitored
+indirectly via the pipeline digest.
 
 ## Hardware-in-the-loop testing (run before ANY firmware release)
 
@@ -78,9 +100,10 @@ tier with latency (incl. the deployed `/sessions/verify` route and the AI queue 
 board before it ships; it writes a per-version report to `hwtest/ci-reports/`. Do not
 cut a release, publish an OTA, or tag a version without a passing `sate ci` run.
 
-Four of the six recorder scenarios are hands-off — the harness drives `record` / `stop` /
-`reboot` through `device-api` with the signed-in clinician session. Only the two delete
-scenarios need a human (no remote delete command).
+`sate ci` runs the standard HANDS-OFF suite (7 scenarios: boot, resume, byte-match, verified-trim,
+unsynced-kept, reclaim-idle, standalone-default) — the harness drives `record` / `stop` / `reboot`
+through `device-api` with the signed-in clinician session. The delete scenarios in the fuller
+`sate test` suite still need a human (there is no remote delete command).
 
 **A serial DTR/RTS reset cannot reboot a recording device.** On the debug build `Serial` is
 USB-CDC, whose reset is handled in software, and the capture loop never services USB — the

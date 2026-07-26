@@ -24,8 +24,11 @@ shared BLE radio, hang the AI pipeline, or lose a patient's recording.
   behavior lives, read it there. Keep line-precise notes here, not in the published docs.
 - **`doc/01..09`** — the numbered engineering handbook (architecture, firmware, app, BLE,
   backend, AI pipeline, runbook, plaud, pendant).
-- **`docs-site/`** — the published human docs ([sate-docs.pages.dev](https://sate-docs.pages.dev)):
-  *how it works*, deliberately **without** line numbers so it stays maintainable.
+- **`docs-site/`** — the PUBLISHED, public docs ([sate-docs.pages.dev](https://sate-docs.pages.dev),
+  no auth): a general/conceptual overview of *how it works*. Deliberately **no source-file names,
+  function/symbol names, or line numbers** — outsiders read it, and those churn and leak internals.
+  Never put code-anchored detail here. (The one exception: the `sate` CLI, an operator-facing tool,
+  is documented at `docs-site/docs/reference/cli.md`.)
 - **`git log`** — the ground truth for current firmware/edge-fn versions (numbers drift).
 
 ## Common tasks → what to do
@@ -96,6 +99,7 @@ The long AI call lives in `cf-processor/` (Cloudflare container), triggered via 
 
 **Hardware testing + flashing — the `sate` CLI** (`pip install -e hwtest`, or `./hwtest/sate`):
 ```bash
+sate help                    # list every command + its purpose (bare `sate` shows it too; sate --version = CLI version)
 sate test --sim              # self-test the harness, no hardware
 sate test                    # recorder over USB serial
 sate test -t pendant         # pendant over BLE
@@ -140,7 +144,12 @@ Deeper, task-specific playbooks live alongside this file in `references/`:
 
 ## Doc conventions (so this stays maintainable)
 
-- **Published docs (`docs-site/`)**: describe how it works. Keep file/function names for
-  navigation, but **no line numbers** — they churn on every edit.
-- **Agent doc (`CLAUDE.md`) + `doc/`**: this is where line-precise, code-anchored detail belongs.
-- After changing behavior, update the matching `docs-site` page **and** `CLAUDE.md`.
+- **Published docs (`docs-site/`) are PUBLIC and GENERAL**: describe how it works at a conceptual
+  level. **No source-file names, function/symbol names, or line numbers** — the site has no auth,
+  and those both churn and leak internals. (Exception: the operator-facing `sate` CLI lives at
+  `docs-site/docs/reference/cli.md`.)
+- **Agent docs (`CLAUDE.md` + `doc/01..09`)**: where line-precise, code-anchored detail belongs —
+  real functions, files, routes, invariants. Maximize specificity here; this is the opposite of the
+  public site.
+- After changing behavior, put the precise detail in `CLAUDE.md`/`doc/`; touch the matching
+  `docs-site` page only for user-visible/conceptual changes, and keep it code-identifier-free.
