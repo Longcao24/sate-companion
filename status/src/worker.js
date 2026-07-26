@@ -207,12 +207,14 @@ function esc(s) {
 
 // ---------------------------------------------------------------------------
 // Error alerting: email the operator when anything goes wrong, and again when it
-// clears. Fires ONLY on a change in the problem set (so a lingering error does not
-// mail every 5 minutes), with a re-notify after ALERT_REPEAT_MS for anything still
-// broken. State (last problem signature + last-sent time) lives in D1.
+// clears. Fires ONLY on a change in the problem set (so a lingering issue does not
+// mail every 5 minutes). A settled 'error' session is alerted once and then stays
+// quiet (it can't auto-clear); only an ACTIVELY ongoing condition — a service DOWN or
+// a job stuck in 'processing' — gets a re-notify, at most once per ALERT_REPEAT_MS.
+// State (last problem signature + last-sent time) lives in D1.
 // ---------------------------------------------------------------------------
 const ALERT_TO = 'caothohoanglong2404@gmail.com';
-const ALERT_REPEAT_MS = 6 * 60 * 60 * 1000;   // re-remind about an ongoing problem every 6h
+const ALERT_REPEAT_MS = 24 * 60 * 60 * 1000;  // re-remind about an ACTIVE outage at most once a day
 
 async function evaluateAndAlert(env, checkResults) {
   const problems = [];
@@ -253,7 +255,14 @@ async function evaluateAndAlert(env, checkResults) {
   const prevSentMs = row?.sent_ms ?? 0;
 
   const changed = signature !== prevSig;
-  const stale = signature && (nowMs - prevSentMs) > ALERT_REPEAT_MS;
+  // Re-remind ONLY for conditions that are actively ongoing and could still change on
+  // their own — a service that is DOWN, or a job wedged in 'processing' (the watchdog
+  // is still working it). A settled 'error' session has already exhausted its retries
+  // and will NEVER auto-clear, so re-reminding it is pure noise: it is alerted ONCE
+  // when it first appears, then stays quiet until it is retried (→ "all clear") or a
+  // NEW problem joins the set. This is the fix for the repeated same-session emails.
+  const hasOngoing = problems.some((p) => p.k.startsWith('svc:') || p.k.startsWith('stuck:'));
+  const stale = signature && hasOngoing && (nowMs - prevSentMs) > ALERT_REPEAT_MS;
 
   let action = 'none';
   if (problems.length > 0 && (changed || stale)) {
