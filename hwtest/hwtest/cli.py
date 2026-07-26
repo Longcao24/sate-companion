@@ -1199,6 +1199,53 @@ def cmd_screenshot(args: argparse.Namespace) -> int:
     return 0
 
 
+# Curated, grouped command overview for `sate help` (and bare `sate`). Purpose-first,
+# grouped the same way as the published CLI reference; `sate <cmd> -h` has the flags.
+_HELP_GROUPS = [
+    ("Test & CI", [
+        ("ci",         "the standard firmware gate — build + flash + full hands-off suite"),
+        ("test",       "run the hardware-in-the-loop tests (--sim, --only, -t pendant)"),
+        ("e2e",        "deep whole-system test: recorder → Supabase → Cloudflare → AI → done"),
+        ("infra",      "connection test — probe every tier the audio depends on"),
+    ]),
+    ("Flash & firmware", [
+        ("flash",      "build + flash firmware (recorder|pendant; --version, --image, --debug)"),
+        ("firmware",   "list firmware images you can flash (local cache + releases)"),
+    ]),
+    ("Diagnose & monitor", [
+        ("doctor",     "check the toolchain/environment (--device diagnoses the board)"),
+        ("devices",    "list connected devices / serial ports (--ble scans the pendant)"),
+        ("monitor",    "mirror the recorder's live state from its serial log"),
+        ("screenshot", "capture the recorder's screen to a PNG (debug build only)"),
+        ("provision",  "push Wi-Fi to the recorder over BLE (register/claim or change Wi-Fi)"),
+    ]),
+    ("Graphical tools", [
+        ("debug",      "desktop Debugger app — screen mirror + remote control + flashing"),
+        ("pipeline",   "live animated map of the audio pipeline (desktop window)"),
+        ("gui",        "launch the native test window"),
+        ("dashboard",  "launch the browser test dashboard"),
+    ]),
+    ("Info", [
+        ("version",    "show CLI + firmware versions (or: sate --version)"),
+        ("help",       "show this command list"),
+    ]),
+]
+
+
+def cmd_help(args: argparse.Namespace) -> int:
+    banner()
+    print()
+    print(dim("  Test, flash, and diagnose the SATE recorder & pendant from one command."))
+    for title, cmds in _HELP_GROUPS:
+        print()
+        print("  " + bold(cyan(title)))
+        for name, purpose in cmds:
+            print(f"    {green(name.ljust(10))}  {purpose}")
+    print()
+    print(dim("  Run ") + bold("sate <command> -h") + dim(" for a command's flags   ·   install: pip install -e hwtest"))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="sate",
@@ -1290,6 +1337,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("gui", help="launch the native test window").set_defaults(func=cmd_gui)
     sub.add_parser("dashboard", help="launch the browser test dashboard").set_defaults(func=cmd_dashboard)
     sub.add_parser("version", help="show CLI + firmware versions").set_defaults(func=cmd_version)
+    sub.add_parser("help", help="list every command and what it does").set_defaults(func=cmd_help)
     return ap
 
 
@@ -1299,10 +1347,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = build_parser()
     args = ap.parse_args(argv)
     if not getattr(args, "cmd", None):
-        banner()
-        print()
-        ap.print_help()
-        return 0
+        return cmd_help(args)
     return args.func(args)
 
 
