@@ -1,0 +1,6 @@
+node_modules
+build/
+.docusaurus/
+.wrangler/
+# content is synced from repo-root doc/ at deploy time — not source here
+docs/
