@@ -40,7 +40,7 @@ touch the backend also run `sate e2e`. When a symptom is reported, look at the d
 
 | Command | What it does |
 |---|---|
-| `sate flash recorder` | Build and flash the recorder firmware (auto-detects the port). Flags: `--version <v>` (flash a published older build), `--image <file>` (a specific binary), `--debug` (enable the serial log). |
+| `sate flash` / `sate flash recorder` | Build and flash the recorder firmware — `recorder` is the default, so bare `sate flash` works. Auto-detects the serial port (prefers the recorder itself when several USB devices are attached) and prints which one it chose; pass `--port` to override. Flags: `--version <v>` (flash a published older build), `--image <file>` (a specific binary), `--debug` (enable the serial log). |
 | `sate flash pendant` | Build and flash the pendant firmware. |
 | `sate firmware` | List every firmware image you can flash (local cache + published releases). |
 
