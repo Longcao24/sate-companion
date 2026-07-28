@@ -116,7 +116,7 @@
 <header>
   <div class="head-inner">
     <div class="brandrow">
-      <div class="brand"><img src="/LOGO.png" alt="SATE" class="logo"><div><p class="eyebrow">User acceptance test</p><h1>Recorder — User Test Form</h1></div></div>
+      <div class="brand"><img src="/LOGO.png" alt="SATE" class="logo"><h1>Recorder — User Test Form</h1></div>
       <div class="headlinks">
         <a class="rlink" href="/result" title="View all submitted results (login required)">Results ↗</a>
         <button class="themebtn" id="themeBtn" type="button" title="Toggle light / dark">◐ Theme</button>
@@ -180,6 +180,9 @@
       { id:7, title:"Several recordings in a row", check:"Back-to-back recordings all upload and none are lost or mixed up.",
         steps:["Make 3 short recordings, stopping between each.","Leave the recorder on Wi-Fi.","Open the web app."],
         expect:"All 3 recordings appear, each with its own transcript, in the right order — none missing or merged." },
+      { id:8, title:"Long recording (over 30 minutes)", check:"A long session records fully without stopping early, and uploads and transcribes completely.",
+        steps:["Start recording and let it run for MORE than 30 minutes (talk or play audio through it; it's fine to leave it running).","Press stop.","Leave it on Wi-Fi and wait — a long recording takes longer to upload and transcribe.","Open the recording on the web app and check the length and the transcript."],
+        expect:"The recorder keeps recording the whole time (doesn't cut off), the finished recording is the full length (30+ minutes) as ONE recording, and the transcript covers the whole session once processing finishes." },
     ]},
   ];
   const $ = (s,r=document)=>r.querySelector(s);
@@ -196,9 +199,8 @@
         const st=state.tests[t.id]||{};
         const card=document.createElement("section"); card.className="card"+(st.status?" is-"+st.status:""); card.id="t"+t.id;
         card.innerHTML=`<div class="card-top"><div class="num">${t.id}</div><div><h3>${esc(t.title)}</h3><p class="check">${esc(t.check)}</p></div></div>
-          <details class="tst"${st.status?"":" open"}><summary>How to test</summary>
-            <div class="steps"><p class="lbl">Do this</p><ol>${t.steps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>
-            <p class="expect"><span class="lbl">You should see&nbsp;·&nbsp;</span>${esc(t.expect)}</p></div></details>
+          <div class="steps"><p class="lbl">How to test</p><ol>${t.steps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>
+            <p class="expect"><span class="lbl">You should see&nbsp;·&nbsp;</span>${esc(t.expect)}</p></div>
           <div class="verdict"><div class="seg" role="group" aria-label="Result for test ${t.id}">
             <button type="button" data-v="pass" aria-pressed="${st.status==='pass'}">Pass</button>
             <button type="button" data-v="fail" aria-pressed="${st.status==='fail'}">Fail</button>

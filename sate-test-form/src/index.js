@@ -9,6 +9,7 @@ const TITLES = {
   5: 'Turn off and on WHILE uploading',
   6: 'Record with Wi-Fi off, then turn Wi-Fi on',
   7: 'Several recordings in a row',
+  8: 'Long recording (over 30 minutes)',
 };
 const TOTAL = Object.keys(TITLES).length;
 
