@@ -1,8 +1,17 @@
+# credentials — NEVER commit (copy config.example.toml → config.toml and fill it in)
 config.toml
+
+# python
 .venv/
 __pycache__/
 *.pyc
-"SATE Hardware Test.app"/
-"SATE Debugger.app"/
-sate_hwcli.egg-info/
-.mirror.ppm
+*.egg-info/
+
+# built launcher app (regenerate with build_app.command) — note: NO quotes in .gitignore
+SATE Hardware Test.app/
+SATE Debugger.app/
+
+# per-run test artifacts
+ci-reports/
+*.ppm
+.DS_Store
