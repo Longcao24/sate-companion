@@ -82,7 +82,8 @@ export default {
 };
 
 function renderResults(rows) {
-  const B = '#3a86ff', BD = '#2d6cff', INK = '#15203a', MUT = '#5b6b86', HAIR = '#e4e9f2';
+  const B = '#3a86ff', INK = '#101828', MUT = '#667085', HAIR = '#e4e7ec';
+  const PASS = '#16a34a', FAIL = '#dc2626', NA = '#667085';
   const runs = rows.map((r) => {
     let payload = {}; try { payload = JSON.parse(r.payload); } catch {}
     const tests = payload.tests || {};
@@ -91,7 +92,7 @@ function renderResults(rows) {
     const testRows = Object.keys(TITLES).map((id) => {
       const t = tests[id] || {};
       const s = t.status;
-      const mk = s === 'pass' ? ['PASS', '#157f43'] : s === 'fail' ? ['FAIL', '#b3261e'] : s === 'na' ? ['N/A', '#5f6b78'] : ['—', '#9aa8b4'];
+      const mk = s === 'pass' ? ['PASS', PASS] : s === 'fail' ? ['FAIL', FAIL] : s === 'na' ? ['N/A', NA] : ['—', '#98a2b3'];
       return `<tr>
         <td style="padding:5px 10px;border-top:1px solid ${HAIR};color:${MUT};font-variant-numeric:tabular-nums;">${id}</td>
         <td style="padding:5px 10px;border-top:1px solid ${HAIR};">${esc(TITLES[id])}</td>
@@ -103,7 +104,7 @@ function renderResults(rows) {
         <span style="font-weight:700;">${esc(r.tester || 'Unknown tester')}</span>
         <span style="color:${MUT};font-size:13px;">${esc(r.run_date || '')} · ${esc(r.device || '—')}${r.build ? ' · ' + esc(r.build) : ''}</span>
         <span style="flex:1;"></span>
-        ${chip(r.n_pass, '#157f43', 'pass')} ${chip(r.n_fail, '#b3261e', 'fail')} ${chip(r.n_na, '#5f6b78', 'n/a')}
+        ${chip(r.n_pass, PASS, 'pass')} ${chip(r.n_fail, FAIL, 'fail')} ${chip(r.n_na, NA, 'n/a')}
         <span style="color:${MUT};font-size:12px;font-family:ui-monospace,Menlo,monospace;">${when}</span>
       </summary>
       <div style="padding:0 16px 14px;overflow-x:auto;">
@@ -118,7 +119,7 @@ function renderResults(rows) {
   <title>SATE Test Results</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
   <style>
-    body{margin:0;background:#eef2f9;color:${INK};font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;}
+    body{margin:0;background:#f5f6f8;color:${INK};font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;}
     .wrap{max-width:900px;margin:0 auto;padding:22px 18px 60px;}
     .top{border-bottom:2px solid ${B};padding-bottom:12px;margin-bottom:18px;}
     .eyebrow{font-family:ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:${B};font-weight:700;margin:0;}
@@ -127,7 +128,7 @@ function renderResults(rows) {
     a.btn{display:inline-block;text-decoration:none;font-size:13px;font-weight:600;color:${B};border:1px solid ${HAIR};background:#fff;padding:7px 13px;border-radius:9px;}
     .empty{color:${MUT};background:#fff;border:1px dashed ${HAIR};border-radius:12px;padding:28px;text-align:center;}
   </style></head><body><div class="wrap">
-    <div class="top"><p class="eyebrow">SATE · Recorder test</p><h1>Test results</h1></div>
+    <div class="top" style="display:flex;align-items:center;gap:12px;"><img src="/LOGO.png" alt="SATE" style="height:28px;width:auto;"><div><p class="eyebrow">Recorder test</p><h1>Test results</h1></div></div>
     <p class="sub">${rows.length} submitted run${rows.length === 1 ? '' : 's'}. <a class="btn" href="/">← Back to the test form</a></p>
     ${runs || '<div class="empty">No test runs submitted yet. Fill in the form and press <b>Submit results</b>.</div>'}
   </div></body></html>`;
