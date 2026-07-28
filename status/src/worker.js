@@ -334,7 +334,7 @@ async function sendDailyReport(env, results, digest, dateStr) {
     'Tiers:', tierText, '',
     digest ? `Pipeline: errors=${errorCount}  stuck=${stuckCount}  offline_devices=${offline.length}` : 'Pipeline: (digest unavailable)',
     errList ? '\nRecent errors:\n' + errList : '',
-    '', 'Status page: https://sate-status.longcao.workers.dev',
+    '', 'Status page: https://status-sate.long-cao.dev',
     'You receive this once a day; alerts still fire immediately on any new problem.',
   ].join('\n');
 
@@ -350,7 +350,7 @@ async function sendDailyReport(env, results, digest, dateStr) {
         <table style="width:100%;border-collapse:collapse;font-size:13px;margin:0 0 16px;">${rows}</table>
         <p style="margin:0 0 6px;font-size:14px;color:#111;"><b>Pipeline:</b> errors=${errorCount} · stuck=${stuckCount} · offline devices=${offline.length}</p>
         ${errList ? `<pre style="font-size:12px;color:#b91c1c;white-space:pre-wrap;margin:0 0 12px;">${escapeHtml(errList)}</pre>` : ''}
-        <p style="margin:16px 0 0;font-size:12px;color:#888;">You receive this once a day. Real-time alerts still fire immediately on any new problem. <a href="https://sate-status.longcao.workers.dev" style="color:#0c6b74;">Status page</a></p>
+        <p style="margin:16px 0 0;font-size:12px;color:#888;">You receive this once a day. Real-time alerts still fire immediately on any new problem. <a href="https://status-sate.long-cao.dev" style="color:#0c6b74;">Status page</a></p>
       </div></body></html>`;
 
   try {
@@ -426,7 +426,7 @@ async function sendAlertEmail(env, problems, digest) {
   const lines = problems.map((p) => `• ${p.msg}`).join('\n');
   const counts = digest ? `errors=${digest.error_count} stuck=${digest.stuck_count} offline=${(digest.offline_devices || []).length}` : '';
   const subject = `[SATE] ${problems.length} issue${problems.length > 1 ? 's' : ''} detected` + (problems.some((p) => p.k.startsWith('svc:')) ? ' — a service is DOWN' : '');
-  const text = [`SATE detected ${problems.length} issue(s) at ${when}.`, '', lines, '', counts, '', 'Status page: https://sate-status.pages.dev', 'This is an automated alert; you will get one more email when it clears.'].join('\n');
+  const text = [`SATE detected ${problems.length} issue(s) at ${when}.`, '', lines, '', counts, '', 'Status page: https://status-sate.long-cao.dev', 'This is an automated alert; you will get one more email when it clears.'].join('\n');
   const htmlList = problems.map((p) => `<li style="margin:0 0 6px;color:#b91c1c;">${escapeHtml(p.msg)}</li>`).join('');
   try {
     await env.EMAIL.send({
@@ -439,7 +439,7 @@ async function sendAlertEmail(env, problems, digest) {
           <h1 style="margin:0 0 6px;font-size:19px;color:#111;">SATE — ${problems.length} issue${problems.length > 1 ? 's' : ''} detected</h1>
           <p style="margin:0 0 16px;font-size:13px;color:#666;">${when}${counts ? ' · ' + escapeHtml(counts) : ''}</p>
           <ul style="margin:0 0 20px;padding-left:20px;font-size:14px;line-height:1.5;">${htmlList}</ul>
-          <p style="margin:0;font-size:13px;color:#666;"><a href="https://sate-status.pages.dev" style="color:#0c6b74;">Open the status page</a> · you'll get one more email when this clears.</p>
+          <p style="margin:0;font-size:13px;color:#666;"><a href="https://status-sate.long-cao.dev" style="color:#0c6b74;">Open the status page</a> · you'll get one more email when this clears.</p>
         </div></body></html>`,
     });
   } catch (e) { console.error('[alert] send failed:', e && e.message || e); }
@@ -453,8 +453,8 @@ async function sendRecoveredEmail(env) {
       to: ALERT_TO,
       from: { email: env.EMAIL_FROM, name: env.EMAIL_FROM_NAME || 'SATE' },
       subject: '[SATE] All clear — issues resolved',
-      text: `All previously reported SATE issues have cleared as of ${when}.\n\nStatus page: https://sate-status.pages.dev`,
-      html: `<!doctype html><html><body style="margin:0;padding:24px;background:#f5f5f5;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;"><div style="max-width:560px;margin:0 auto;background:#fff;border-radius:8px;padding:28px;"><h1 style="margin:0 0 8px;font-size:19px;color:#15803d;">SATE — all clear</h1><p style="margin:0 0 16px;font-size:14px;color:#444;">All previously reported issues have cleared as of ${when}.</p><p style="margin:0;font-size:13px;color:#666;"><a href="https://sate-status.pages.dev" style="color:#0c6b74;">Status page</a></p></div></body></html>`,
+      text: `All previously reported SATE issues have cleared as of ${when}.\n\nStatus page: https://status-sate.long-cao.dev`,
+      html: `<!doctype html><html><body style="margin:0;padding:24px;background:#f5f5f5;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;"><div style="max-width:560px;margin:0 auto;background:#fff;border-radius:8px;padding:28px;"><h1 style="margin:0 0 8px;font-size:19px;color:#15803d;">SATE — all clear</h1><p style="margin:0 0 16px;font-size:14px;color:#444;">All previously reported issues have cleared as of ${when}.</p><p style="margin:0;font-size:13px;color:#666;"><a href="https://status-sate.long-cao.dev" style="color:#0c6b74;">Status page</a></p></div></body></html>`,
     });
   } catch (e) { console.error('[alert] recovered send failed:', e && e.message || e); }
 }

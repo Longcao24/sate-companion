@@ -85,7 +85,7 @@ const config: Config = {
       },
       items: [
         {type: 'docSidebar', sidebarId: 'docs', position: 'left', label: 'Docs'},
-        {href: 'https://sate-status.longcao.workers.dev', label: 'Status', position: 'right'},
+        {href: 'https://status-sate.long-cao.dev', label: 'Status', position: 'right'},
       ],
     },
     footer: {
@@ -120,7 +120,7 @@ const config: Config = {
         {
           title: 'Operations',
           items: [
-            {label: 'Status page', href: 'https://sate-status.longcao.workers.dev'},
+            {label: 'Status page', href: 'https://status-sate.long-cao.dev'},
             {label: 'Firmware release', to: '/operations/firmware-release'},
             {label: 'Hardware testing', to: '/operations/hardware-testing'},
           ],

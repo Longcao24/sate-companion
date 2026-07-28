@@ -128,7 +128,7 @@ Notes on what actually lives where:
   `cloudflare/` is a **separate, self-contained** Workers+D1+R2 re-implementation
   (`src/policy.ts` re-implements tenant isolation because D1 has no RLS) — it does not
   touch the Supabase stack, the web `src/`, or the firmware.
-- **Error-email alerting**: the `status/` Worker (`sate-status.longcao.workers.dev`, cron
+- **Error-email alerting**: the `status/` Worker (`status-sate.long-cao.dev`, cron
   every 5 min) plus `device-api`'s secret-gated `GET /api/health/alerts?key=…` (v18) email
   the operator (`caothohoanglong2404@gmail.com`) via the Cloudflare Email binding on any new
   pipeline error / stuck job, and once more when it clears.

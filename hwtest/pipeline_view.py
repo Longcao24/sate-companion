@@ -140,11 +140,16 @@ class PipelineView:
 
         bar = tk.Frame(w, bg=BG)
         bar.pack(fill="x", padx=16, pady=(2, 12))
-        self.test_btn = tk.Button(bar, text="▶  Run pipeline test", command=self._run_test,
-                                  relief="flat", bg=ACCENT, fg="white",
-                                  activebackground="#1d4ed8", activeforeground="white",
-                                  font=("Helvetica Neue", 12, "bold"), padx=14, pady=6)
+        # A Label, not a Button: on macOS a native tk.Button ignores `bg`, so the
+        # blue fill was dropped and white text landed on the light system button
+        # (white-on-white). A Label honours bg, so the button stays readable.
+        self._test_enabled = True
+        self.test_btn = tk.Label(bar, text="▶  Run pipeline test", bg=ACCENT, fg="white",
+                                 cursor="hand2", font=("Helvetica Neue", 12, "bold"), padx=16, pady=7)
         self.test_btn.pack(side="left")
+        self.test_btn.bind("<Button-1>", lambda e: self._run_test() if self._test_enabled else None)
+        self.test_btn.bind("<Enter>", lambda e: self.test_btn.config(bg="#1d4ed8") if self._test_enabled else None)
+        self.test_btn.bind("<Leave>", lambda e: self.test_btn.config(bg=ACCENT) if self._test_enabled else None)
         tk.Label(bar, text="  record for", bg=BG, fg=INK2, font=("Menlo", 10)).pack(side="left", padx=(10, 4))
         self.dur_var = tk.StringVar(value="0:30")
         tk.Entry(bar, textvariable=self.dur_var, width=7, font=("Menlo", 12), justify="center",
@@ -319,7 +324,8 @@ class PipelineView:
             return
         self.testing = True
         self._target_s = dur
-        self.test_btn.config(state="disabled", text=f"▶  recording {_fmt_s(dur)} — watch the map…")
+        self._test_enabled = False
+        self.test_btn.config(bg="#6f97e6", cursor="arrow", text=f"▶  recording {_fmt_s(dur)} — watch the map…")
 
         def work():
             import json
@@ -569,7 +575,8 @@ class PipelineView:
                     self._poll_err = (time.time(), str(payload))
                 elif kind == "test_done":
                     self.testing = False
-                    self.test_btn.config(state="normal", text="▶  Run pipeline test")
+                    self._test_enabled = True
+                    self.test_btn.config(bg=ACCENT, cursor="hand2", text="▶  Run pipeline test")
         except queue.Empty:
             pass
 
