@@ -140,6 +140,34 @@ function renderResults(rows) {
       </div></details>`;
   }).join('');
 
+  // Aggregate per-test status across all runs → the "Status by test" chart.
+  const agg = {};
+  for (const id of Object.keys(TITLES)) agg[id] = { pass: 0, fail: 0, na: 0, none: 0 };
+  for (const r of rows) {
+    let p = {}; try { p = JSON.parse(r.payload).tests || {}; } catch {}
+    for (const id of Object.keys(TITLES)) {
+      const s = (p[id] || {}).status;
+      agg[id][s === 'pass' ? 'pass' : s === 'fail' ? 'fail' : s === 'na' ? 'na' : 'none']++;
+    }
+  }
+  const tPass = rows.reduce((s, r) => s + r.n_pass, 0);
+  const tFail = rows.reduce((s, r) => s + r.n_fail, 0);
+  const tNa = rows.reduce((s, r) => s + r.n_na, 0);
+  const seg = (n, tot, c) => (n ? `<span style="width:${(n / tot * 100).toFixed(2)}%;background:${c};"></span>` : '');
+  const chartRows = Object.keys(TITLES).map((id) => {
+    const a = agg[id], tot = Math.max(1, a.pass + a.fail + a.na + a.none);
+    return `<div class="crow"><span class="clabel" title="${esc(TITLES[id])}">${id}. ${esc(TITLES[id])}</span>` +
+      `<div class="cbar" role="img" aria-label="test ${id}: ${a.pass} pass, ${a.fail} fail, ${a.na} n/a">` +
+      `${seg(a.pass, tot, PASS)}${seg(a.fail, tot, FAIL)}${seg(a.na, tot, NA)}${seg(a.none, tot, '#d7dce3')}</div>` +
+      `<span class="ccount">${a.pass}/${a.fail}/${a.na}</span></div>`;
+  }).join('');
+  const chart = rows.length ? `
+    <section class="chart">
+      <div class="chead"><span>Status by test</span><span class="csub">${tPass} pass · ${tFail} fail · ${tNa} n/a across ${rows.length} run${rows.length === 1 ? '' : 's'}</span></div>
+      <div class="legend"><span><i style="background:${PASS}"></i>pass</span><span><i style="background:${FAIL}"></i>fail</span><span><i style="background:${NA}"></i>n/a</span><span><i style="background:#d7dce3"></i>not tested</span></div>
+      ${chartRows}
+    </section>` : '';
+
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SATE Test Results</title>
   <link rel="icon" type="image/png" href="/favicon.png">
@@ -152,9 +180,21 @@ function renderResults(rows) {
     .sub{color:${MUT};font-size:13px;margin:12px 0 18px;}
     a.btn{display:inline-block;text-decoration:none;font-size:13px;font-weight:600;color:${B};border:1px solid ${HAIR};background:#fff;padding:7px 13px;border-radius:9px;}
     .empty{color:${MUT};background:#fff;border:1px dashed ${HAIR};border-radius:12px;padding:28px;text-align:center;}
+    .chart{background:#fff;border:1px solid ${HAIR};border-radius:12px;padding:16px 18px;margin:0 0 18px;box-shadow:0 1px 2px rgba(20,32,58,.05);}
+    .chead{display:flex;justify-content:space-between;align-items:baseline;font-weight:700;font-size:15px;flex-wrap:wrap;gap:6px;}
+    .chead .csub{color:${MUT};font-size:12px;font-weight:400;font-variant-numeric:tabular-nums;}
+    .legend{display:flex;gap:14px;margin:8px 0 14px;font-size:12px;color:${MUT};flex-wrap:wrap;}
+    .legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle;}
+    .crow{display:flex;align-items:center;gap:12px;margin:0 0 8px;}
+    .clabel{flex:0 0 210px;font-size:13px;color:#344054;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .cbar{flex:1;display:flex;height:14px;border-radius:7px;overflow:hidden;background:#eef1f4;gap:1px;}
+    .cbar span{display:block;height:100%;}
+    .ccount{flex:0 0 auto;font-size:12px;color:${MUT};font-variant-numeric:tabular-nums;min-width:58px;text-align:right;}
+    @media(max-width:560px){.clabel{flex-basis:120px;}}
   </style></head><body><div class="wrap">
     <div class="top" style="display:flex;align-items:center;gap:12px;"><img src="/LOGO.png" alt="SATE" style="height:28px;width:auto;"><div><p class="eyebrow">Recorder test</p><h1>Test results</h1></div></div>
     <p class="sub">${rows.length} submitted run${rows.length === 1 ? '' : 's'}. <a class="btn" href="/">← Back to the test form</a></p>
+    ${chart}
     ${runs || '<div class="empty">No test runs submitted yet. Fill in the form and press <b>Submit results</b>.</div>'}
   </div></body></html>`;
 }
