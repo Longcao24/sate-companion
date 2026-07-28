@@ -1,0 +1,24 @@
+name = "sate-test-form"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+# Custom domain (top-level key; must sit above any [table] header or TOML attaches
+# it to that table). Provisioned + DNS created on deploy.
+routes = [
+  { pattern = "test-sate.long-cao.dev", custom_domain = true }
+]
+
+# Serve the form (public/index.html) as a static asset; the Worker handles /api/results and /result.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# Test results are saved here (submitted from the form, read by /result).
+[[d1_databases]]
+binding = "DB"
+database_name = "sate-test-form"
+database_id = "9bdd76e0-4fbf-47ea-a64d-5228c59c0e36"
+
+[vars]
+RESULT_USER = "sate"
+# RESULT_PASSWORD is a Cloudflare secret (never in git): npx wrangler secret put RESULT_PASSWORD

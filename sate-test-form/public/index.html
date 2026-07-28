@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="SATE recorder user acceptance test form">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎙️</text></svg>">
+<title>SATE Recorder — User Test Form</title>
+<style>
+  :root {
+    --bg: #eef2f9; --surface: #ffffff; --surface-2: #f4f7fd;
+    --ink: #15203a; --muted: #5b6b86; --faint: #8a99b5; --hair: #e0e6f1;
+    --accent: #3a86ff; --accent-hi: #2d6cff; --accent-ink: #ffffff; --accent-soft: #e5eeff;
+    --pass: #157f43; --pass-bg: #dbf3e3; --pass-line: #9bd8b1;
+    --fail: #b3261e; --fail-bg: #fbe1df; --fail-line: #eeb4b0;
+    --skip: #5f6b78; --skip-bg: #e9edf1; --skip-line: #c9d2da;
+    --shadow: 0 1px 2px rgba(20,32,58,.05), 0 4px 16px rgba(20,32,58,.05);
+    --radius: 14px;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0c1220; --surface: #141c2e; --surface-2: #1a2338;
+      --ink: #e8edf7; --muted: #9fb0cc; --faint: #6a7a99; --hair: #26324a;
+      --accent: #6ea8ff; --accent-hi: #86b8ff; --accent-ink: #08152e; --accent-soft: #172443;
+      --pass: #56d98a; --pass-bg: #12341f; --pass-line: #2c6b40;
+      --fail: #f2938c; --fail-bg: #3a1613; --fail-line: #7c3630;
+      --skip: #9aa8b4; --skip-bg: #1d2536; --skip-line: #33415c;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 6px 20px rgba(0,0,0,.28);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg:#eef2f9;--surface:#fff;--surface-2:#f4f7fd;--ink:#15203a;--muted:#5b6b86;--faint:#8a99b5;--hair:#e0e6f1;
+    --accent:#3a86ff;--accent-hi:#2d6cff;--accent-ink:#fff;--accent-soft:#e5eeff;
+    --pass:#157f43;--pass-bg:#dbf3e3;--pass-line:#9bd8b1;--fail:#b3261e;--fail-bg:#fbe1df;--fail-line:#eeb4b0;
+    --skip:#5f6b78;--skip-bg:#e9edf1;--skip-line:#c9d2da;--shadow:0 1px 2px rgba(20,32,58,.05),0 4px 16px rgba(20,32,58,.05);
+  }
+  :root[data-theme="dark"] {
+    --bg:#0c1220;--surface:#141c2e;--surface-2:#1a2338;--ink:#e8edf7;--muted:#9fb0cc;--faint:#6a7a99;--hair:#26324a;
+    --accent:#6ea8ff;--accent-hi:#86b8ff;--accent-ink:#08152e;--accent-soft:#172443;
+    --pass:#56d98a;--pass-bg:#12341f;--pass-line:#2c6b40;--fail:#f2938c;--fail-bg:#3a1613;--fail-line:#7c3630;
+    --skip:#9aa8b4;--skip-bg:#1d2536;--skip-line:#33415c;--shadow:0 1px 2px rgba(0,0,0,.3),0 6px 20px rgba(0,0,0,.28);
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font-family:var(--sans); line-height:1.55; -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:860px; margin:0 auto; padding:0 18px 72px; }
+  header { position:sticky; top:0; z-index:10; background:color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter:blur(8px); border-bottom:1px solid var(--hair); }
+  .head-inner { max-width:860px; margin:0 auto; padding:14px 18px 12px; }
+  .brandrow { display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+  .eyebrow { font-family:var(--mono); font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:var(--accent); font-weight:700; margin:0; }
+  h1 { font-size:20px; letter-spacing:-.01em; margin:2px 0 0; text-wrap:balance; }
+  .headlinks { display:flex; gap:8px; align-items:center; }
+  .themebtn, .rlink { border:1px solid var(--hair); background:var(--surface); color:var(--muted); border-radius:9px; padding:6px 10px; font-size:12px; cursor:pointer; font-family:var(--mono); text-decoration:none; }
+  .themebtn:hover, .rlink:hover { color:var(--ink); }
+  .summary { display:flex; align-items:center; gap:14px; margin-top:12px; flex-wrap:wrap; }
+  .counts { display:flex; gap:8px; flex-wrap:wrap; }
+  .count { display:inline-flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; padding:3px 10px; border-radius:999px; font-variant-numeric:tabular-nums; border:1px solid var(--hair); background:var(--surface); }
+  .count .dot { width:8px; height:8px; border-radius:50%; }
+  .count.pass .dot{background:var(--pass);} .count.fail .dot{background:var(--fail);} .count.skip .dot{background:var(--skip);} .count.left .dot{background:var(--faint);}
+  .progress { flex:1 1 160px; height:8px; border-radius:999px; background:var(--surface-2); border:1px solid var(--hair); overflow:hidden; min-width:120px; }
+  .progress > span { display:block; height:100%; width:0; background:var(--accent); transition:width .25s ease; }
+  .saved { font-size:11.5px; color:var(--faint); font-family:var(--mono); white-space:nowrap; }
+  .meta { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin:18px 0 6px; }
+  .field label { display:block; font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); margin:0 0 4px; font-weight:600; }
+  .field input { width:100%; padding:8px 10px; border:1px solid var(--hair); border-radius:9px; background:var(--surface); color:var(--ink); font-family:var(--sans); font-size:14px; }
+  .field input:focus-visible { outline:2px solid var(--accent); outline-offset:1px; border-color:var(--accent); }
+  .intro { color:var(--muted); font-size:13.5px; margin:14px 0 4px; }
+  .grouptitle { font-family:var(--mono); font-size:12px; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); margin:26px 0 10px; padding-bottom:6px; border-bottom:1px solid var(--hair); font-weight:600; }
+  .card { background:var(--surface); border:1px solid var(--hair); border-radius:var(--radius); box-shadow:var(--shadow); padding:16px 18px; margin:0 0 14px; scroll-margin-top:130px; border-left:4px solid var(--hair); transition:border-left-color .15s ease; }
+  .card.is-pass{border-left-color:var(--pass);} .card.is-fail{border-left-color:var(--fail);} .card.is-na{border-left-color:var(--skip);}
+  .card-top { display:flex; gap:12px; align-items:flex-start; }
+  .num { flex:none; width:30px; height:30px; border-radius:8px; background:var(--accent-soft); color:var(--accent); font-family:var(--mono); font-weight:700; font-size:14px; display:flex; align-items:center; justify-content:center; }
+  .card h3 { margin:3px 0 2px; font-size:15.5px; letter-spacing:-.005em; }
+  .check { color:var(--muted); font-size:13px; margin:0; }
+  details.tst { margin:12px 0 0; }
+  summary { cursor:pointer; font-size:12.5px; color:var(--accent); font-weight:600; list-style:none; display:inline-flex; align-items:center; gap:6px; user-select:none; }
+  summary::-webkit-details-marker { display:none; }
+  summary::before { content:"▸"; font-size:10px; transition:transform .15s ease; }
+  details[open] > summary::before { transform:rotate(90deg); }
+  .steps { margin:10px 0 0; padding:12px 14px; background:var(--surface-2); border:1px solid var(--hair); border-radius:10px; }
+  .steps .lbl { font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); font-weight:600; margin:0 0 4px; }
+  .steps ol { margin:0 0 10px; padding-left:20px; font-size:13.5px; } .steps ol li { margin:0 0 3px; }
+  .expect { border-left:3px solid var(--accent); padding:4px 0 4px 12px; margin:2px 0 0; font-size:13.5px; }
+  .expect .lbl { color:var(--accent); }
+  .verdict { display:flex; gap:8px; margin:14px 0 0; flex-wrap:wrap; }
+  .seg { display:inline-flex; border:1px solid var(--hair); border-radius:10px; overflow:hidden; }
+  .seg button { appearance:none; border:0; background:var(--surface); color:var(--muted); font-family:var(--sans); font-size:13px; font-weight:600; padding:8px 16px; cursor:pointer; border-right:1px solid var(--hair); transition:.12s; }
+  .seg button:last-child { border-right:0; }
+  .seg button:hover { background:var(--surface-2); color:var(--ink); }
+  .seg button[aria-pressed="true"][data-v="pass"]{background:var(--pass-bg);color:var(--pass);box-shadow:inset 0 0 0 1px var(--pass-line);}
+  .seg button[aria-pressed="true"][data-v="fail"]{background:var(--fail-bg);color:var(--fail);box-shadow:inset 0 0 0 1px var(--fail-line);}
+  .seg button[aria-pressed="true"][data-v="na"]{background:var(--skip-bg);color:var(--skip);box-shadow:inset 0 0 0 1px var(--skip-line);}
+  .seg button:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+  .notes { margin-top:10px; }
+  .notes textarea { width:100%; min-height:40px; resize:vertical; padding:8px 10px; border:1px solid var(--hair); border-radius:9px; background:var(--surface); color:var(--ink); font-family:var(--sans); font-size:13.5px; line-height:1.5; }
+  .notes textarea:focus-visible { outline:2px solid var(--accent); outline-offset:1px; border-color:var(--accent); }
+  .actions { position:sticky; bottom:0; margin-top:24px; padding:12px 0; background:color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter:blur(8px); border-top:1px solid var(--hair); display:flex; gap:10px; flex-wrap:wrap; align-items:center; z-index:9; }
+  .btn { appearance:none; border:1px solid var(--hair); background:var(--surface); color:var(--ink); font-family:var(--sans); font-size:13.5px; font-weight:600; padding:9px 16px; border-radius:10px; cursor:pointer; display:inline-flex; align-items:center; gap:7px; }
+  .btn:hover { background:var(--surface-2); }
+  .btn.primary { background:var(--accent); color:var(--accent-ink); border-color:var(--accent); }
+  .btn.primary:hover { background:var(--accent-hi); border-color:var(--accent-hi); }
+  .btn.primary:disabled { opacity:.6; cursor:default; }
+  .btn.ghost { color:var(--muted); }
+  .btn:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .spacer { flex:1; }
+  .status { font-size:12.5px; color:var(--muted); min-height:1.2em; }
+  .status.ok { color:var(--pass); } .status.err { color:var(--fail); }
+  .foot { color:var(--faint); font-size:12px; margin:18px 2px 0; }
+  @media (prefers-reduced-motion: reduce) { * { transition:none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="head-inner">
+    <div class="brandrow">
+      <div><p class="eyebrow">SATE · User acceptance test</p><h1>Recorder — User Test Form</h1></div>
+      <div class="headlinks">
+        <a class="rlink" href="/result" title="View all submitted results (login required)">Results ↗</a>
+        <button class="themebtn" id="themeBtn" type="button" title="Toggle light / dark">◐ Theme</button>
+      </div>
+    </div>
+    <div class="summary">
+      <div class="progress" aria-hidden="true"><span id="bar"></span></div>
+      <div class="counts">
+        <span class="count pass"><span class="dot"></span><span id="cPass">0</span> pass</span>
+        <span class="count fail"><span class="dot"></span><span id="cFail">0</span> fail</span>
+        <span class="count skip"><span class="dot"></span><span id="cNa">0</span> n/a</span>
+        <span class="count left"><span class="dot"></span><span id="cLeft">0</span> left</span>
+      </div>
+      <span class="saved" id="saved">Not started</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="meta">
+    <div class="field"><label for="mTester">Tester</label><input id="mTester" type="text" placeholder="Your name" autocomplete="off"></div>
+    <div class="field"><label for="mDate">Date</label><input id="mDate" type="date"></div>
+    <div class="field"><label for="mDevice">Recorder / serial</label><input id="mDevice" type="text" placeholder="e.g. SATE-XXXX (not D19EB8)" autocomplete="off"></div>
+    <div class="field"><label for="mBuild">App / firmware build</label><input id="mBuild" type="text" placeholder="optional" autocomplete="off"></div>
+  </div>
+  <p class="intro">Recorder only. Work top to bottom, mark each test <b>Pass</b> / <b>Fail</b> / <b>N/A</b>, add a note if anything looks off, then press <b>Submit results</b>. Your marks also save automatically in this browser as a draft.</p>
+
+  <div id="list"></div>
+
+  <div class="actions">
+    <button class="btn primary" id="submitBtn" type="button">✓ Submit results</button>
+    <button class="btn" id="dlBtn" type="button">⬇ Download copy (.md)</button>
+    <span class="spacer"></span>
+    <span class="status" id="status"></span>
+    <button class="btn ghost" id="resetBtn" type="button">Reset</button>
+  </div>
+  <p class="foot">Submitting saves this run to the results database — view all runs at <a href="/result">/result</a>. The draft in this browser is separate.</p>
+</div>
+
+<script>
+  const KEY = "sate_recorder_test_form_v2";
+  const TESTS = [
+    { group: "A · Basic flow", items: [
+      { id:1, title:"Record a session", check:"The recorder captures a session and it reaches your account.",
+        steps:["Turn on the recorder and wait for READY.","Press record, talk (or play a sample) for ~20–30 seconds.","Press the button again to stop.","Leave it on Wi-Fi for a minute or two."],
+        expect:"It shows recording while you talk, returns to READY on stop, then shows synced. The recording appears in the web app shortly after." },
+      { id:2, title:"Read the transcript on the web app", check:"The finished recording opens with a readable transcript.",
+        steps:["In the web app, open your recordings and click the one you just made.","Read the transcript; press play to spot-check it matches the audio."],
+        expect:"The transcript is there, readable, split by speaker, and lines up with the audio. (Can take a couple of minutes to be ready.)" },
+      { id:3, title:"Export a PDF", check:"You can produce a PDF to save or share.",
+        steps:["With the recording open, click SATE Report.","Click Export PDF, save the file, then open it."],
+        expect:"A tidy PDF report opens and looks the same as the on-screen preview." },
+    ]},
+    { group: "B · Robustness — power &amp; upload", items: [
+      { id:4, title:"Turn off and on WHILE recording", check:"If the recorder restarts mid-recording, it resumes the same recording and nothing already recorded is lost.",
+        steps:["Press record and talk for ~20 seconds.","Turn the recorder off and back on while it is still recording.","Wait for it to come back; if it resumes recording, keep talking ~20 more seconds.","Press stop, let it sync, then open the recording on the web."],
+        expect:"It picks the recording back up on its own (same session) — no blank restart, take not thrown away. The finished recording holds the audio from before AND after the restart, as ONE recording (not split, nothing missing)." },
+      { id:5, title:"Turn off and on WHILE uploading", check:"If the recorder restarts while uploading, it keeps uploading on its own and finishes — no loss, no duplicate.",
+        steps:["Record a longer take (~1–2 minutes) so uploading takes a little while, then stop.","While it is uploading / syncing, turn the recorder off and back on.","Leave it on Wi-Fi and wait.","Open the web app."],
+        expect:"It automatically resumes uploading (no button needed) and reaches synced. The recording shows up complete (full length) and only once — not duplicated, not cut short." },
+      { id:6, title:"Record with Wi-Fi off, then turn Wi-Fi on", check:"A recording made with no internet is kept safely and uploads by itself once Wi-Fi is back.",
+        steps:["Take the recorder off Wi-Fi (router off, or move out of range).","Record a ~30-second take and stop. Confirm it is kept (shows not yet synced).","Bring Wi-Fi back and leave the recorder on.","Open the web app."],
+        expect:"The recording waits on the device while offline, then uploads automatically when Wi-Fi returns, and appears on the web — complete and once." },
+      { id:7, title:"Several recordings in a row", check:"Back-to-back recordings all upload and none are lost or mixed up.",
+        steps:["Make 3 short recordings, stopping between each.","Leave the recorder on Wi-Fi.","Open the web app."],
+        expect:"All 3 recordings appear, each with its own transcript, in the right order — none missing or merged." },
+    ]},
+  ];
+  const $ = (s,r=document)=>r.querySelector(s);
+  let state = load();
+  function load(){ try{const r=localStorage.getItem(KEY); if(r)return JSON.parse(r);}catch(e){} return {meta:{},tests:{},savedAt:null}; }
+  let t=null; function save(){ state.savedAt=Date.now(); try{localStorage.setItem(KEY,JSON.stringify(state));}catch(e){} const d=new Date(state.savedAt); $("#saved").textContent="Draft saved "+d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}); }
+  function queueSave(){ clearTimeout(t); t=setTimeout(save,350); }
+  function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  function render(){
+    const list=$("#list"); list.innerHTML="";
+    for(const g of TESTS){
+      const gt=document.createElement("div"); gt.className="grouptitle"; gt.innerHTML=g.group; list.appendChild(gt);
+      for(const t of g.items){
+        const st=state.tests[t.id]||{};
+        const card=document.createElement("section"); card.className="card"+(st.status?" is-"+st.status:""); card.id="t"+t.id;
+        card.innerHTML=`<div class="card-top"><div class="num">${t.id}</div><div><h3>${esc(t.title)}</h3><p class="check">${esc(t.check)}</p></div></div>
+          <details class="tst"${st.status?"":" open"}><summary>How to test</summary>
+            <div class="steps"><p class="lbl">Do this</p><ol>${t.steps.map(s=>`<li>${esc(s)}</li>`).join("")}</ol>
+            <p class="expect"><span class="lbl">You should see&nbsp;·&nbsp;</span>${esc(t.expect)}</p></div></details>
+          <div class="verdict"><div class="seg" role="group" aria-label="Result for test ${t.id}">
+            <button type="button" data-v="pass" aria-pressed="${st.status==='pass'}">Pass</button>
+            <button type="button" data-v="fail" aria-pressed="${st.status==='fail'}">Fail</button>
+            <button type="button" data-v="na" aria-pressed="${st.status==='na'}">N/A</button></div></div>
+          <div class="notes"><textarea placeholder="Notes — what you saw if it didn't pass (a screenshot helps)">${esc(st.note||"")}</textarea></div>`;
+        card.querySelectorAll(".seg button").forEach(b=>b.addEventListener("click",()=>{
+          const v=b.dataset.v; const cur=state.tests[t.id]||{}; cur.status=(cur.status===v)?"":v; state.tests[t.id]=cur;
+          card.className="card"+(cur.status?" is-"+cur.status:"");
+          card.querySelectorAll(".seg button").forEach(x=>x.setAttribute("aria-pressed",String(x.dataset.v===cur.status)));
+          save(); updateSummary();
+        }));
+        card.querySelector("textarea").addEventListener("input",e=>{ const cur=state.tests[t.id]||{}; cur.note=e.target.value; state.tests[t.id]=cur; queueSave(); });
+        list.appendChild(card);
+      }
+    }
+  }
+  const TOTAL=TESTS.reduce((n,g)=>n+g.items.length,0);
+  function updateSummary(){ let p=0,f=0,na=0; for(const k in state.tests){const s=state.tests[k].status; if(s==="pass")p++;else if(s==="fail")f++;else if(s==="na")na++;}
+    $("#cPass").textContent=p;$("#cFail").textContent=f;$("#cNa").textContent=na;$("#cLeft").textContent=TOTAL-(p+f+na); $("#bar").style.width=Math.round((p+f+na)/TOTAL*100)+"%"; }
+  const metaFields={mTester:"tester",mDate:"date",mDevice:"device",mBuild:"build"};
+  function bindMeta(){ for(const id in metaFields){ const el=$("#"+id),key=metaFields[id]; el.value=state.meta[key]||(id==="mDate"?new Date().toISOString().slice(0,10):""); if(id==="mDate"&&!state.meta.date)state.meta.date=el.value; el.addEventListener("input",()=>{state.meta[key]=el.value;queueSave();}); } }
+  function initTheme(){ const s=localStorage.getItem(KEY+"_theme"); if(s)document.documentElement.setAttribute("data-theme",s);
+    $("#themeBtn").addEventListener("click",()=>{ const cur=document.documentElement.getAttribute("data-theme"); const next=cur==="dark"?"light":cur==="light"?"dark":(matchMedia("(prefers-color-scheme: dark)").matches?"light":"dark"); document.documentElement.setAttribute("data-theme",next); localStorage.setItem(KEY+"_theme",next); }); }
+  function buildMarkdown(){ const m=state.meta; let out="# SATE Recorder — User Test Results\n\n";
+    out+=`- Tester: ${m.tester||"—"}\n- Date: ${m.date||"—"}\n- Recorder/serial: ${m.device||"—"}\n- Build: ${m.build||"—"}\n`;
+    let p=0,f=0,na=0,left=0; for(const g of TESTS)for(const t of g.items){const s=(state.tests[t.id]||{}).status; if(s==="pass")p++;else if(s==="fail")f++;else if(s==="na")na++;else left++;}
+    out+=`- Result: ${p} pass · ${f} fail · ${na} n/a · ${left} not tested\n\n`;
+    for(const g of TESTS){ out+=`## ${g.group.replace(/&amp;/g,"&")}\n\n`; for(const t of g.items){ const st=state.tests[t.id]||{}; const mk=st.status==="pass"?"✅ PASS":st.status==="fail"?"❌ FAIL":st.status==="na"?"➖ N/A":"⬜ not tested"; out+=`### ${t.id}. ${t.title} — ${mk}\n`; if(st.note&&st.note.trim())out+=`Notes: ${st.note.trim()}\n`; out+="\n"; } }
+    return out; }
+  function setStatus(msg,kind){ const el=$("#status"); el.textContent=msg||""; el.className="status"+(kind?" "+kind:""); }
+  async function submit(btn){ btn.disabled=true; const old=btn.textContent; btn.textContent="Submitting…"; setStatus("");
+    try{ const res=await fetch("/api/results",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({meta:state.meta,tests:state.tests})});
+      const j=await res.json().catch(()=>({})); if(!res.ok||j.error) throw new Error(j.error||("HTTP "+res.status));
+      btn.textContent="✓ Submitted"; setStatus("Saved to the results database — view at /result","ok"); }
+    catch(e){ btn.textContent="Submit failed"; setStatus("Couldn't submit: "+e.message,"err"); }
+    finally{ setTimeout(()=>{btn.disabled=false; btn.textContent=old;},1800); } }
+  function download(){ const blob=new Blob([buildMarkdown()],{type:"text/markdown"}); const url=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download=`SATE_recorder_test_${state.meta.date||new Date().toISOString().slice(0,10)}.md`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); }
+  render(); bindMeta(); updateSummary(); initTheme();
+  if(state.savedAt){const d=new Date(state.savedAt); $("#saved").textContent="Draft saved "+d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});}
+  $("#submitBtn").addEventListener("click",e=>submit(e.currentTarget));
+  $("#dlBtn").addEventListener("click",download);
+  $("#resetBtn").addEventListener("click",()=>{ if(!confirm("Clear all marks and notes in this browser? (Already-submitted results stay in the database.)"))return; state={meta:{},tests:{},savedAt:null}; try{localStorage.removeItem(KEY);}catch(e){} render(); bindMeta(); updateSummary(); setStatus(""); $("#saved").textContent="Not started"; });
+</script>
+</body>
+</html>
