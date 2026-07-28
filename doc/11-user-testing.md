@@ -1,184 +1,139 @@
-# 11 — User testing guide
+# 11 — User testing guide (recorder)
 
-A plain-language guide for testing SATE the way a **real user** (a speech-language
-pathologist) uses it. You don't need any technical knowledge — just follow the steps and
-check that what you see matches. This is about the experience and the results, not how the
-system works underneath.
+A plain-language guide for testing the SATE **handheld recorder** the way a real user does.
+No technical knowledge needed — follow the steps and check that what you see matches.
 
-This version uses the **handheld recorder** only.
+Scope of this version:
+- **Recorder only** (no pendant).
+- On the web app you only need to **read the transcript** and **export a PDF**.
+- The important part is the **robustness cases**: turning the recorder off and on **while
+  recording** and **while uploading**, to confirm nothing is lost and uploading continues on
+  its own.
 
-> For the engineering/QA version (with system internals), see [10-manual-testing.md](10-manual-testing.md).
+> Engineering/QA version with system internals: [10-manual-testing.md](10-manual-testing.md).
 
 ## How to use this
 
-Go through the tests in order — they follow a real session from start to finish. For each one:
-
-- **What this checks** — why it matters to you.
-- **Do this** — the steps to follow.
-- **You should see** — what a passing result looks like.
-- Mark **Pass ▢ / Fail ▢** and jot a note if anything looks off (a screenshot helps).
+For each test:
+- **What this checks** — why it matters.
+- **Do this** — the steps.
+- **You should see** — the passing result.
+- Mark **Pass ▢ / Fail ▢** and add a note if anything looks off (a screenshot helps).
 
 Tips:
-- Use a **test patient** and a **spare recorder** — don't test on a real client's device or data.
-- If something doesn't work, note exactly what you clicked and what happened — that's the most useful thing for the team.
+- Use a **test patient** and a **spare recorder** — not a real client's device or data.
+- "Turn off and on" = power the recorder off and back on (or briefly remove power). Wait for it
+  to come back to the READY screen before continuing.
+- For the recordings to appear on the web, the recorder must be **on Wi-Fi**.
 
 ---
 
-## 1. Sign in
+## Part A — Basic flow
 
-**What this checks:** you can get into your account.
-
-**Do this:**
-1. Open the SATE web app.
-2. Enter your email and password and sign in.
-
-**You should see:** your home screen with your recordings and patients. Signing out and back in works too.
-
-Pass ▢ Fail ▢ — notes: __________
-
----
-
-## 2. Record a session on the recorder
-
-**What this checks:** the handheld recorder captures a session and it turns up in your account.
+### 1. Record a session
+**What this checks:** the recorder captures a session and it reaches your account.
 
 **Do this:**
-1. Turn on the recorder and wait for it to say **READY**.
-2. Press the **record** button and talk (or play a sample) for about 20–30 seconds.
+1. Turn on the recorder and wait for **READY**.
+2. Press **record**, talk (or play a sample) for ~20–30 seconds.
 3. Press the button again to **stop**.
-4. Leave the device on Wi-Fi for a minute or two.
+4. Leave it on Wi-Fi for a minute or two.
 
-**You should see:** the screen shows it's recording while you talk, returns to READY when you stop, and then shows that everything is **synced**. Shortly after, the new recording appears in the web app.
+**You should see:** it shows recording while you talk, returns to READY on stop, then shows
+**synced**. The recording appears in the web app shortly after.
+
+Pass ▢ Fail ▢ — notes: __________
+
+### 2. Read the transcript on the web app
+**What this checks:** the finished recording opens with a readable transcript.
+
+**Do this:**
+1. In the web app, open your recordings and click the one you just made.
+2. Read the transcript; press play to spot-check it matches the audio.
+
+**You should see:** the transcript is there, readable, split by speaker, and lines up with the
+audio. (It can take a couple of minutes after recording to be ready.)
+
+Pass ▢ Fail ▢ — notes: __________
+
+### 3. Export a PDF
+**What this checks:** you can produce a PDF to save or share.
+
+**Do this:**
+1. With the recording open, click **SATE Report**.
+2. Click **Export PDF** and save the file, then open it.
+
+**You should see:** a tidy PDF report opens and looks the same as the on-screen preview.
 
 Pass ▢ Fail ▢ — notes: __________
 
 ---
 
-## 3. Mark an important moment (flag)
+## Part B — Robustness (the key tests)
 
-**What this checks:** the flag button marks a moment you can jump back to later.
-
-**Do this:**
-1. Start a recording.
-2. Press the **flag** button at a moment you want to remember.
-3. Stop, let it sync, and open the recording in the web app.
-
-**You should see:** a small marker on the playback bar at about the spot you flagged, so you can click straight to it.
-
-Pass ▢ Fail ▢ — notes: __________
-
----
-
-## 4. Find and open your recording
-
-**What this checks:** you can find a finished recording and open it.
+### 4. Turn off and on WHILE recording
+**What this checks:** if the recorder loses power or restarts in the middle of a recording, it
+**resumes the same recording** and nothing already recorded is lost.
 
 **Do this:**
-1. In the web app, go to your recordings.
-2. Open the one you just made.
-
-**You should see:** the recording opens with the audio player and the written transcript. It may take a couple of minutes after recording for the transcript to be ready.
-
-Pass ▢ Fail ▢ — notes: __________
-
----
-
-## 5. Listen and read along
-
-**What this checks:** playback and the transcript line up and are usable.
-
-**Do this:**
-1. Press play and follow the transcript.
-2. Click a flag marker on the bar (if you set one).
-
-**You should see:** the audio plays clearly, the transcript is readable and split by speaker, and clicking a marker jumps to that moment.
-
-Pass ▢ Fail ▢ — notes: __________
-
----
-
-## 6. Fix the transcript
-
-**What this checks:** you can correct the transcript and your changes stick.
-
-**Do this:**
-1. Click **Edit**.
-2. Fix a word or change who's speaking.
-3. Use **Undo** and **Redo** to check they work.
-4. Click **Save**, then refresh the page.
-
-**You should see:** undo/redo behave as expected; after saving and refreshing, your correction is still there. If you try to leave with unsaved changes, it warns you.
-
-Pass ▢ Fail ▢ — notes: __________
-
----
-
-## 7. Compare to typical norms
-
-**What this checks:** you can compare a child's sample against typical peers, and the app remembers your settings so you don't re-type them.
-
-**Do this:**
-1. Open a recording and go to the **Analysis** tab.
-2. Under **Sample Details**, enter the child's **Year** (age), and optionally **Month** and **± Range**.
-3. Click **Compare to norms**.
-4. Close and reopen the same recording's Analysis tab.
-5. Change the age and click **Compare to norms** again.
+1. Press **record** and talk for ~20 seconds.
+2. **Turn the recorder off and back on** while it is still recording.
+3. Wait for it to come back; if it resumes recording, keep talking another ~20 seconds.
+4. Press **stop**. Let it sync.
+5. Open the recording on the web app.
 
 **You should see:**
-- The comparison appears — bars showing how the child compares to the typical average, with the sample size and age range. **It should not say "Failed to fetch."**
-- When you reopen it, your settings **and** the comparison are still there — you don't have to run it again.
-- Changing the age and re-running updates the result, and the new settings are remembered.
+- After restarting, the recorder picks the recording back up on its own (same session) —
+  it does **not** start a blank new one or throw the take away.
+- The finished recording contains the audio from **before and after** the restart, as **one**
+  recording (not split in two, nothing missing).
 
 Pass ▢ Fail ▢ — notes: __________
 
----
-
-## 8. Create the report and save it
-
-**What this checks:** you can generate the clinical report and save it as a PDF and a Word document to share.
+### 5. Turn off and on WHILE uploading
+**What this checks:** if the recorder restarts while a recording is uploading, it **keeps
+uploading on its own** and finishes — no lost recording, no duplicate.
 
 **Do this:**
-1. Open a recording and click **SATE Report**.
-2. Read through the report preview — transcript, metrics, the language assessment, limitations, and summary.
-3. Enter the **Patient age** (for example `6;0`).
-4. Click **Export PDF** and save the file. Open it.
-5. Click **Export Word** and open the downloaded document.
-6. Close the report and open it again for the same recording.
+1. Record a **longer** take (~1–2 minutes) so uploading takes a little while, then **stop**.
+2. While it is uploading / syncing, **turn the recorder off and back on**.
+3. Leave it on Wi-Fi and wait.
+4. Open the web app.
 
 **You should see:**
-- The report looks complete and tidy, with all its sections.
-- The PDF looks the same as the preview (colored bars, tables).
-- The Word document opens and is editable (the bars may look a little simpler in Word).
-- When you reopen the report, the **patient age you typed is still there**.
+- After restarting, the recorder **automatically resumes uploading** (you don't have to press
+  anything) and reaches **synced**.
+- The recording shows up on the web **complete** (full length) and **only once** (not
+  duplicated, not cut short).
 
 Pass ▢ Fail ▢ — notes: __________
 
----
-
-## 9. Manage a patient and see progress
-
-**What this checks:** you can keep patients organized and see change over time.
+### 6. Record with Wi-Fi off, then turn Wi-Fi on
+**What this checks:** a recording made with no internet is kept safely and **uploads by itself**
+once Wi-Fi is back.
 
 **Do this:**
-1. Create a test patient.
-2. Attach a recording to that patient.
-3. Open the patient and go to **Analytics**.
+1. Take the recorder off Wi-Fi (turn off the router/hotspot or move out of range).
+2. Record a ~30-second take and **stop**. Confirm it is kept on the device (it should show as
+   not yet synced).
+3. Bring Wi-Fi back and leave the recorder on.
+4. Open the web app.
 
-**You should see:** the patient saves, the recording links to them, and the progress chart shows a metric over their sessions with a trend (you need at least two sessions for a trend line).
+**You should see:** the recording waits on the device while offline, then **uploads
+automatically** when Wi-Fi returns, and appears on the web — complete and once.
 
 Pass ▢ Fail ▢ — notes: __________
 
----
-
-## 10. Export the transcript (SALT)
-
-**What this checks:** you can export the transcript in the SALT format for other tools.
+### 7. Several recordings in a row
+**What this checks:** back-to-back recordings all upload and none are lost or mixed up.
 
 **Do this:**
-1. On a recording, click **Export SALT**.
-2. Fill in the header details and download the file.
+1. Make **3 short recordings**, stopping between each.
+2. Leave the recorder on Wi-Fi.
+3. Open the web app.
 
-**You should see:** a file downloads and, when opened, contains the header lines followed by the coded transcript.
+**You should see:** all **3** recordings appear, each with its own transcript, in the right
+order, none missing or merged.
 
 Pass ▢ Fail ▢ — notes: __________
 
@@ -186,23 +141,22 @@ Pass ▢ Fail ▢ — notes: __________
 
 ## If something goes wrong
 
-These aren't failures of your test — just what to do:
+Not necessarily failures — what to do:
 
-- **A recording doesn't appear:** give it a couple of minutes to process; make sure the recorder finished syncing (screen says "synced").
-- **Very short / empty recording:** if you tapped record and stopped almost immediately, it's fine for it to show "No text in audio" — that's expected, not an error.
-- **"Compare to norms" won't load:** try again shortly; if it keeps failing, tell the team (it may be a temporary connection issue on our side).
-- **Anything unexpected:** note what you did, what you expected, and what happened — a screenshot is ideal.
+- **A recording hasn't appeared:** give it a couple of minutes; make sure the recorder screen
+  says **synced** and it's on Wi-Fi.
+- **Very short / empty recording:** if you tapped record and stopped almost immediately, it's
+  fine for the web to show "No text in audio" — that's expected.
+- **Anything unexpected** (recording split, duplicated, cut short, or didn't resume): note what
+  you did, when you turned it off/on, and what you saw — a photo of the screen helps a lot.
 
 ---
 
-## Quick run-through (about 10 minutes)
+## Quick run-through
 
-If you only have a few minutes, do these in order:
-
-1. Sign in (§1).
-2. Open a recording, play it, read the transcript (§4–5).
-3. Compare to norms — it loads and is remembered (§7).
-4. Create the report, set the age, save as PDF and Word, reopen (§8).
-5. Export SALT (§10).
+1. Record → read the transcript on the web (§1–2).
+2. Export a PDF (§3).
+3. Turn off/on **while recording** — it resumes as one recording (§4).
+4. Turn off/on **while uploading** — it finishes uploading on its own (§5).
 
 Note the date you tested and mark each Pass/Fail.
