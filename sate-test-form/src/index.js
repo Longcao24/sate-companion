@@ -101,8 +101,7 @@ function renderResults(rows) {
     }).join('');
     return `<details style="background:#fff;border:1px solid ${HAIR};border-radius:12px;margin:0 0 12px;box-shadow:0 1px 2px rgba(20,32,58,.05);">
       <summary style="cursor:pointer;list-style:none;padding:14px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
-        <span style="font-weight:700;">${esc(r.tester || 'Unknown tester')}</span>
-        <span style="color:${MUT};font-size:13px;">${esc(r.run_date || '')} · ${esc(r.device || '—')}${r.build ? ' · ' + esc(r.build) : ''}</span>
+        <span style="font-weight:700;">${esc(r.device || 'Unknown recorder')}</span>
         <span style="flex:1;"></span>
         ${chip(r.n_pass, PASS, 'pass')} ${chip(r.n_fail, FAIL, 'fail')} ${chip(r.n_na, NA, 'n/a')}
         <span style="color:${MUT};font-size:12px;font-family:ui-monospace,Menlo,monospace;">${when}</span>

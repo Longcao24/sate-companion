@@ -137,10 +137,7 @@
 
 <div class="wrap">
   <div class="meta">
-    <div class="field"><label for="mTester">Tester</label><input id="mTester" type="text" placeholder="Your name" autocomplete="off"></div>
-    <div class="field"><label for="mDate">Date</label><input id="mDate" type="date"></div>
     <div class="field"><label for="mDevice">Recorder / serial</label><input id="mDevice" type="text" placeholder="e.g. SATE-XXXX (not D19EB8)" autocomplete="off"></div>
-    <div class="field"><label for="mBuild">App / firmware build</label><input id="mBuild" type="text" placeholder="optional" autocomplete="off"></div>
   </div>
   <p class="intro">Recorder only. Work top to bottom, mark each test <b>Pass</b> / <b>Fail</b> / <b>N/A</b>, add a note if anything looks off, then press <b>Submit results</b>. Your marks also save automatically in this browser as a draft.</p>
 
@@ -221,12 +218,12 @@
   const TOTAL=TESTS.reduce((n,g)=>n+g.items.length,0);
   function updateSummary(){ let p=0,f=0,na=0; for(const k in state.tests){const s=state.tests[k].status; if(s==="pass")p++;else if(s==="fail")f++;else if(s==="na")na++;}
     $("#cPass").textContent=p;$("#cFail").textContent=f;$("#cNa").textContent=na;$("#cLeft").textContent=TOTAL-(p+f+na); $("#bar").style.width=Math.round((p+f+na)/TOTAL*100)+"%"; }
-  const metaFields={mTester:"tester",mDate:"date",mDevice:"device",mBuild:"build"};
-  function bindMeta(){ for(const id in metaFields){ const el=$("#"+id),key=metaFields[id]; el.value=state.meta[key]||(id==="mDate"?new Date().toISOString().slice(0,10):""); if(id==="mDate"&&!state.meta.date)state.meta.date=el.value; el.addEventListener("input",()=>{state.meta[key]=el.value;queueSave();}); } }
+  const metaFields={mDevice:"device"};
+  function bindMeta(){ for(const id in metaFields){ const el=$("#"+id),key=metaFields[id]; el.value=state.meta[key]||""; el.addEventListener("input",()=>{state.meta[key]=el.value;queueSave();}); } }
   function initTheme(){ const s=localStorage.getItem(KEY+"_theme"); if(s)document.documentElement.setAttribute("data-theme",s);
     $("#themeBtn").addEventListener("click",()=>{ const cur=document.documentElement.getAttribute("data-theme"); const next=cur==="dark"?"light":cur==="light"?"dark":(matchMedia("(prefers-color-scheme: dark)").matches?"light":"dark"); document.documentElement.setAttribute("data-theme",next); localStorage.setItem(KEY+"_theme",next); }); }
   function buildMarkdown(){ const m=state.meta; let out="# SATE Recorder — User Test Results\n\n";
-    out+=`- Tester: ${m.tester||"—"}\n- Date: ${m.date||"—"}\n- Recorder/serial: ${m.device||"—"}\n- Build: ${m.build||"—"}\n`;
+    out+=`- Recorder/serial: ${m.device||"—"}\n- Exported: ${new Date().toISOString().slice(0,16).replace("T"," ")}\n`;
     let p=0,f=0,na=0,left=0; for(const g of TESTS)for(const t of g.items){const s=(state.tests[t.id]||{}).status; if(s==="pass")p++;else if(s==="fail")f++;else if(s==="na")na++;else left++;}
     out+=`- Result: ${p} pass · ${f} fail · ${na} n/a · ${left} not tested\n\n`;
     for(const g of TESTS){ out+=`## ${g.group.replace(/&amp;/g,"&")}\n\n`; for(const t of g.items){ const st=state.tests[t.id]||{}; const mk=st.status==="pass"?"✅ PASS":st.status==="fail"?"❌ FAIL":st.status==="na"?"➖ N/A":"⬜ not tested"; out+=`### ${t.id}. ${t.title} — ${mk}\n`; if(st.note&&st.note.trim())out+=`Notes: ${st.note.trim()}\n`; out+="\n"; } }
