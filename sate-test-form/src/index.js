@@ -117,7 +117,7 @@ function renderResults(rows) {
 
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SATE Test Results</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
+  <link rel="icon" type="image/png" href="/favicon.png">
   <style>
     body{margin:0;background:#f5f6f8;color:${INK};font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;}
     .wrap{max-width:900px;margin:0 auto;padding:22px 18px 60px;}
