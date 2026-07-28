@@ -19,6 +19,11 @@ binding = "DB"
 database_name = "sate-test-form"
 database_id = "9bdd76e0-4fbf-47ea-a64d-5228c59c0e36"
 
+# Per-test photos (uploaded from the form, served at /uploads/<key>).
+[[r2_buckets]]
+binding = "UPLOADS"
+bucket_name = "sate-test-uploads"
+
 [vars]
 RESULT_USER = "sate"
 # RESULT_PASSWORD is a Cloudflare secret (never in git): npx wrangler secret put RESULT_PASSWORD

@@ -97,6 +97,14 @@
   .notes { margin-top:10px; }
   .notes textarea { width:100%; min-height:40px; resize:vertical; padding:8px 10px; border:1px solid var(--hair); border-radius:9px; background:var(--surface); color:var(--ink); font-family:var(--sans); font-size:13.5px; line-height:1.5; }
   .notes textarea:focus-visible { outline:2px solid var(--accent); outline-offset:1px; border-color:var(--accent); }
+  .photo { margin-top:10px; display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  .addphoto { display:inline-flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; color:var(--accent); background:var(--accent-soft); border:1px solid var(--hair); padding:6px 12px; border-radius:9px; cursor:pointer; }
+  .addphoto:hover { filter:brightness(.98); }
+  .thumb { display:flex; align-items:center; gap:8px; }
+  .thumb img { height:44px; width:auto; border-radius:8px; border:1px solid var(--hair); display:block; }
+  .thumb .rm { border:1px solid var(--hair); background:var(--surface); color:var(--muted); border-radius:7px; width:24px; height:24px; cursor:pointer; font-size:12px; line-height:1; }
+  .thumb .rm:hover { color:var(--fail); border-color:var(--fail-line); }
+  .thumb .up { font-size:12px; color:var(--muted); }
   .actions { position:sticky; bottom:0; margin-top:24px; padding:12px 0; background:color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter:blur(8px); border-top:1px solid var(--hair); display:flex; gap:10px; flex-wrap:wrap; align-items:center; z-index:9; }
   .btn { appearance:none; border:1px solid var(--hair); background:var(--surface); color:var(--ink); font-family:var(--sans); font-size:13.5px; font-weight:600; padding:9px 16px; border-radius:10px; cursor:pointer; display:inline-flex; align-items:center; gap:7px; }
   .btn:hover { background:var(--surface-2); }
@@ -191,6 +199,20 @@
   let t=null; function save(){ state.savedAt=Date.now(); try{localStorage.setItem(KEY,JSON.stringify(state));}catch(e){} const d=new Date(state.savedAt); $("#saved").textContent="Draft saved "+d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}); }
   function queueSave(){ clearTimeout(t); t=setTimeout(save,350); }
   function esc(s){ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+  // Downscale + compress a photo client-side so uploads stay small, then store in R2.
+  function compressImage(file, maxDim=1400, quality=0.72){
+    return new Promise((resolve,reject)=>{ const img=new Image(), url=URL.createObjectURL(file);
+      img.onload=()=>{ URL.revokeObjectURL(url); let w=img.naturalWidth,h=img.naturalHeight; const s=Math.min(1,maxDim/Math.max(w,h)); w=Math.round(w*s); h=Math.round(h*s);
+        const c=document.createElement("canvas"); c.width=w; c.height=h; c.getContext("2d").drawImage(img,0,0,w,h);
+        c.toBlob(b=> b?resolve(b):reject(new Error("could not process image")), "image/jpeg", quality); };
+      img.onerror=()=>{ URL.revokeObjectURL(url); reject(new Error("not a valid image")); }; img.src=url; });
+  }
+  async function uploadImage(file){
+    const blob = await compressImage(file);
+    const res = await fetch("/api/upload",{method:"POST",headers:{"content-type":"image/jpeg"},body:blob});
+    const j = await res.json().catch(()=>({})); if(!res.ok||j.error) throw new Error(j.error||("HTTP "+res.status));
+    return j.key;
+  }
   function render(){
     const list=$("#list"); list.innerHTML="";
     for(const g of TESTS){
@@ -205,7 +227,8 @@
             <button type="button" data-v="pass" aria-pressed="${st.status==='pass'}">Pass</button>
             <button type="button" data-v="fail" aria-pressed="${st.status==='fail'}">Fail</button>
             <button type="button" data-v="na" aria-pressed="${st.status==='na'}">N/A</button></div></div>
-          <div class="notes"><textarea placeholder="Notes — what you saw if it didn't pass (a screenshot helps)">${esc(st.note||"")}</textarea></div>`;
+          <div class="notes"><textarea placeholder="Notes — what you saw if it didn't pass">${esc(st.note||"")}</textarea></div>
+          <div class="photo"><label class="addphoto">📷 <span>Add photo</span><input type="file" accept="image/*" hidden></label><div class="thumb"></div></div>`;
         card.querySelectorAll(".seg button").forEach(b=>b.addEventListener("click",()=>{
           const v=b.dataset.v; const cur=state.tests[t.id]||{}; cur.status=(cur.status===v)?"":v; state.tests[t.id]=cur;
           card.className="card"+(cur.status?" is-"+cur.status:"");
@@ -213,6 +236,16 @@
           save(); updateSummary();
         }));
         card.querySelector("textarea").addEventListener("input",e=>{ const cur=state.tests[t.id]||{}; cur.note=e.target.value; state.tests[t.id]=cur; queueSave(); });
+        // per-test photo
+        const thumb=card.querySelector(".thumb"), fileInput=card.querySelector(".photo input[type=file]");
+        function paintThumb(key){ if(!key){ thumb.innerHTML=""; return; }
+          thumb.innerHTML=`<a href="/uploads/${key}" target="_blank" rel="noopener"><img src="/uploads/${key}" alt="photo"></a><button class="rm" title="Remove photo" type="button">✕</button>`;
+          thumb.querySelector(".rm").addEventListener("click",()=>{ const c=state.tests[t.id]||{}; delete c.image; state.tests[t.id]=c; save(); paintThumb(null); }); }
+        if(st.image) paintThumb(st.image);
+        fileInput.addEventListener("change", async ()=>{ const f=fileInput.files&&fileInput.files[0]; if(!f)return; thumb.innerHTML='<span class="up">Uploading…</span>';
+          try{ const key=await uploadImage(f); const c=state.tests[t.id]||{}; c.image=key; state.tests[t.id]=c; save(); paintThumb(key); }
+          catch(err){ thumb.innerHTML='<span class="up" style="color:var(--fail)">Upload failed — '+esc(err.message||"error")+'</span>'; }
+          finally{ fileInput.value=""; } });
         list.appendChild(card);
       }
     }

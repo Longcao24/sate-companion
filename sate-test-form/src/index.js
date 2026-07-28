@@ -43,6 +43,30 @@ export default {
     const url = new URL(request.url);
     if (request.method === 'OPTIONS') return new Response('ok', { headers: CORS });
 
+    // Upload a per-test photo to R2 → returns an unguessable key the form stores.
+    if (url.pathname === '/api/upload' && request.method === 'POST') {
+      if (!env.UPLOADS) return json({ error: 'uploads not configured' }, 503);
+      const ct = request.headers.get('content-type') || 'image/jpeg';
+      if (!ct.startsWith('image/')) return json({ error: 'images only' }, 400);
+      const buf = await request.arrayBuffer();
+      if (buf.byteLength === 0) return json({ error: 'empty' }, 400);
+      if (buf.byteLength > 8 * 1024 * 1024) return json({ error: 'too large (max 8 MB)' }, 413);
+      const key = crypto.randomUUID() + '.' + (ct.includes('png') ? 'png' : 'jpg');
+      await env.UPLOADS.put(key, buf, { httpMetadata: { contentType: ct } });
+      return json({ ok: true, key });
+    }
+
+    // Serve a photo (unguessable key; embedded by /result).
+    if (url.pathname.startsWith('/uploads/')) {
+      if (!env.UPLOADS) return new Response('not found', { status: 404 });
+      const key = decodeURIComponent(url.pathname.slice('/uploads/'.length));
+      const obj = await env.UPLOADS.get(key);
+      if (!obj) return new Response('not found', { status: 404 });
+      return new Response(obj.body, {
+        headers: { 'content-type': obj.httpMetadata?.contentType || 'image/jpeg', 'cache-control': 'public, max-age=31536000, immutable' },
+      });
+    }
+
     // Save a submitted run.
     if (url.pathname === '/api/results' && request.method === 'POST') {
       let body;
@@ -98,7 +122,8 @@ function renderResults(rows) {
         <td style="padding:5px 10px;border-top:1px solid ${HAIR};color:${MUT};font-variant-numeric:tabular-nums;">${id}</td>
         <td style="padding:5px 10px;border-top:1px solid ${HAIR};">${esc(TITLES[id])}</td>
         <td style="padding:5px 10px;border-top:1px solid ${HAIR};font-weight:700;color:${mk[1]};">${mk[0]}</td>
-        <td style="padding:5px 10px;border-top:1px solid ${HAIR};color:${MUT};">${esc(t.note || '')}</td></tr>`;
+        <td style="padding:5px 10px;border-top:1px solid ${HAIR};color:${MUT};">${esc(t.note || '')}</td>
+        <td style="padding:5px 10px;border-top:1px solid ${HAIR};">${t.image ? `<a href="/uploads/${esc(t.image)}" target="_blank" rel="noopener"><img src="/uploads/${esc(t.image)}" alt="photo" style="height:42px;width:auto;border-radius:6px;border:1px solid ${HAIR};display:block;"></a>` : ''}</td></tr>`;
     }).join('');
     return `<details style="background:#fff;border:1px solid ${HAIR};border-radius:12px;margin:0 0 12px;box-shadow:0 1px 2px rgba(20,32,58,.05);">
       <summary style="cursor:pointer;list-style:none;padding:14px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
@@ -110,7 +135,7 @@ function renderResults(rows) {
       <div style="padding:0 16px 14px;overflow-x:auto;">
         <table style="width:100%;border-collapse:collapse;font-size:13.5px;">
           <thead><tr style="text-align:left;color:${MUT};font-size:12px;">
-            <th style="padding:4px 10px;">#</th><th style="padding:4px 10px;">Test</th><th style="padding:4px 10px;">Result</th><th style="padding:4px 10px;">Notes</th>
+            <th style="padding:4px 10px;">#</th><th style="padding:4px 10px;">Test</th><th style="padding:4px 10px;">Result</th><th style="padding:4px 10px;">Notes</th><th style="padding:4px 10px;">Photo</th>
           </tr></thead><tbody>${testRows}</tbody></table>
       </div></details>`;
   }).join('');
