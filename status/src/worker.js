@@ -13,11 +13,17 @@
 // URLs for your project (Supabase ref, ngrok host).
 const SUPA = 'https://zlgdpivcbmaodgokkdvz.supabase.co';
 const TARGETS = [
-  { name: 'device-api (Supabase)', url: SUPA.replace('.supabase.co', '.functions.supabase.co') + '/device-api/firmware/latest', expect: [200, 401, 404], reachableIsUp: true },
+  { name: 'device-api (edge fn)', url: SUPA.replace('.supabase.co', '.functions.supabase.co') + '/device-api/firmware/latest', expect: [200, 401, 404], reachableIsUp: true },
   { name: 'Supabase API', url: SUPA + '/rest/v1/', expect: [200, 401, 404], reachableIsUp: true },
   { name: 'Storage (firmware)', url: SUPA + '/storage/v1/object/public/firmware/', expect: [200, 400, 404], reachableIsUp: true },
   { name: 'AI /process', url: 'https://sate-v1-5.ngrok.io/', expect: [200, 404, 502], reachableIsUp: true },
+  { name: 'Norms API (edge fn)', url: SUPA + '/functions/v1/childes-norms', expect: [200, 400, 401, 405], reachableIsUp: true },
+  { name: 'Norms data (CHILDES)', url: 'https://childes-metrics.ngrok.app/', expect: [200, 404, 405, 502], reachableIsUp: true },
+  { name: 'Web app (clinician)', url: 'https://sate-hardwave.vercel.app/', expect: [200, 401, 404], reachableIsUp: true },
 ];
+// NOTE: same-Cloudflare-account resources (the cf-processor Worker, the docs and
+// test Pages sites) can't be probed from this Worker (error 1042) — they need an
+// external prober. cf-processor health is covered indirectly via the pipeline digest.
 
 const WINDOW_DAYS = 90;
 const DAY = 86400;
@@ -143,6 +149,26 @@ async function history(env) {
   return { generated_at: new Date().toISOString(), window_days: WINDOW_DAYS, components };
 }
 
+// Response-time / traffic stats per tier over the last 24h (from the check history).
+async function latencyStats(env) {
+  const since = Math.floor(Date.now() / 1000) - DAY;
+  const agg = await env.DB.prepare(
+    `SELECT component, AVG(latency_ms) avg_ms, MAX(latency_ms) max_ms, COUNT(*) n
+     FROM checks WHERE ts > ? AND code != 0 GROUP BY component`
+  ).bind(since).all();
+  const latest = await env.DB.prepare(
+    `SELECT c.component, c.latency_ms FROM checks c
+     JOIN (SELECT component, MAX(ts) mts FROM checks GROUP BY component) m
+       ON m.component = c.component AND m.mts = c.ts`
+  ).all();
+  const lat = {}; for (const r of (latest.results || [])) lat[r.component] = r.latency_ms;
+  const map = {}; for (const r of (agg.results || [])) map[r.component] = r;
+  return TARGETS.map((t) => {
+    const a = map[t.name] || {};
+    return { name: t.name, latest: lat[t.name] ?? null, avg: a.avg_ms != null ? Math.round(a.avg_ms) : null, n: a.n || 0 };
+  });
+}
+
 const RANK = { up: 0, nodata: 1, degraded: 2, down: 3 };
 function overall(components) {
   let worst = 'up', any = false;
@@ -178,6 +204,16 @@ async function renderPage(env) {
     </div>`;
   }).join('');
 
+  const lat = await latencyStats(env);
+  const maxAvg = Math.max(1, ...lat.map((l) => l.avg || 0));
+  const totalChecks = lat.reduce((s, l) => s + l.n, 0);
+  const trafficRows = lat.map((l) => {
+    const w = l.avg ? Math.max(4, Math.round((l.avg / maxAvg) * 100)) : 0;
+    return `<div class="trow"><span class="tname">${esc(l.name)}</span>` +
+      `<div class="tbar"><span style="width:${w}%"></span></div>` +
+      `<span class="tnum">${l.latest != null ? l.latest + ' ms' : '—'}<small>${l.avg != null ? ' · avg ' + l.avg : ''}</small></span></div>`;
+  }).join('');
+
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SATE Status</title>
@@ -200,11 +236,22 @@ async function renderPage(env) {
   .cfoot .up{color:#a9b6bc}
   footer{color:#74838a;font-size:12px;text-align:center;margin-top:26px}
   a{color:#2fb39c}
+  .traffic{background:#161d21;border:1px solid #26302f;border-radius:12px;padding:16px 18px;margin:24px 0 12px}
+  .thead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:14px;font-weight:620}
+  .thead .tsub{color:#74838a;font-size:12px;font-weight:400}
+  .trow{display:flex;align-items:center;gap:12px;margin:0 0 9px}
+  .tname{flex:0 0 175px;font-size:13px;color:#cdd8d6}
+  .tbar{flex:1;height:8px;background:#0f1417;border-radius:999px;overflow:hidden}
+  .tbar span{display:block;height:100%;background:#2fb39c;border-radius:999px}
+  .tnum{flex:0 0 auto;font-size:12px;color:#a9b6bc;font-variant-numeric:tabular-nums;min-width:120px;text-align:right}
+  .tnum small{color:#74838a}
+  @media(max-width:560px){.tname{flex-basis:110px}.tnum{min-width:78px}}
 </style></head><body><div class="wrap">
   <header><h1>🩺 SATE Status</h1></header>
   <div class="banner"><span class="d"></span><span class="t">${OVR.t}</span></div>
   ${rows || '<p style="color:#74838a">No components configured — edit <code>TARGETS</code> in the Worker.</p>'}
-  <footer>Updated ${esc(h.generated_at)} · ${WINDOW_DAYS}-day history · probed by a Cloudflare Worker cron</footer>
+  <section class="traffic"><div class="thead"><span>Response time &amp; traffic</span><span class="tsub">last 24h · ${totalChecks} checks</span></div>${trafficRows}</section>
+  <footer>Updated ${esc(h.generated_at)} · ${WINDOW_DAYS}-day history · probed every 5 min by a Cloudflare Worker cron</footer>
 </div></body></html>`;
 }
 

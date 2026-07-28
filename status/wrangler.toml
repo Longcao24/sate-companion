@@ -2,6 +2,11 @@ name = "sate-status"
 main = "src/worker.js"
 compatibility_date = "2026-07-01"
 
+# Custom domain (top-level key — must sit above any [table] header). Provisioned on deploy.
+routes = [
+  { pattern = "status-sate.long-cao.dev", custom_domain = true }
+]
+
 # Probe every 5 minutes and record each service's status to D1.
 [triggers]
 crons = ["*/5 * * * *"]
