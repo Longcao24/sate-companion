@@ -310,7 +310,7 @@ class Debugger:
         f = section("TOOLS")
         row = tk.Frame(ap, bg=CARD); row.pack(fill="x")
         add(row, "Reboot over BLE", self._reboot)
-        add(row, "Move Wi-Fi…", self._connect_dialog)
+        add(row, "Change Wi-Fi…", self._change_wifi)
 
         # 5) FIRMWARE
         f = section("FIRMWARE")
@@ -478,6 +478,44 @@ class Debugger:
                 self.q.put(("log", "  ✓ device ready — recordings will run automatically (except reboot-resume)", "ok"))
             except Exception as e:  # noqa: BLE001
                 self.q.put(("log", f"  connect failed: {e}", "bad"))
+            finally:
+                self.q.put(("done", None, None))
+        threading.Thread(target=work, daemon=True).start()
+
+    # ---- change Wi-Fi (already-claimed device; keeps the account, like the mobile app) ----
+    def _change_wifi(self):
+        if self.busy:
+            return
+        # Same scan → pick → password dialog as the mobile app's change-Wi-Fi flow.
+        _ConnectDialog(self.root, self._do_change_wifi, title="Change Wi-Fi", verb="Change Wi-Fi")
+
+    def _do_change_wifi(self, ssid, wifipw):
+        if not ssid:
+            self._log("pick a Wi-Fi network first (Scan Wi-Fi), then enter the password.", "bad")
+            return
+        self._log(f"\nChanging Wi-Fi to '{ssid}' (keeps the account — no re-claim) …", "head")
+        self._set_busy(True)
+
+        def work():
+            try:
+                import asyncio
+                from hwtest.recorder_ble import RecorderBle
+
+                async def go():
+                    addr = await RecorderBle.find("SATE-", timeout=10)
+                    if not addr:
+                        return None
+                    async with RecorderBle(addr, log=lambda m: self.q.put(("log", m, "dim"))) as r:
+                        return await r.change_wifi(ssid, wifipw)
+                res = asyncio.run(go())
+                if res is None:
+                    self.q.put(("log", "  ✗ no recorder found over BLE — bring it into range (BOOT-hold to re-provision if needed)", "bad"))
+                elif res.get("state") == "wifi_saved":
+                    self.q.put(("log", f"  ✓ Wi-Fi changed to '{ssid}' — account unchanged", "ok"))
+                else:
+                    self.q.put(("log", f"  ✗ change failed: {res.get('state')} {res.get('msg', '')}", "bad"))
+            except Exception as e:  # noqa: BLE001
+                self.q.put(("log", f"  change-Wi-Fi error: {e}", "bad"))
             finally:
                 self.q.put(("done", None, None))
         threading.Thread(target=work, daemon=True).start()
@@ -1067,9 +1105,9 @@ def _toml_dump(cfg: dict) -> str:
 
 class _ConnectDialog(tk.Toplevel):
     """Connect a device: scan Wi-Fi over BLE, pick a network, type the password."""
-    def __init__(self, parent, on_submit):
+    def __init__(self, parent, on_submit, title="Connect device — Wi-Fi", verb="Connect"):
         super().__init__(parent)
-        self.title("Connect device — Wi-Fi")
+        self.title(title)
         self.configure(bg=CARD)
         self.on_submit = on_submit
         self.resizable(False, False)
@@ -1093,7 +1131,7 @@ class _ConnectDialog(tk.Toplevel):
             tk.Entry(self, textvariable=self.vars[key], width=32, show=show, font=("Menlo", 11), relief="flat",
                      highlightthickness=1, highlightbackground=HAIR).grid(row=i, column=1, padx=12, pady=3)
         br = tk.Frame(self, bg=CARD); br.grid(row=6, column=0, columnspan=2, pady=12)
-        Btn(br, "Connect", self._go, primary=True).pack(side="left", padx=6)
+        Btn(br, verb, self._go, primary=True).pack(side="left", padx=6)
         Btn(br, "Cancel", self.destroy).pack(side="left", padx=6)
         self.after(120, self._poll)
 
