@@ -5,6 +5,8 @@ pathologist) uses it. You don't need any technical knowledge — just follow the
 check that what you see matches. This is about the experience and the results, not how the
 system works underneath.
 
+This version uses the **handheld recorder** only.
+
 > For the engineering/QA version (with system internals), see [10-manual-testing.md](10-manual-testing.md).
 
 ## How to use this
@@ -36,7 +38,7 @@ Pass ▢ Fail ▢ — notes: __________
 
 ---
 
-## 2. Record a session on the device
+## 2. Record a session on the recorder
 
 **What this checks:** the handheld recorder captures a session and it turns up in your account.
 
@@ -67,22 +69,7 @@ Pass ▢ Fail ▢ — notes: __________
 
 ---
 
-## 4. Record with the pendant or phone
-
-**What this checks:** the wearable pendant (or phone capture) also produces a recording.
-
-**Do this:**
-1. In the phone app, connect to the pendant.
-2. Start capture, talk for ~10 seconds, stop.
-3. Use **Find me** to make the pendant flash, and check its battery shows.
-
-**You should see:** the audio comes through and becomes a recording just like the handheld; Find-me flashes the pendant; battery looks sensible. A short quiet gap while connected is normal.
-
-Pass ▢ Fail ▢ — notes: __________
-
----
-
-## 5. Find and open your recording
+## 4. Find and open your recording
 
 **What this checks:** you can find a finished recording and open it.
 
@@ -96,7 +83,7 @@ Pass ▢ Fail ▢ — notes: __________
 
 ---
 
-## 6. Listen and read along
+## 5. Listen and read along
 
 **What this checks:** playback and the transcript line up and are usable.
 
@@ -110,7 +97,7 @@ Pass ▢ Fail ▢ — notes: __________
 
 ---
 
-## 7. Fix the transcript
+## 6. Fix the transcript
 
 **What this checks:** you can correct the transcript and your changes stick.
 
@@ -126,7 +113,7 @@ Pass ▢ Fail ▢ — notes: __________
 
 ---
 
-## 8. Compare to typical norms
+## 7. Compare to typical norms
 
 **What this checks:** you can compare a child's sample against typical peers, and the app remembers your settings so you don't re-type them.
 
@@ -146,7 +133,7 @@ Pass ▢ Fail ▢ — notes: __________
 
 ---
 
-## 9. Create the report and save it
+## 8. Create the report and save it
 
 **What this checks:** you can generate the clinical report and save it as a PDF and a Word document to share.
 
@@ -168,7 +155,7 @@ Pass ▢ Fail ▢ — notes: __________
 
 ---
 
-## 10. Manage a patient and see progress
+## 9. Manage a patient and see progress
 
 **What this checks:** you can keep patients organized and see change over time.
 
@@ -183,7 +170,7 @@ Pass ▢ Fail ▢ — notes: __________
 
 ---
 
-## 11. Export the transcript (SALT)
+## 10. Export the transcript (SALT)
 
 **What this checks:** you can export the transcript in the SALT format for other tools.
 
@@ -201,7 +188,7 @@ Pass ▢ Fail ▢ — notes: __________
 
 These aren't failures of your test — just what to do:
 
-- **A recording doesn't appear:** give it a couple of minutes to process; make sure the device finished syncing (screen says "synced").
+- **A recording doesn't appear:** give it a couple of minutes to process; make sure the recorder finished syncing (screen says "synced").
 - **Very short / empty recording:** if you tapped record and stopped almost immediately, it's fine for it to show "No text in audio" — that's expected, not an error.
 - **"Compare to norms" won't load:** try again shortly; if it keeps failing, tell the team (it may be a temporary connection issue on our side).
 - **Anything unexpected:** note what you did, what you expected, and what happened — a screenshot is ideal.
@@ -213,9 +200,9 @@ These aren't failures of your test — just what to do:
 If you only have a few minutes, do these in order:
 
 1. Sign in (§1).
-2. Open a recording, play it, read the transcript (§5–6).
-3. Compare to norms — it loads and is remembered (§8).
-4. Create the report, set the age, save as PDF and Word, reopen (§9).
-5. Export SALT (§11).
+2. Open a recording, play it, read the transcript (§4–5).
+3. Compare to norms — it loads and is remembered (§7).
+4. Create the report, set the age, save as PDF and Word, reopen (§8).
+5. Export SALT (§10).
 
 Note the date you tested and mark each Pass/Fail.
