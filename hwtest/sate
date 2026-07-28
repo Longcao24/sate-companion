@@ -1,10 +1,32 @@
 #!/usr/bin/env bash
-# Zero-install launcher for the `sate` hardware CLI.
-#   ./hwtest/sate test --sim
-#   ./hwtest/sate flash recorder
-# For a real `sate` command on PATH:  pip install -e hwtest
+# Self-setting-up launcher for the `sate` hardware CLI — no manual install.
+#
+#   ./sate help          first run auto-creates a private .venv + installs deps (~1 min),
+#   ./sate flash recorder then just runs; nothing to pip-install by hand.
+#
+# Set SATE_NO_VENV=1 to skip the venv and use the current interpreter instead.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# Make the `hwtest` package importable without changing the caller's cwd
-# (so a relative --config path still resolves).
-exec env PYTHONPATH="${HERE}${PYTHONPATH:+:${PYTHONPATH}}" python3 -m hwtest.cli "$@"
+cd "$HERE"
+
+PY="python3"
+if [ "${SATE_NO_VENV:-}" != "1" ]; then
+  VENV="$HERE/.venv"
+  if [ ! -x "$VENV/bin/python" ]; then
+    echo "sate: first run — setting up .venv + dependencies (one-time, ~1 min)…" >&2
+    python3 -m venv "$VENV"
+    "$VENV/bin/pip" install -q --upgrade pip >/dev/null 2>&1 || true
+    # editable install pulls the pyproject deps (pyserial, bleak, tomli on <3.11)
+    "$VENV/bin/pip" install -q -e "$HERE" >/dev/null 2>&1 || "$VENV/bin/pip" install -q -r "$HERE/requirements.txt"
+  fi
+  PY="$VENV/bin/python"
+fi
+
+# Make a config.toml from the example on first run (account-driven tests need it;
+# doctor/flash/devices/debug do not — the Debugger has its own login).
+if [ ! -f "$HERE/config.toml" ] && [ -f "$HERE/config.example.toml" ]; then
+  cp "$HERE/config.example.toml" "$HERE/config.toml"
+  echo "sate: created config.toml from the example (edit it for the account-driven tests)." >&2
+fi
+
+exec env PYTHONPATH="${HERE}${PYTHONPATH:+:${PYTHONPATH}}" "$PY" -m hwtest.cli "$@"
