@@ -148,7 +148,13 @@ export async function handleDeviceApi(req: Request, url: URL, env: Env, ctx?: Ex
     if (devIdMatch && method === 'DELETE') return await removeDevice(env, user.id, devIdMatch[1]);
 
     if (subPath === '/firmware/latest' && method === 'GET') return await getLatestFirmware(env);
-    if (subPath === '/firmware' && method === 'POST') return await publishFirmware(env, req, url);
+    if (subPath === '/firmware' && method === 'POST') {
+      // Publishes an OTA image to the WHOLE fleet. This route sits above the `/admin` block,
+      // so without its own check any signed-in account could push firmware to every recorder
+      // — the same defect that was fixed in the Supabase device-api (v22).
+      if (!(await isAdmin(env, user.email))) return err('Forbidden', 403);
+      return await publishFirmware(env, req, url);
+    }
 
     // ---- Admin (system-wide) ----
     // Gated on the caller's email being in sate_admins. Everything here spans ALL users, so
@@ -724,41 +730,33 @@ async function handleChunk(
   const sessionId = 's-' + crypto.randomUUID().slice(0, 8);
   const storagePath = `${device.user_id}/${serial}/${sessionId}.wav`;
 
+  // ⚠️ R2 REFUSES A STREAM OF UNKNOWN LENGTH. This used to build a plain ReadableStream and
+  // hand it to put(), which fails outright with "Provided readable stream must have a known
+  // length" — so the FINAL slice of every chunked upload failed, on every session, and the
+  // recorder could never mark a take synced. It went unnoticed because this stack had not yet
+  // been pointed at a real recorder; a simulated device session in sate-notes/ caught it.
+  //
+  // The length is known here (the contiguity check above computed it), so the bytes go
+  // through a FixedLengthStream, which is the only stream shape R2 accepts.
+  const fls = new FixedLengthStream(assembledLen);
   let failed: string | null = null;
-  const body = new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      // Sequential by necessity: a stream has one cursor, so the parallel batch the buffered
-      // version used has nothing to parallelise into. Each part is fetched, checked, emitted
-      // and dropped.
-      for (const p of parts) {
-        const obj = await env.BUCKET.get(p.key);
-        if (!obj) {
-          failed = `missing part at ${p.offset}`;
-          controller.error(new Error(failed));
-          return;
-        }
-        let bytes = new Uint8Array(await obj.arrayBuffer());
-        if (bytes.length !== p.size) {
-          failed = `part at ${p.offset} changed size`;
-          controller.error(new Error(failed));
-          return;
-        }
-        // Part 0 carries the 44-byte WAV header; patch it with the real total.
-        if (p.offset === 0) {
-          bytes = new Uint8Array(bytes);
-          patchWavHeaderFor(bytes, assembledLen);
-        }
-        controller.enqueue(bytes);
-      }
-      controller.close();
-    },
+  // Pump and put must run CONCURRENTLY: put() drains the readable half while the pump fills
+  // the writable half. Awaiting the pump first would deadlock on the stream's buffer.
+  const pump = pumpParts(env, parts, assembledLen, fls.writable).catch((e: Error) => {
+    failed = e.message;   // recorded, not rethrown: the put below is what reports the failure
   });
 
   // THROW on failure — never log and carry on. See storeSessionRecord.
   try {
-    await putObject(env, 'device-sessions', storagePath, body, 'audio/wav');
+    await putObject(env, 'device-sessions', storagePath, fls.readable, 'audio/wav');
+    await pump;
   } catch (e) {
+    await env.BUCKET.delete(`device-sessions/${storagePath}`).catch(() => {});
     return err(`storage upload failed: ${failed ?? (e as Error).message}`, failed ? 409 : 500);
+  }
+  if (failed) {
+    await env.BUCKET.delete(`device-sessions/${storagePath}`).catch(() => {});
+    return err(`storage upload failed: ${failed}`, 409);
   }
 
   // Confirm the object really landed before telling the device it is safe. A 2xx that is not
@@ -799,6 +797,43 @@ interface PartRef {
   key: string;
   offset: number;
   size: number;
+}
+
+/**
+ * Pump the R2 parts, in offset order, into `sink`. Part 0's WAV header is patched with the
+ * real total on the way past — it is the only part carrying a header, and the length it must
+ * declare is the whole session's, which that part cannot know from its own size.
+ *
+ * Sequential by necessity: a stream has one cursor. Each part is fetched, checked, written
+ * and dropped, so peak memory is one part (~1 MB) regardless of session length — which is
+ * what keeps a ~118 MB take under the Worker's hard 128 MB limit.
+ */
+async function pumpParts(
+  env: Env,
+  parts: PartRef[],
+  totalLen: number,
+  sink: WritableStream<Uint8Array>,
+): Promise<void> {
+  const writer = sink.getWriter();
+  try {
+    for (const p of parts) {
+      const obj = await env.BUCKET.get(p.key);
+      if (!obj) throw new Error(`missing part at ${p.offset}`);
+      let bytes = new Uint8Array(await obj.arrayBuffer());
+      if (bytes.length !== p.size) throw new Error(`part at ${p.offset} changed size`);
+      if (p.offset === 0) {
+        bytes = new Uint8Array(bytes);
+        patchWavHeaderFor(bytes, totalLen);
+      }
+      await writer.write(bytes);
+    }
+    await writer.close();
+  } catch (e) {
+    // Abort so the concurrent put() rejects instead of hanging on a stream that will never
+    // reach its declared length.
+    await writer.abort(e).catch(() => {});
+    throw e;
+  }
 }
 
 /** List the .part objects under a prefix, in offset order, with their sizes. */
@@ -907,12 +942,25 @@ async function listSessions(env: Env, userId: string, deviceSerial: string | nul
  * Delete one uploaded session (row + stored WAV), scoped to the caller. A linked recording,
  * if any, is left intact — that is deleted from the report view.
  */
+// Deleting a session must take the recording DERIVED from it as well. Removing only the
+// session row left the `recordings` row and its copy of the audio in place: the take still
+// showed in the web app and was still downloadable, so "delete" did not delete the clinical
+// data. Same fix as the Supabase device-api (v22).
 async function deleteSession(env: Env, userId: string, sessionId: string): Promise<Response> {
-  const row = await env.DB.prepare(`SELECT storage_path FROM sate_device_sessions WHERE id = ? AND user_id = ?`)
+  const row = await env.DB.prepare(
+    `SELECT storage_path, recording_id FROM sate_device_sessions WHERE id = ? AND user_id = ?`)
     .bind(sessionId, userId)
-    .first<{ storage_path: string | null }>();
+    .first<{ storage_path: string | null; recording_id: string | null }>();
   if (!row) return err('Session not found', 404);
   if (row.storage_path) await env.BUCKET.delete(`device-sessions/${row.storage_path}`).catch(() => {});
+  if (row.recording_id) {
+    const rec = await env.DB.prepare(`SELECT file_path FROM recordings WHERE id = ? AND user_id = ?`)
+      .bind(row.recording_id, userId)
+      .first<{ file_path: string | null }>();
+    if (rec?.file_path) await env.BUCKET.delete(`recordings/${rec.file_path}`).catch(() => {});
+    await env.DB.prepare(`DELETE FROM recordings WHERE id = ? AND user_id = ?`)
+      .bind(row.recording_id, userId).run();
+  }
   await env.DB.prepare(`DELETE FROM sate_device_sessions WHERE id = ? AND user_id = ?`).bind(sessionId, userId).run();
   return noContent();
 }

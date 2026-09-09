@@ -100,6 +100,13 @@ physical stacks; it encodes both rules above, including the lock-safe Plaud rele
 - **Web deploy is a git subtree** to a separate repo:
   `git subtree push --prefix=react_app_sate-ui_update webapp <branch>`
   (`webapp` remote = `Longcao24/SATE_hardwave`, which Vercel builds).
+- **The CLI + Debugger ship as a git subtree too:**
+  `git subtree push --prefix=hwtest sate-cli main` (`sate-cli` remote = `Longcao24/SATE-CLI`) —
+  the standalone repo a coworker clones to get `sate` / the Debugger without the monorepo.
+  `hwtest/` here is the source of truth: edit here and push, never commit into `SATE-CLI`
+  (that needs a `git subtree pull --prefix=hwtest sate-cli main` or the next push conflicts).
+  `config.toml` (account password + device key), `.venv/`, `ci-reports/`, and the built
+  `SATE Debugger.app` are git-ignored — keep them out of the subtree.
 - Proprietary Plaud frameworks are git-ignored (`modules/plaud-sate/ios/Frameworks/`) —
   never commit them. Deploy `mint-plaud-token` with `--no-verify-jwt`.
 - **`sate ci` is the standard firmware gate — every recorder firmware version MUST pass it
@@ -130,6 +137,12 @@ Durable lessons — check the ones relevant to what you're touching. Version num
 `git log` is the source of truth for current firmware/edge-fn versions.
 
 **Backend / Supabase edge functions**
+- **`supabase functions deploy` may fail locally with `failed to open eszip: ENOENT`.** The
+  bundler fetches every dep, then dies writing its output. It is the CLI, not your code — an
+  unmodified file fails identically, and `TMPDIR` makes no difference. Use **`--use-api`**,
+  which bundles server-side: `supabase functions deploy device-api --no-verify-jwt --use-api
+  --project-ref zlgdpivcbmaodgokkdvz`.
+
 - **`device-api` and `mint-plaud-token` MUST deploy with `verify_jwt:false`** (they validate
   the token themselves). Redeploying with the MCP default `verify_jwt:true` breaks recorder
   registration ("Setup link expired") and Plaud token minting. Always pass
@@ -138,10 +151,61 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   USER-authed `POST /sessions` (Plaud has no `sate_devices` row / device key).
 - **Admin page** `/admin` manages ALL devices + firmware system-wide, gated by the
   `sate_admins` table (by email). Don't expose admin routes without that gate.
-  ⚠️ **Known gap (audit 2026-07-22):** `POST /firmware` (publishFirmware) is routed ABOVE the
-  `/admin` gate, so any authenticated user can push fleet-wide OTA. `publishFirmware` now validates
-  the image (semver + `0xE9` magic + size cap) but still needs an `isAdmin()` gate. Same in the
-  cloudflare port. (Deprioritized behind features, but fix before GA.)
+  ✅ **Fixed 2026-09-07 (device-api v22):** `POST /firmware` now calls `isAdmin()` and returns 403
+  to a non-admin — verified empirically with a throwaway non-admin account (403; it previously
+  reached input validation). ⚠️ The **cloudflare port** (`cloudflare/src/functions/deviceApi.ts`)
+  still has the ungated route — fix it there too before that lane ships.
+- **A recording has ONE name, and `src/services/recordingName.ts` is where it is decided.**
+  `recordingLabel(name)` (from a stored recording's name) and `sessionLabel(serial, n)` (from an
+  uploaded session, which has no file name) both produce `R-S13` / `P-3:17 PM` / `PL-3:17 PM`;
+  a name that does not match the generated pattern is a human's and is returned untouched. Used by
+  the sidebar, the report header, the dashboard cards, the Devices session rows, the delete/move
+  dialogs, the rename prefill, and a meeting note's meta line. **Do not re-derive it locally** —
+  the same take used to be `device_SATE-443EAC_s13.wav` in the report, `R-S13` in the sidebar,
+  `Session 13` on Devices and `SATE-443EAC · session 1` in a note, and four names for one thing
+  means you cannot tell whether two screens are showing you the same recording. The raw file name
+  stays reachable in the `title` tooltip.
+- **`recordings.recording_name` is AUTO-FILLED with the file name — it is not evidence a human
+  named the take.** Only a value that DIFFERS from `file_name` is. `recordingLabel` sidesteps the
+  comparison — no person types `device_SATE-443EAC_s13.wav`, so matching the pattern IS the proof
+  it was generated — but anything else asking "did the user name this?" must compare the two.
+- **The number after `_s` in a device file name is NOT always a session number.** The recorder
+  numbers takes 1..99 (`device_SATE-443EAC_s13.wav`); the pendant and Plaud paths put a UNIX
+  TIMESTAMP there (`device_plaud-…_s1783709768.wav`). Anything rendering it must branch, or it
+  prints thirteen digits of noise.
+- **`GET /api/sessions` was capped at 20 (fixed in v19; default 200, `?limit=` up to 1000).**
+  The cap silently hid a recorder's history — one account had **176** sessions and could see 20.
+  The Devices page is the only place a session exists once its audio has been reclaimed from the
+  card, so a take falling off that list looks like it was never made. Still bounded: it is one
+  JSON response.
+- **Deleting a session DELETES THE DERIVED RECORDING TOO (device-api ≥v22).** `deleteSession()` used
+  to remove only the session row + its `device-sessions` object, leaving the `recordings` row and its
+  copy of the audio behind — the take still showed in the web app and was still downloadable, so
+  "delete" did not delete the clinical data. It now also removes the linked `recordings` row and its
+  object (and `recording_versions` cascades). Both delete and retry write to **`sate_session_audit`**
+  (append-only, RLS read-own, and deliberately NO foreign key to `sate_device_sessions` so the record
+  OUTLIVES the row it describes). `retrySession()` records the previous error/attempts there before
+  clearing them — without that, retrying erased the only evidence of what failed.
+- **A transcript save is a compare-and-swap, not an UPDATE (2026-09-07).** `recordings` gained a
+  `version` counter; `save_transcript(recording_id, expected_version, …)` keeps the previous transcript
+  in **`recording_versions`** and raises `PT409` (→ HTTP 409) if the row has moved on. Two clinicians
+  editing one transcript used to mean the second save silently overwrote the first, with no server-side
+  history to recover from. The web app's `updateRecording()` calls the RPC and passes the version it
+  last loaded. A trigger keeps history (and `updated_at`, which nothing maintained before) even for a
+  direct table write, so an older deployed client degrades to "no conflict detection", never to
+  "no history".
+- **An AUDIBLE take that the AI returns with no words is RETRIED, not stored as `no_text`
+  (`cf-processor`, 2026-09-07).** Byte-identical speech audio was measured coming back empty on ~1
+  upload in 3. A silent `no_text` is indistinguishable to the clinician from a recording that captured
+  nothing, and it cannot be retried (the Retry button only accepts `error`). `process()` now computes
+  `_audio_rms(wav)`; if the audio is above `SILENT_RMS_MAX` (env, default **20**) and attempts remain,
+  it raises `Transient` instead of finalizing. **Tune that threshold against real audio, not intuition
+  — this mic is very quiet: a 7.6 s take that transcribes fine reads only ~76 RMS, so the first guess
+  of 300 never fired.** Genuinely silent audio still finalizes `no_text` on attempt 1.
+- **The recordings-bucket key is derived from the SESSION id, never wall-clock (`cf-processor`).** It
+  used to embed `time.time()`, so every retry of a failing job wrote a NEW object and left one orphaned
+  copy of the clinical audio per attempt. The upload is upsert, so a stable key means a retry overwrites
+  its own previous copy.
 - **`GET /api/sessions/verify`** (device-api ≥v15, device-key auth, read-only) — the recorder asks
   "is session N with exactly B bytes durably stored?" before freeing SD audio. Answers `stored:true`
   only when the row exists AND `objectExists`. Never make it mutate. `storeSessionRecord` also probes
@@ -166,10 +230,9 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   own loop drains the queue.
 - **`process-device-session` must be a 200 no-op** — `device-api` still fire-and-forgets to it, but it
   must NOT process, or it races the container and duplicates recordings. Don't revive it.
-  ⚠️ **Audit 2026-07-22:** the copy CHECKED INTO the repo is NOT the no-op — it still downloads the WAV,
-  awaits the AI, and inserts `recordings` (filters `processed=false` while the container claims on
-  `status`, so BOTH process the same session → duplicate recordings + the 150s edge-kill hang). Prod is
-  deployed as the no-op; do NOT deploy the repo file as-is. Make it a real early-return before GA.
+  ✅ **Fixed 2026-09-07:** the repo copy was still the old processing version (a deploy of it would
+  have raced the container into duplicate recordings). It has been replaced with the deployed 27-line
+  no-op, so repo and prod now match — confirmed by downloading the deployed source.
 - **Retry:** watchdog (`requeue_stale_sessions`) auto-requeues stalled `processing` jobs up to
   `MAX_ATTEMPTS` then → `error`; transient failures (network/`5xx`/`408`/`429`) requeue with backoff
   (`requeue_session`); permanent (`4xx`, no segments) → `error` immediately; the user Retry button
@@ -187,6 +250,11 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   `GET /api/health/alerts` digest. A settled `error` session is mailed ONCE (it can't auto-clear);
   only ACTIVE conditions (service DOWN, job stuck in `processing`) re-remind, ≤ every 24h. A full daily
   infrastructure report is emailed at 08:00 America/New_York; `GET /check?daily=1` force-sends it.
+  A `TARGETS` entry may carry **`minIntervalSec`** to rate-limit its network probe below the 5-min
+  cron — used for the **ngrok** hosts to conserve ngrok quota; the AI `/process` target is `24*3600`
+  (once/day, ~1 hit/day vs ~288 — so a NEW AI outage can go unseen for up to 24h). When throttled,
+  `runChecks()` carries the last status/code forward
+  (re-inserts it, no fetch) so the 90-day history stays continuous; a carried `down` still alerts.
 - **Never move the AI call back into an edge/Worker fetch.** Any serverless request (Supabase edge OR
   a plain CF Worker — the ~100s 524 origin timeout) will kill a long synchronous transcription. The
   long call MUST live in a real long-running process (the container). `finalize-session` and
@@ -264,13 +332,32 @@ setup + prebuilt flash assets: `SETUP.md` + the **GitHub Release** (`gh release 
   **DIO** (qio = dead black screen); `arduino-cli upload` sets the mode itself. LVGL draw buffers +
   heap live in **PSRAM** (`lv_conf.h` `LV_MEM_CUSTOM 1`/`ps_malloc`, and `display.cpp`
   `MALLOC_CAP_SPIRAM`) so the register TLS handshake has contiguous internal RAM — don't move them
-  back to internal DMA RAM (that caused "Server registration failed code -1"). See `hardware.md` §3.
+  back to internal DMA RAM (that caused "Server registration failed code -1"). See `doc/12-hardware.md` §3.
 - **Battery sense = GPIO9 (ADC1), enabled** (`BAT_ADC_PIN 9`, `BAT_SENSE_ENABLED 1`) behind the
   board's on-board 0.5 divider (`analogReadMilliVolts × 2`) → Home chip + heartbeat telemetry +
   low-voltage cutoff. ⚠️ **Do NOT move it to GPIO34** — GPIO34 is a classic-ESP32 pin, wrong on the
-  S3, and bootloops the board (that was the fw 1.0.6 mistake; GPIO9 is the fix). See hardware.md §8.31.
+  S3, and bootloops the board (that was the fw 1.0.6 mistake; GPIO9 is the fix). See `doc/12-hardware.md` §8.31.
 - **Two-button pinout**: record = GPIO2, flag = GPIO14 (interrupt-latched). Flag markers
   flow device → sessions → recordings → web report seek-bar ticks. Don't reassign lightly.
+- **GPIO3 is a GROUND RAIL, not a signal** (`GND_OUT_PIN`, fw 1.5.33): driven `OUTPUT`/`LOW`
+  in `setup()` *before* the buttons, and latched low through deep sleep (`rtc_gpio_hold_en`,
+  released by `rtc_gpio_hold_dis` at the top of `setup()`). **Don't drop the sleep hold** — a
+  RECORD button whose common sits on IO3 loses its return path while asleep and the ext0 wake
+  dies. Keep the sink under ~20 mA; it's a GPIO, not the ground plane. See §2 of `doc/12-hardware.md`.
+- **Charge detect is inference, not a pin** (fw 1.5.33): the on-board charger exposes no CHRG
+  line and the S3 has no VBUS-sense register, and `HWCDC::isPlugged()` only sees a real USB
+  *host* (a wall charger sends no SOF packets) — **true is trustworthy, false is not**. So
+  `batteryService()` layers host-attached/host-lost + a ≥4250 mV level + a ≥25 mV raw step +
+  a 4-min ±8 mV trend. Two rules keep it honest, both found in simulation: **slow tests run on
+  the smoothed EMA, only the step test on the raw read**, and the trend/full tests are windowed
+  **slopes** (decide once per window, then reopen) — a threshold retested every sample against
+  a fixed reference is eventually crossed by noise, sign a coin flip. §8.30.
+- **Battery 100% is reachable now** (fw 1.5.33): the old LUT put 100% at 4200 mV — the CV
+  setpoint the *sensed* node never shows, because the charger terminates and the cell relaxes
+  to ~4.15–4.18 V, the ~120 mA load sags it further, and the 1-point gain is tuned on one unit.
+  Full is now 4150 mV, plus a charge-terminated latch (< 6 mV climb per 4-min window on USB →
+  real 100%, held until < 4050 mV). Don't "fix" a unit reading 95% by re-tuning `BAT_CAL_GAIN`
+  first — check §8.31.
 - **Connectivity runs on a core-0 task**, GUI + buttons on core 1 (fixed button lag + stuck
   uploads). Keep network work off the UI core.
 - **OTA**: firmware pulls a `.bin` from Supabase Storage via the command channel; the web
@@ -325,9 +412,40 @@ setup + prebuilt flash assets: `SETUP.md` + the **GitHub Release** (`gh release 
        as compromised and tell the user to rotate it afterward.
   4. Queueing OTA to a device with a backlog fails `err-get-1` — `reboot` first, wait, then `ota`
      (see the runbook note above).
-- **Wi-Fi change without factory reset**: BOOT-hold re-provisions Wi-Fi and KEEPS the
-  account; a full reset is only for when the server removed the device (heartbeat
-  `unclaimed:true`). Don't wipe the account binding for a Wi-Fi change.
+- **RECORD button is a GESTURE, not a tap (fw >=1.5.35): double-click starts, HOLD 3 s stops.**
+  A single tap does nothing on Home and nothing during a take. One tap was too easy to do by
+  accident on a device that lives in a bag: a stray tap mid-take ENDED a recording, a stray tap
+  at Home started one nobody wanted. Three things this depends on, all easy to break:
+  (a) stop reads the button's LEVEL (`digitalRead`), not `btnPressed()` — a hold is a duration
+  and `btnPressed()` is a one-shot; it is still CALLED and its result discarded, or the latched
+  taps queue up and the first fires the instant the take ends; (b) hold-to-stop only arms after
+  the button has been seen released once, or holding the second click of the double-click stops
+  the take 3 s after it starts; (c) the pill counts down `HOLD 3/2/1` — a silent 3-second hold
+  is indistinguishable from a dead button and users let go at two.
+  **The gesture applies to the PHYSICAL button only.** The on-screen record dot (`ACT_RECORD`),
+  the on-screen Stop button and the remote `stop` command are all still a single action — which
+  is why Home still reads "Ready to Record" and the gesture is taught by a transient toast fired
+  from the physical-button path (`showToast`), not by a permanent label that would be wrong for
+  anyone using the touchscreen. A lone physical press says "Double-click to start recording" at
+  Home and "Hold 3s to stop recording" during a take; the double-click window is 700 ms so the
+  hint outlasts reading it, and a late second tap just re-arms the window. ⚠️ **`sate ci` cannot test any of this** — it drives
+  the device with REMOTE commands and never touches the physical button; the gesture needs a
+  human. See `SATE_Recorder.ino` `REC_DOUBLE_CLICK_MS` / `REC_HOLD_STOP_MS`.
+- **TLS is chosen by URL SCHEME, not by hostname (fw >=1.5.34).** `serverIsSupabase()` used to
+  decide both "speak TLS?" and "send the `apikey` header?" from one `strstr(cfgServer,
+  "supabase.co")`. That works for exactly one backend: point a recorder at any other https host
+  and the command poll (`connectivity.cpp` `connHttpBegin`), the chunk upload (`sendSessionChunk`)
+  and registration all built PLAIN HTTP against port 443 and failed with nothing useful in the
+  log. Now `urlIsTls()`/`serverIsTls()` answer the TLS question and `serverIsSupabase()` is for
+  the `apikey` header ONLY. OTA was already scheme-based. Don't re-merge them — the second
+  backend (`sate-notes/`, the consumer lane on Cloudflare) depends on this.
+- **Wi-Fi change without factory reset** is **app-driven**: the `change_wifi` BLE op or the
+  `wifi_change` remote command re-associates and KEEPS the account/device key. Don't wipe the
+  account binding for a Wi-Fi change. ⚠️ **Holding BOOT 5 s is a FULL factory reset**, claimed
+  or not (`serviceFactoryResetButton()` in the `.ino` — verified in source 2026-07-28); the
+  older "BOOT-hold just changes Wi-Fi" note (still in `connectivity.h`'s header comment) is
+  stale. The other route to first-time setup is the server removing the device (heartbeat
+  `unclaimed:true`).
 
 **SATE Pendant (XIAO nRF52840 wearable)**
 - Firmware is in the repo at `SATE_Pendant/` (`SATE_Pendant.ino` + `HARDWARE.md` +
@@ -365,7 +483,136 @@ setup + prebuilt flash assets: `SETUP.md` + the **GitHub Release** (`gh release 
 - Recordings upload as **Standalone** by default — assigning a patient is optional
   and can be done later on the web report. Don't force patient assignment at capture.
 
+**The consumer ("Plaud-like") lane — `sate-notes/`**
+- A SECOND backend for the same recorder, same firmware, same image: a device joins it purely by
+  being provisioned with `cfgServer` pointing at it. Full Cloudflare — Worker + D1 + R2 + Workers
+  AI (Whisper + an instruct model) + a Workflow. It shares no data, no DB and no AI capacity with
+  the clinical stack, so a consumer backlog can never make a clinician's recording wait.
+- **The pipeline is a Workflow, not a fetch handler** — same law as the clinical lane: a long
+  transcription must never be awaited inside a serverless request. One `step.do` per audio chunk.
+- ASR is ~96% of the cost ($0.031/audio-hour) and the summary ~4%, so the transcript is stored
+  once and summaries live in their own table keyed by `(note, template, model)` — re-summarising
+  (a different template, a bigger model) is nearly free and must NEVER re-transcribe.
+- **Cloudflare-hosted models ONLY.** A product constraint, not a preference: no third-party
+  inference API means no key to rotate, no second vendor to be down, and no audio or transcript
+  leaving the account. ⚠️ **The `@cf/` prefix is NO LONGER proof of that** — the catalog now
+  carries partner routes in the same namespace that are marked *Third-party*, including speech
+  models (`@cf/xai/grok-stt`). `assertCloudflareModel()` therefore checks a **vendor allowlist**
+  (`CF_HOSTED_VENDORS`), not the prefix; adding a vendor is a deliberate edit after reading the
+  model page's "Cloudflare-hosted" label. Headroom for the summary model:
+  `llama-3.3-70b-instruct-fp8-fast` (~$0.008/audio-hour, 24k context), `gpt-oss-120b`,
+  `glm-4.7-flash` (131k context).
+- **ASR is `@cf/deepgram/nova-3` with diarization (2026-09-08).** Whisper has no speaker
+  support and hallucinates on quiet audio — the same 7.6 s SATE take came back `"Thank you."`
+  from Whisper and `"Yeah. That's so nice to see that."` from nova-3. Cost is the trade: it is
+  **$0.0052/audio-minute vs $0.00051** ($0.31 vs $0.031 per audio-hour), and ASR is ~96% of the
+  feature's cost, so the lane costs ~10x what it did. `transcribeWhisper()` is kept and picked
+  by model id, so rolling back is one env var.
+  - **`audio.body` MUST be a `ReadableStream`.** Probed against the live model: `Uint8Array`,
+    `ArrayBuffer` and `number[]` are all rejected with *"required properties at '/audio' are
+    'body,contentType'"*. Use `new Response(bytes).body`.
+  - **The published output schema is WRONG/incomplete.** It declares `words[]` as
+    `{word,start,end,confidence}` with no `speaker` at all, and does not mention `utterances`.
+    A real `diarize:true` call returns `speaker`, `speaker_confidence`, `punctuated_word` AND a
+    `results.utterances[]` array. The adapter prefers `utterances` (already grouped per speaker)
+    and falls back to grouping `words[]` on speaker change.
+- **Speaker numbering is PER CHUNK, so it must be stitched — `stitchSpeakers()`.** Each chunk is
+  diarized independently and numbers from 0, so chunk 1's "speaker 0" is not chunk 2's. Unmapped,
+  a 6-chunk two-person meeting renders as up to twelve speakers. The overlap window is the only
+  evidence (those seconds are transcribed twice), so speakers are matched by shared time in the
+  overlap, strongest pair first, each global identity claimed once per chunk. **A local speaker
+  who never talks during the overlap gets a NEW identity** — that over-counts rather than
+  mis-attributes, which is the safe direction: a duplicate "Speaker 3" is confusing, but putting
+  Speaker 1's words in Speaker 3's mouth is a lie. `CHUNK_SECONDS` is **600** (was 60) and
+  `CHUNK_OVERLAP_SECONDS` **20** (was 2) for exactly this reason — fewer boundaries, and enough
+  overlap to catch a real exchange. Verified on a 17-min two-person session: 2 chunks → 2 global
+  speakers, identity held across the boundary.
+- **The model is given a TIME- AND SPEAKER-STAMPED transcript (`promptTranscript()`), not the
+  stored prose.** `transcripts.text` stays clean because that is what the note page renders. Two
+  bugs died here: the highlight button was dead weight (the prompt announced "the user pressed
+  highlight at 132 seconds" while handing over a wall of text with no timestamps anywhere), and
+  "who agreed to do this" was unanswerable from one anonymous stream.
+- **The map step of map-reduce needs the SAME anti-fabrication rules as the final pass.** It ran
+  on a bare *"Summarise this part of a transcript in plain prose."* — no "transcript is the only
+  source", no "fewer is correct". Whatever it invented became the only input the reduce step saw,
+  and `sanitise()` cannot catch a fabrication already sitting in its input. So the LONGEST
+  recordings — the ones a user is least able to check by ear — had no protection at all. Use
+  `MAP_SYSTEM`, and split on line boundaries (`splitForMap`), never `slice()` mid-utterance.
+- **The word count handed to the model must come from the ORIGINAL transcript.** It was measured
+  on the post-reduction text, so a long meeting reported a few hundred words — and that number
+  drives both the SHORT FRAGMENT branch and the chapter gate in `sanitise()`.
+- **Whisper hallucinates on non-speech** (a pure tone came back as "Thank you."; a 6-minute
+  silent take as "The car is a good one" on repeat), so the short-take guard runs BEFORE the
+  model, and a session the clinical pipeline marked `no_text` is never offered a note.
+- **An LLM pads a thin transcript, and padding is indistinguishable from a real summary.** An
+  11 s clip of four half-sentences produced 9 key points, 3 action items and chapters at 0:30
+  and 0:50 — past the end of the audio. Fixed at three levels and all three matter: the prompt
+  must say fewer-is-correct (asking for "3-8 bullets" FORCES invention), the model must be told
+  the recording's length and word count, and `sanitise()` must drop what cannot be true. Never
+  ship a summariser without that last one — a prompt is guidance, not a guarantee.
+- **Progress must come from the pipeline, not from an animation.** Transcription is one AI call
+  per audio chunk, so "part 3 of 7" is a fact; it is written to `notes.chunks_done` INSIDE the
+  `step.do` so a retried chunk cannot advance the bar twice. Stages that cannot be measured
+  (queued, summarising) get an indeterminate bar and NO percentage — a bar creeping forward on
+  a guess turns "I don't know how long this takes" into a promise.
+- **A template must change WHAT IS EXTRACTED, not just the tone.** The first version gave every
+  template the same six fields, so a lecture was still asked for "action items" — and a model
+  asked for a field the recording cannot fill does not return `[]`, it INVENTS one. Each
+  `TEMPLATES` entry now declares its own `sections` (and whether it has chapters), the prompt is
+  built from that list, and `sanitise()` drops every key the template does not own. The smallest
+  template (`tasks`, one section) is the safest.
+- **A summary renders as a DOCUMENT, not a grid of cards** (`NoteDetail`/`SummaryView`): title,
+  a metadata block for the facts we actually know, then headings with bullets. Items may carry
+  `sub` (spoken sub-points) and a `"Label: text"` lead-in rendered bold — but both are gated
+  hard in the prompt, because nesting and labels are two more surfaces to fabricate on. A short
+  recording legitimately has neither; do not force them.
+- **Strip placeholder items.** Asked for a section it cannot fill, a model writes "none
+  mentioned" instead of `[]` — which renders as a bullet and reads like a finding. The prompt
+  forbids it and `sanitise()` filters it; both, because the prompt is not a guarantee.
+- **Only the DEFAULT template may set `notes.title`.** The title is the note's identity in the
+  list; letting whichever template you last viewed rewrite it means reading a recording a
+  different way renames it, and the sidebar stops matching the page.
+- **Deleting a note has to OUTLIVE the row.** The Devices page auto-generates a note for
+  anything recorded in the last 24 h, so a plain delete would be undone within seconds and the
+  button would look broken. `DELETE /api/notes/:id` therefore writes a `note_optouts` row for
+  the source session, `by-source` returns `{notes, optedOut}` so the auto-generator can skip it,
+  and asking for the note again explicitly (the button on the session's row) clears the opt-out
+  — that is also an intention. Any future automatic generation must honour that table.
+- **Auto-generation is windowed to 24 h and runs one at a time.** This account has 176 sessions;
+  sweeping the history on first page load spends real money on Workers AI and buries the list.
+  Older sessions keep their own button.
+- **Access is granted in the SATE app's Admin page → Users, and `sate_admins` is the ONE admin
+  list.** The feature is OFF for every account until an admin turns it on there (device-api v21
+  `GET /admin/users` lists the accounts from Supabase auth; the toggle PUTs to the Worker's
+  `/admin/accounts`). Two things this fixed: the switch used to live on the Worker's own
+  `/console` behind a shared `ADMIN_KEY` — a second URL and a second admin list, which drift —
+  and a grant could only be given to an account that had ALREADY visited the notes lane, because
+  `account_access` rows are created on first sight. The account list now comes from Supabase, so
+  an admin can grant to anyone. The Worker learns "is this caller an admin?" by asking device-api
+  `GET /admin/me` with the caller's own token (cached 60 s per isolate); `notes_admins` in D1
+  stays only as a bench fallback and is EMPTY in prod. Don't reintroduce a second admin list.
+- **Notes are made ON DEMAND from a recording the clinical stack already stored** (the
+  "Meeting note" button on a Ready session in the Devices tab), NOT by rerouting the upload.
+  The upload path is the one that has already destroyed a recording when it was got wrong;
+  keep it out of this feature. The Worker fetches the audio from `device-api` with the CALLER'S
+  own token, so ownership is enforced by the system that owns the recording.
+- **R2 refuses a `ReadableStream` of unknown length** — the assembled WAV must go through a
+  `FixedLengthStream`. `cloudflare/src/functions/deviceApi.ts` had this bug too (every chunked
+  upload's final slice would have failed there); fixed 2026-09-01.
+
 **Dev environment**
+- **A MAC-allowlist Wi-Fi looks exactly like a working connection.** A campus/device-registration
+  SSID hands out a DHCP lease and then silently drops every packet until the MAC is registered:
+  the recorder logs `[CONN] Online (Wi-Fi) - <ip>`, the UI says online, and NOTHING reaches the
+  server — `sate_devices.last_seen` just stops advancing. fw >=1.5.34 prints the STA MAC in the
+  boot log (`[CONN] serial=… provisioned=… mac=…`) precisely so this is a one-line diagnosis.
+  Check `last_seen` on the server before believing "Online".
+- **To move a recorder to another network, scan from the DEVICE, not the Mac.** `RecorderBle.
+  scan_wifi()` lists what the recorder can actually hear (the Mac's radio and the recorder's
+  disagree, and the recorder is 2.4 GHz only). Then `sate provision --wifi "SSID:PASS"` with no
+  `--claim-token` = `change_wifi`: keeps the account and device key. ⚠️ BLE only advertises when
+  Wi-Fi is DOWN, so a connected-but-useless unit cannot be re-pointed over BLE — stop it
+  reaching the bad AP first, or use the `wifi_change` remote command.
 - **The dev Mac's LAN IP is dynamic** — a stale IP breaks both app launch and provisioning.
   Check `ipconfig getifaddr en0` first when things "suddenly" can't reach the Mac.
 
@@ -373,13 +620,20 @@ setup + prebuilt flash assets: `SETUP.md` + the **GitHub Release** (`gh release 
 - **Mobile-link QR login** (2nd login method): web mints a one-time code/QR, the phone
   consumes it for a real session (`mobile-link` edge fn + `mobile_link_codes` table). Needs
   a native rebuild (expo-camera) + web redeploy (qrcode.react) to change.
+- **A flag survives only if every hop carries it.** The flag button's ms offsets are written to
+  `sate_device_sessions.flags` at upload — but `device-api`'s session list did not SELECT that
+  column until v20, so nothing downstream could see them and a meeting note generated from a
+  session silently lost every mark. When adding a consumer of a session, check the column is
+  actually in the select; the data being in the row is not the same as it being reachable.
 - **Flag markers** are one pipeline shared by SATE hardware (physical flag button) and Plaud
   (device tap): ms offsets → `flags` column → `recordings.flags` → seek-bar ticks on the web
   report. Reuse it; don't fork a parallel path.
 
 ## Docs
 
-`doc/` is the numbered project handbook (`08-plaud.md` = Plaud). `plaud-integration.md`
+`doc/` is the numbered project handbook (`08-plaud.md` = Plaud; **`12-hardware.md`** = the deep
+recorder hardware reference + the device↔server API contract — moved there from the repo root,
+so it now publishes to the internal docs site). `plaud-integration.md`
 (repo root) is the Plaud deep dive. Keep docs current when behavior changes. Deeper /
 cross-session context lives in the agent memory at
 `~/.claude/projects/-Users-hoanglong-Documents-sate-companion/memory/`.

@@ -36,6 +36,16 @@ MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))
 # permanently stuck 'error'. Finalize these as no_text WITHOUT ever calling the AI.
 # 0.4 s is far below any real clinical utterance. See _has_text for the post-AI case.
 MIN_AUDIO_SEC = float(os.environ.get("MIN_AUDIO_SEC", "0.4"))
+# A take whose audio is AUDIBLE but which the AI returns with zero words is far more likely
+# to be a flaky AI response than a genuinely silent recording: byte-identical speech audio
+# was measured coming back empty on roughly one upload in three, and transcribing normally
+# on the next. Finalizing that as `no_text` is silent data loss — the clinician sees a
+# recording that captured nothing, with no error and no way to retry (the Retry button only
+# accepts status='error'). So: retry an audible-but-empty result, and only accept `no_text`
+# once the attempts are spent or the audio really is silent. RMS is in int16 units — digital
+# silence is 0, and this mic is QUIET: a measured 7.6 s clinical take that transcribes fine
+# reads only ~76 RMS, so the cut sits just above digital silence, not at a "speech" level.
+SILENT_RMS_MAX = float(os.environ.get("SILENT_RMS_MAX", "20"))
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "10"))
 # Ceiling on how long ONE AI read may hang. The old value was None (unbounded,
 # deliberate for long takes) — but if the AI service accepts the connection and
@@ -181,6 +191,25 @@ def _wav_seconds(data):
         return None
 
 
+def _audio_rms(data):
+    """RMS amplitude of a 16-bit mono WAV, or None if it can't be read."""
+    try:
+        with wave.open(io.BytesIO(data)) as wf:
+            if wf.getsampwidth() != 2:
+                return None
+            frames = wf.readframes(wf.getnframes())
+    except Exception:
+        return None
+    if not frames:
+        return 0.0
+    import array
+    a = array.array("h")
+    a.frombytes(frames[: len(frames) - (len(frames) % 2)])
+    if not len(a):
+        return 0.0
+    return (sum(v * v for v in a) / len(a)) ** 0.5
+
+
 def _has_text(t):
     for seg in (t.get("segments") or []):
         for w in (seg.get("words") or []):
@@ -214,13 +243,25 @@ def process(s):
     if not transcript or not isinstance(transcript.get("segments"), list):
         raise Permanent("AI returned no segments")
 
-    # No usable speech: finalize as no_text (no recording), let the edge mark it done.
+    # No usable speech. Distinguish a genuinely silent take from a flaky AI response by
+    # looking at the AUDIO, not the transcript — the two are indistinguishable otherwise.
     if not _has_text(transcript):
+        rms = _audio_rms(wav)
+        attempt = int(s.get("attempts") or 1)
+        if rms is not None and rms >= SILENT_RMS_MAX and attempt < MAX_ATTEMPTS:
+            raise Transient(
+                f"AI returned no words for {dur:.1f}s of audible audio "
+                f"(rms {rms:.0f} >= {SILENT_RMS_MAX}) — retrying rather than storing an "
+                f"empty transcript")
         finalize({"session_id": sid, "no_text": True})
-        _log(f"{sid}: no_text")
+        _log(f"{sid}: no_text (rms={rms}, attempt {attempt}/{MAX_ATTEMPTS})")
         return
 
-    rec_path = f"{s['user_id']}/{int(time.time() * 1000)}_{file_name}"
+    # Keyed by SESSION, not by wall-clock. With a timestamp in the key every retry wrote a
+    # NEW object, so a job that kept failing the finalize step left one orphaned copy of the
+    # clinical audio per attempt and nothing ever collected them. The upload is upsert, so a
+    # stable key means a retry overwrites its own previous copy.
+    rec_path = f"{s['user_id']}/{sid}_{file_name}"
     upload_recording(rec_path, wav)
     res = finalize({
         "session_id": sid,
