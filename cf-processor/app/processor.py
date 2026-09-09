@@ -18,6 +18,7 @@ minutes and that is fine here.
 
 import io
 import os
+import re
 import time
 import traceback
 import wave
@@ -261,7 +262,12 @@ def process(s):
     # NEW object, so a job that kept failing the finalize step left one orphaned copy of the
     # clinical audio per attempt and nothing ever collected them. The upload is upsert, so a
     # stable key means a retry overwrites its own previous copy.
-    rec_path = f"{s['user_id']}/{sid}_{file_name}"
+    # The serial reaches us from the session row and, on the phone-app upload path, originally
+    # from a request body — so it must never be pasted into a storage key unchecked. This write
+    # uses the SERVICE key with x-upsert, so a serial containing path characters would aim it at
+    # someone else's prefix. Sanitise the KEY only; file_name stays intact for display.
+    safe_name = re.sub(r'[^A-Za-z0-9_.-]', '', file_name) or 'audio.wav'
+    rec_path = f"{s['user_id']}/{sid}_{safe_name}"
     upload_recording(rec_path, wav)
     res = finalize({
         "session_id": sid,
