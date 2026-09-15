@@ -1950,12 +1950,36 @@ static void enterWifiTrying()
   setStatus("Connecting to Wi-Fi \"%s\"...", cfgSsid);
 }
 
+// Modem sleep parks the radio between beacons, which is right for the idle 12/15 s
+// polls but costs throughput on a multi-megabyte chunked upload. Follow upActive:
+// full rate while a session is going up, back to sleep the moment it is not.
+// Edge-triggered - setSleep() on every tick would re-enter the driver constantly.
+static void wifiUploadBoost(bool uploading)
+{
+  static int8_t applied = -1;                // -1 = nothing applied yet
+  if (applied == (int8_t)uploading) return;
+  applied = (int8_t)uploading;
+  WiFi.setSleep(!uploading);
+}
+
 static void enterWifiOnline()
 {
   mode = CONN_WIFI_ONLINE;
   wifiChangeMode = false;  // back online: any pending Change-Wi-Fi window is over
-  WiFi.setSleep(false);    // keep the radio fully awake online too - steadier polls
-                           // + uploads (USB-powered, so power cost is irrelevant)
+  // Modem sleep ON while online and idle. This used to be forced OFF with the
+  // note "USB-powered, so power cost is irrelevant" - which is wrong twice over:
+  // the unit runs on the pack in the field (that is what the battery guard, the
+  // deep-sleep floor and the whole battery-switch feature exist for), and the
+  // cost is not only charge, it is HEAT. With sleep off the Wi-Fi RX chain is
+  // powered 100% of the time instead of waking for its DTIM beacon, which on an
+  // ESP32 is roughly 100 mA versus 20-30 mA at idle - burnt continuously, on a
+  // sealed board with no airflow, next to a LiPo.
+  //
+  // Nothing is lost: every server exchange here is OUTBOUND (a 12 s command poll,
+  // a 15 s heartbeat, chunked uploads) and traffic the STATION initiates wakes the
+  // radio itself. There is no inbound push to miss. Throughput for uploads is
+  // restored explicitly below (wifiUploadBoost).
+  WiFi.setSleep(true);
   bleStop(); // Wi-Fi mode does not advertise; frees NimBLE RAM
   g_wantNetTask = true;    // online now -> loop() will spin up the core-0 net task
   nextHeartbeat = 0;       // scan pending immediately
@@ -2932,6 +2956,11 @@ void connLoop()
         pollCommands();          // picks up app commands within ~12 s (runs on the
                                  // net task now, so it no longer freezes the GUI)
       }
+      // Radio at full rate only while a session is actually going up; idle in
+      // between. Evaluated every pass so the boost ends with the upload, not on
+      // some later tick - a sweep that finishes between polls must not leave the
+      // RX chain powered for the next 12 s.
+      wifiUploadBoost(upActive);
       // While the UI core is doing its own SD work (recording, saving, playback),
       // hold off ALL SD access here. The SD bus + FATFS volume lock are shared, so
       // overlapping the net task's walks/uploads with a take made begin/stop/record

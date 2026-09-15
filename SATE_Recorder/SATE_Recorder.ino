@@ -142,7 +142,7 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.39";   // battery-in-circuit from the switch; switch state seeded from the pin at boot, not assumed
+static const char    *FIRMWARE_VERSION  = "1.5.40";   // thermal: modem sleep while online+idle (was forced off), full rate only during uploads
 
 // RECORD button gestures (fw 1.5.35). A single tap no longer starts or stops a take.
 //
