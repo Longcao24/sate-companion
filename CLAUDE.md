@@ -363,6 +363,18 @@ setup + prebuilt flash assets: `SETUP.md` + the **GitHub Release** (`gh release 
 - **OTA**: firmware pulls a `.bin` from Supabase Storage via the command channel; the web
   "Publish firmware" card uploads a release. Bump `FIRMWARE_VERSION` per release so the
   device reports it and the update banner works.
+- 🛑 **EVERY firmware version is COMMITTED AND TAGGED BEFORE the next one is started. Mandatory,
+  no exceptions.** Bump `FIRMWARE_VERSION`, get it building, then `git commit` + `git tag fw-<version>`
+  — *then* start the next change. A version that only exists in the working tree is gone the moment
+  the next edit lands.
+  This is not hypothetical: on 2026-09-15 a bench unit was running **1.5.36** and that firmware could
+  not be produced from anywhere — HEAD was 1.5.32, the published bucket topped out at 1.5.10, the
+  newest GitHub release was 1.5.12, and 1.5.33→1.5.39 were one uncommitted 633-line blob. The request
+  "flash 1.5.36 back so I can compare" was impossible to satisfy, and the only way to compare against
+  an older build was to jump all the way back to 1.5.12.
+  A tag is what makes a revert one command (`git checkout fw-1.5.39 -- SATE_Recorder/`), and what lets
+  a unit reporting version X be matched to the source that produced it. Flashing a bench board with an
+  uncommitted build is fine; *moving on to the next version* without committing the last one is not.
 - **Building + publishing a firmware release (the exact recipe):**
   1. Bump `FIRMWARE_VERSION` in `SATE_Recorder/SATE_Recorder.ino`, then compile
      (`arduino-cli compile --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi" SATE_Recorder`).
