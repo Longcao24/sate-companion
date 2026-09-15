@@ -2,7 +2,7 @@
 
 **Current firmware: fw 1.5.12.** Sketch: `SATE_Recorder.ino` (folder name matches the `.ino`, so
 `arduino-cli` builds it in place). Build/flash from scratch: [`../SETUP.md`](../SETUP.md). Deep
-reference (pin map, build/flash, LVGL/PSRAM budget, optimization playbook): [`../hardware.md`](../hardware.md).
+reference (pin map, build/flash, LVGL/PSRAM budget, optimization playbook): [`../doc/12-hardware.md`](../doc/12-hardware.md).
 Flash FQBN: `esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=default_8MB,PSRAM=opi` (⚠️ `default_8MB`
 = dual OTA, never `huge_app`). The note below is the original v0.5 connectivity write-up (still
 broadly accurate for the Wi-Fi/BLE model):

@@ -100,6 +100,32 @@
 #define REC_BTN_PIN  2          // external RECORD button (GPIO2: free, not a strap pin)
 #define FLAG_BTN_PIN 14         // external FLAG button
 
+// GPIO3 is wired as a GROUND RAIL, not a signal: driven a hard LOW for the whole
+// life of the firmware (boot -> run -> deep sleep) so a button/LED common sitting
+// on IO3 always has a return path. IO3 is the old RECORD pin (freed in fw 1.2.14),
+// sits right next to IO2 on the header, and is otherwise unused.
+//   * Current limit: this is a GPIO, not the real GND plane - keep the sink under
+//     ~20 mA (a pull-up button is ~100 uA, an LED needs its own resistor). Never
+//     hang the speaker/backlight return on it.
+//   * IO3 IS an S3 strapping pin (JTAG_SEL) but it is only sampled at reset, and
+//     nothing external drives it high, so driving it low afterwards is safe.
+//   * It is held LOW through deep sleep too (see enterBatterySleep) - otherwise
+//     the pin would float while asleep and the RECORD wake button would be dead.
+#define GND_OUT_PIN  3          // IO3 = firmware-driven ground rail (always LOW)
+// Battery switch sense (fw 1.5.37). The switch CUTS the battery line, and this wire only
+// reports which way it is thrown: HIGH (internal pull-up) = battery connected, LOW = cut.
+// GPIO21 is free (buttons 0/2/14, rail 3, codec 4-8, bat sense 9, LCD 10-13+46, I2C 15/16,
+// touch 17/18, SD 38-40, backlight 45), is an RTC GPIO, and is NOT a strapping pin.
+//
+// It exists for ONE reason: the switch sits on the battery line, so with it OFF a plugged-in
+// USB cable charges NOTHING. Users plug in only to charge, so that is a silent failure — the
+// screen looks normal, the cable is in, and hours later the pack is just as flat. This pin is
+// what lets the firmware say so.
+//
+// It deliberately changes NO existing behaviour: it never blocks a recording, never alters the
+// battery guard, never gates anything. It reads a pin and warns.
+#define BAT_SWITCH_PIN 21
+
 // Debounced edge-detector state for an external button. Declared up here (above
 // the first function) so the Arduino auto-generated prototype for btnPressed()
 // can see the type.
@@ -116,7 +142,24 @@ static const int      RECORD_MAX_SECONDS = 3700; // ~62 min safety ceiling
 static const uint32_t AUDIO_SAMPLE_RATE = 16000;
 static const int      AUDIO_BIT_DEPTH   = 16;
 static const int      AUDIO_CHANNELS    = 1;
-static const char    *FIRMWARE_VERSION  = "1.5.32";   // reclaim no longer starved by unverifiable takes (strike/park); crash-give-up stamps owner_dev so segments still upload
+static const char    *FIRMWARE_VERSION  = "1.5.39";   // battery-in-circuit from the switch; switch state seeded from the pin at boot, not assumed
+
+// RECORD button gestures (fw 1.5.35). A single tap no longer starts or stops a take.
+//
+// One tap is far too easy to do by accident on a device that lives in a bag or a pocket, and
+// either accident is expensive: a stray tap during a take ENDS a recording nobody meant to
+// end, and a stray tap at Home starts one nobody wanted (which then uploads, and is processed).
+// A deliberate gesture on each side costs a moment and removes both.
+//
+// The two gestures are deliberately different SHAPES, not two different counts: a double-tap
+// and a long hold cannot be confused for one another, whereas "two taps to start, three to
+// stop" would be. The on-screen Stop button and the remote `stop` command are unchanged —
+// they are already deliberate.
+// 700 ms, not 500: the first tap now puts "Double-click to start recording" on screen, and the
+// window has to outlast reading it. A late second tap is not lost either — it simply becomes
+// the first tap of a fresh window, and the hint reappears.
+static const uint32_t REC_DOUBLE_CLICK_MS = 700;    // second tap must land within this
+static const uint32_t REC_HOLD_STOP_MS    = 3000;   // hold this long during a take to stop
 
 // The loop task runs LVGL + connectivity (NimBLE deinit, HTTPClient, JSON) in
 // one stack. The default 8 KB overflows on the Wi-Fi-online path (HTTP fetch of
@@ -278,6 +321,8 @@ static void wakeScreen();
 static void serviceScreenDim();
 static void setScreenWhite();
 static void setStatePill(const char *text, uint32_t bg, uint32_t fg);
+static void showToast(const char *msg, uint32_t ms);
+static void serviceToast();
 static inline void setFont(lv_obj_t *o, const lv_font_t *f);
 static void styleButton(lv_obj_t *btn, uint32_t bgColor, uint32_t textColor);
 static void stylePanel(lv_obj_t *panel);
@@ -328,11 +373,17 @@ static uint64_t sdFreeBytes();
 static bool sdProbe();
 static bool sdRemount();
 static int readBatteryMv();
+static uint8_t batteryPercentFromMv(int mv);
 static uint8_t batteryPercent();
 static const char *batterySymbol(uint8_t pct);
+static void batteryService(bool force);
+static bool usbHostAttached();
 static bool isUsbCharging();
+static bool isBatteryFull();
 static void enterBatterySleep(bool quiet = false);
 static void serviceBatteryGuard();
+static bool batterySwitchOn();
+static void serviceBatterySwitchWarning();
 static void batteryBootGuard();
 static bool isSessionSynced(const char *dir, uint32_t n);
 static uint32_t countUnsynced(const char *dir);
@@ -551,8 +602,48 @@ static uint32_t   sessRowNum[SESS_ROW_MAX]   = {0};
 static int        sessRowCount   = 0;
 static char       sessRowPid[24] = "";
 
+// A transient one-line message drawn over whatever is on screen.
+//
+// It gets its own object rather than borrowing an existing label, because every label that
+// looked reusable is already spoken for: the record overlay's big label is rewritten with the
+// elapsed time every frame, and its caption carries the low-battery and dead-mic warnings —
+// warnings that matter more than a hint and must not be stomped on. Created on demand and
+// deleted on expiry, so it costs nothing when idle.
+static lv_obj_t *toastLabel = nullptr;
+static uint32_t  toastUntil = 0;
+
+static void showToast(const char *msg, uint32_t ms)
+{
+  lv_obj_t *scr = lv_scr_act();
+  if (!scr) return;
+  if (toastLabel) { lv_obj_del(toastLabel); toastLabel = nullptr; }
+  // Created last, so it sits above the record overlay (LVGL draws children in order).
+  toastLabel = lv_label_create(scr);
+  lv_label_set_text(toastLabel, msg);
+  setFont(toastLabel, &lv_font_montserrat_14);
+  lv_obj_set_style_text_color(toastLabel, lv_color_hex(0xFFFFFF), 0);
+  lv_obj_set_style_bg_color(toastLabel, lv_color_hex(COL_TEXT_DARK), 0);
+  lv_obj_set_style_bg_opa(toastLabel, LV_OPA_90, 0);
+  lv_obj_set_style_pad_all(toastLabel, 8, 0);
+  lv_obj_set_style_radius(toastLabel, 8, 0);
+  lv_obj_align(toastLabel, LV_ALIGN_BOTTOM_MID, 0, -14);
+  toastUntil = millis() + ms;
+}
+
+// Called from loop() AND from inside the blocking capture loop — loop() does not run during a
+// take, and a hint that never disappears is worse than no hint.
+static void serviceToast()
+{
+  if (!toastLabel) return;
+  if ((int32_t)(millis() - toastUntil) >= 0) {   // wrap-safe
+    lv_obj_del(toastLabel);
+    toastLabel = nullptr;
+  }
+}
+
 static void uiResetPointers()
 {
+  toastLabel = nullptr;   // a screen rebuild deletes it with the rest of the children
   statePill = statePillText = nullptr;
   patientCard = patientName = patientIdChip = patientRows = nullptr;
   statusLabel = hintLabel = nullptr;
@@ -828,6 +919,9 @@ static bool     g_recArmed   = true, g_flagArmed  = true;
 // users often tap again - without this guard that 2nd tap starts an unwanted new
 // recording. We also drain the latch at end-of-take so a queued press is dropped.
 static uint32_t      g_recSettleUntil = 0;
+// First tap of a possible double-click, or 0 when none is pending. Only meaningful on Home:
+// on a sub-screen a single tap still just navigates back, which is not a recording action.
+static uint32_t      g_recClickAt = 0;
 
 // ISRs do the bare minimum: set the latch. No millis() (its 64-bit divide can
 // live in flash, which is unsafe from an IRAM ISR if the cache is ever disabled).
@@ -1752,7 +1846,7 @@ static uint64_t sdFreeBytes()
 // The SLP frees space by deleting sessions from the Sessions screen.
 static const uint64_t SD_MIN_FREE_BYTES = (uint64_t)PCM_SEGMENT_BYTES + 256 * 1024;
 
-// --- Battery (1S LiPo on GPIO34 behind the board's 0.5 divider) ------------
+// --- Battery (1S LiPo on GPIO9 behind the board's 0.5 divider) --------------
 
 // Cell voltage in mV, or -1 when battery sensing is unavailable.
 // Battery sense on GPIO9 (ADC1) via the board's 0.5 divider, per the Freenove
@@ -1766,27 +1860,46 @@ static const uint64_t SD_MIN_FREE_BYTES = (uint64_t)PCM_SEGMENT_BYTES + 256 * 10
 // low-end point (multimeter vs the /admin Cell mV column) if the low range drifts.
 static const float BAT_CAL_GAIN = 4200.0f / 4142.0f;   // ~1.014
 
+// 32 reads per call (was 8). The charge detector below decides on single-digit
+// mV differences, so its whole error budget is ADC noise; averaging 4x as many
+// reads halves that for ~3 ms of extra work, and the battery is only sampled
+// every 3 s, so it costs nothing that matters.
+static const int BAT_ADC_SAMPLES = 32;
+
 static int readBatteryMv()
 {
 #if BAT_SENSE_ENABLED
   uint32_t acc = 0;
-  for (int i = 0; i < 8; i++) acc += analogReadMilliVolts(BAT_ADC_PIN);
-  int cellMv = (int)((acc / 8) * 2);          // *2 undoes the hardware divider
-  return (int)(cellMv * BAT_CAL_GAIN + 0.5f); // apply the 1-point calibration
+  for (int i = 0; i < BAT_ADC_SAMPLES; i++) acc += analogReadMilliVolts(BAT_ADC_PIN);
+  int cellMv = (int)((acc / BAT_ADC_SAMPLES) * 2);  // *2 undoes the hardware divider
+  return (int)(cellMv * BAT_CAL_GAIN + 0.5f);       // apply the 1-point calibration
 #else
   return -1;
 #endif
 }
 
-// Map a resting 1S LiPo cell voltage (mV) to a rough state-of-charge %.
-// Returns 255 when the reading is unavailable (sensing disabled).
-static uint8_t batteryPercent()
+// Map a cell voltage (mV) to a rough state-of-charge %.
+//
+// ⚠️ WHY 100% USED TO BE UNREACHABLE (fixed fw 1.5.33). The old curve put 100% at
+// 4200 mV — the charger's CV setpoint — which the SENSED node never actually
+// shows in service, for three stacked reasons:
+//   1. the TP4056-class charger terminates when the taper current falls to ~1/10
+//      of Iset; the cell then RELAXES to ~4.15-4.18 V while still plugged in,
+//   2. the device's own ~120 mA draw sags the node another ~10 mV under the
+//      resting value the LUT was written against,
+//   3. the divider + S3 ADC under-read is only corrected by a 1-point gain tuned
+//      on ONE unit (BAT_CAL_GAIN), so any other board lands a few mV low.
+// So a genuinely, completely full pack read ~4150 mV and displayed 95% forever.
+// The curve now tops out at BAT_FULL_LUT_MV (4150) and the charge-termination
+// latch in batteryService() reports a real 100% once the charger has finished.
+static const int BAT_FULL_LUT_MV = 4150;   // sensed mV that means "full" = 100%
+
+static uint8_t batteryPercentFromMv(int mv)
 {
-  int mv = readBatteryMv();
   if (mv < 0) return 255;
   static const int lut[][2] = {
-    {4200,100},{4150,95},{4110,90},{4080,85},{4020,80},{3980,75},
-    {3950,70},{3910,65},{3870,60},{3850,55},{3840,50},{3820,45},
+    {BAT_FULL_LUT_MV,100},{4120,95},{4090,90},{4050,85},{4000,80},{3970,75},
+    {3940,70},{3900,65},{3870,60},{3850,55},{3840,50},{3820,45},
     {3800,40},{3790,35},{3770,30},{3750,25},{3730,20},{3710,15},
     {3690,10},{3610,5},{3270,0},
   };
@@ -1812,39 +1925,273 @@ static const char *batterySymbol(uint8_t pct)
   return LV_SYMBOL_BATTERY_EMPTY;
 }
 
-// Charging detection WITHOUT a dedicated charge-status GPIO (fw 1.5.2).
-// The board / charge module exposes no CHRG line to the ESP, so we can't read the
-// charger directly. The old code used `if (Serial)` (any USB *power* enumerated ->
-// "charging", a false positive whenever the unit was merely plugged for power) and
-// a fixed >= 4250 mV guess. Instead, watch the cell-voltage TREND: an external
-// charger pushes the voltage UP; the device's own load pulls an unplugged cell
-// DOWN. So a sustained RISE = on charge, a drop = unplugged. A level a resting 1S
-// LiPo can never reach (>= 4300 mV) also means external power. Sampled every ~5 s
-// with hysteresis so ADC noise doesn't flicker the icon.
-// (For rock-solid detection, wire the charge board's CHRG pad to a spare GPIO and
-//  read it LOW = charging — see Hardware.md §8.30.)
-static bool isUsbCharging()
+// --- USB-C plugged / charging detection (rewritten fw 1.5.33) ----------------
+//
+// Requirement: "USB-C connected == charging == show the animation". The board's
+// USB-C feeds BOTH the S3's native USB and the on-board charge circuit, and that
+// circuit exposes NO CHRG/STAT line to a GPIO — so the firmware has to infer it.
+// Two hardware facts bound what is possible:
+//   * `usb_serial_jtag_is_connected()` (HWCDC::isPlugged) only sees a real USB
+//     HOST — it counts SOF packets, and a wall charger / power bank sends none.
+//     True is trustworthy; false is not.
+//   * the ESP32-S3 has no VBUS-sense register: the OTG PHY's vbus_valid is tied
+//     high internally when the internal PHY is used, so it can't be read either.
+// So the decision is layered, and anything none of the layers can see keeps the
+// previous state - the chip must never flicker:
+//   (a) native USB host attached (or lost) -> plugged / unplugged, certain. The
+//       only signal here that works in BOTH directions.
+//   (b) sensed node >= 4250 mV             -> plugged (no 1S cell rests there).
+//   (c) STEP between consecutive raw samples, >= 25 mV -> the fast path. Plugging
+//       in moves the device's ~120 mA load off the cell AND pushes ~1 A of charge
+//       current through its internal resistance, so the node jumps 60-90 mV
+//       inside one 3 s sample; unplugging mid-charge drops it the same way.
+//   (d) 4-minute TREND, +/-8 mV on the smoothed value -> catches a boot/OTA
+//       reboot that happened while ALREADY on the charger, where there is no step
+//       to see: constant-current charge climbs ~3 mV/min (~12 mV per window)
+//       while an idle pack drains ~0.5 mV/min, so the two never overlap.
+// Known limit (accepted, and the reason a CHRG wire would still be better):
+// unplugging a FULL pack from a dumb charger is nearly invisible - the charger
+// already stopped pushing current, so there is no step - and it takes a trend
+// window or two (~4-8 min) to notice. Off a USB host, (a) catches it at once.
+// Verified against a simulation of all of these (plug, unplug at full, unplug
+// mid-charge, reboot-on-charger, reboot-on-battery) at up to +/-6 mV of ADC noise.
+#include "soc/usb_serial_jtag_struct.h"  // SOF frame counter = "a USB host is talking to us"
+
+static const uint32_t BAT_SAMPLE_MS     = 3000;  // one ADC sample every 3 s
+static const int      BAT_USB_LEVEL_MV  = 4250;  // above any resting 1S cell
+static const int      BAT_STEP_MV       = 25;    // plug/unplug step, one sample
+static const uint32_t BAT_TREND_MS      = 240000;// slow-trend window
+static const int      BAT_TREND_MV      = 8;     // slow-trend threshold
+static const int      BAT_FULL_MV       = 4120;  // "charger has terminated" floor
+static const int      BAT_FULL_CLEAR_MV = 4050;  // pack really started draining
+static const int      BAT_FULL_RISE_MV  = 6;     // climb per window = still charging
+static const uint32_t BAT_FULL_HOLD_MS  = 240000;// slope window for the full test
+
+// Shared state, refreshed by batteryService(). Everything on-screen and in the
+// telemetry reads THESE, so the ADC is sampled once per cadence, not per caller.
+static int     g_batMv      = -1;     // smoothed cell mV (-1 = sensing unavailable)
+static uint8_t g_batPct     = 255;    // displayed %, de-jittered (255 = unknown)
+static bool    g_usbPower   = false;  // USB-C plugged in -> charging
+static bool    g_batFull    = false;  // charger terminated -> report a real 100%
+
+// True only when a real USB host is talking to us (PC/laptop). A dumb charger
+// never is - it sends no SOF packets - so false does NOT mean "unplugged".
+//
+// ⚠️ Do NOT use HWCDC::isPlugged() / usb_serial_jtag_is_connected() here. Those
+// need IDF's USJ connection monitor, which is only started when the USB-CDC
+// driver is initialised - and the SHIPPING build is compiled with the board
+// defaults (CDCOnBoot=Disabled, USBMode=USB-OTG), so HWCDCSerial is never even
+// instantiated and the helper returns false forever. Only the debug build
+// (CDCOnBoot=cdc,USBMode=hwcdc) would have worked, which is exactly the trap:
+// it tests fine on the bench build and is dead in the field build.
+//
+// The hardware underneath needs neither: FRAM_NUM.sof_frame_index is a free-
+// running counter the USJ bumps on every USB frame (1 ms) whenever a host is
+// attached, with no driver installed. Sample it twice ~2.5 ms apart; if it moved,
+// a host is talking to us.
+//
+// ⚠️ Do NOT go back to the raw SOF *interrupt* bit (clear it, wait, re-read).
+// That was tried and measured `host=0` on a board actively enumerated over
+// USB-CDC: the SOF interrupt is also consumed by IDF's connection monitor, whose
+// ISR clears the flag every frame, so the re-read races it. The frame counter is
+// read-only and nothing can clear it out from under us. It also can't alias -
+// the 11-bit counter wraps every 2048 ms, far longer than the 2.5 ms window.
+static bool usbHostAttached()
+{
+  uint32_t f0 = USB_SERIAL_JTAG.fram_num.sof_frame_index;
+  delayMicroseconds(2500);                       // > 2 USB frames
+  return USB_SERIAL_JTAG.fram_num.sof_frame_index != f0;
+}
+
+static void batteryService(bool force)
 {
   static uint32_t lastMs = 0;
-  static int      lastMv = -1;
-  static bool     state  = false;
+  static int      prevMv = -1;      // previous sample, for the step test
+  static int      baseMv = -1;      // window start for the slow-trend test
+  static uint32_t baseMs = 0;
+  static int      fullMv = -1;      // window start for the charge-terminated test
+  static uint32_t fullMs = 0;
+  static bool     hostSeen = false; // a USB host was enumerated at some point
+  static uint8_t  hostGone = 0;     // consecutive samples without it
+  static int8_t   wasIn    = -1;    // previous battery-in-circuit state (-1 = first pass)
+
   uint32_t now = millis();
-  if (lastMs != 0 && now - lastMs < 5000) return state;  // decision cached ~5 s
+  if (!force && lastMs != 0 && (uint32_t)(now - lastMs) < BAT_SAMPLE_MS) return;
   lastMs = now;
 
   int mv = readBatteryMv();
-  if (mv < 0) { state = false; lastMv = -1; return false; }  // no sensing -> unknown
-
-  if (mv >= 4300) {                       // above any resting level -> external power
-    state = true;
-  } else if (lastMv >= 0) {
-    int delta = mv - lastMv;
-    if (delta >= 15)       state = true;  // voltage climbing -> charging
-    else if (delta <= -15) state = false; // voltage sagging  -> unplugged
-    // |delta| < 15: flat -> keep previous state (hysteresis, avoids noise flicker)
+  if (mv < 0) {                                   // sensing off -> everything unknown
+    g_batMv = -1; g_batPct = 255; g_usbPower = false; g_batFull = false;
+    return;
   }
-  lastMv = mv;
-  return state;
+
+  // Is the cell wired into the board at all? The switch routes ONE ground: to the
+  // pack (IO21 left floating -> HIGH) or into IO21 (pulled LOW). HIGH therefore
+  // means "the pack is in the circuit", and that is the only thing that makes the
+  // GPIO9 node a cell voltage. With it LOW the node is the charger's own rail -
+  // measured 5.35 V on the bench, which is ABOVE the top of the LUT, so every
+  // number derived from it is not just wrong but confidently wrong: the bench log
+  // shows pct=100 full=1 with no battery anywhere near the board.
+  const bool inCircuit = batterySwitchOn();
+  if (wasIn != (int8_t)inCircuit) {
+    // Switching a pack in or out invalidates every running average. Measured: the
+    // EMA drags the 5.35 V rail down onto a freshly connected 3.89 V cell over ~27 s,
+    // and the one-way percent ratchet holds the rail's 100% over that cell for as
+    // long as USB stays plugged in. Start clean instead.
+    wasIn   = (int8_t)inCircuit;
+    g_batMv = -1; g_batPct = 255; g_batFull = false;
+    prevMv  = -1; baseMv  = -1;   fullMv   = -1;
+  }
+  if (!inCircuit) {
+    static uint32_t offLogMs = 0;
+    // No cell to measure. Say "unknown" (255 / -1) rather than publish the rail:
+    // telemetry, the Home chip and the admin calibration column all read these.
+    g_batMv = -1; g_batPct = 255; g_batFull = false;
+    // USB presence is still answerable, and the switch warning needs it - but only
+    // from the two tests that do not assume the node is a cell.
+    g_usbPower = usbHostAttached() || mv >= BAT_USB_LEVEL_MV;
+    if (offLogMs == 0 || (uint32_t)(now - offLogMs) >= 30000) {
+      offLogMs = now;
+      Serial.printf("[BAT] switch off - no cell in circuit (node=%d mV, usb=%d)\n",
+                    mv, (int)g_usbPower);
+    }
+    return;
+  }
+
+  // Smooth first (EMA, ~12 s). Everything slow below - the trend test, the
+  // charge-terminated test, the displayed % - runs on THIS, not on the raw
+  // sample: they compare against thresholds of a few mV, which is the same size
+  // as the ADC's own noise, and running them raw made both of them misfire in
+  // simulation. Only the fast step test below stays on the raw read, because it
+  // must react to a plug-in inside one sample and the EMA would blunt it.
+  g_batMv = (g_batMv < 0) ? mv : (g_batMv * 3 + mv) / 4;
+
+  // --- is USB-C plugged in? (see the layering note above) --------------------
+  bool usb  = g_usbPower;
+  bool step = false;
+
+  if (prevMv >= 0) {                              // (c) fast path, raw
+    int d = mv - prevMv;
+    if (d >= BAT_STEP_MV)       { usb = true;  step = true; }
+    else if (d <= -BAT_STEP_MV) { usb = false; step = true; }
+  }
+  if (mv >= BAT_USB_LEVEL_MV) usb = true;         // (b)
+
+  // (a) strongest signal, so it is applied last and overrides the rest. It also
+  // works in REVERSE, which nothing else here can: unplugging a FULL pack barely
+  // moves the voltage (the charger has already stopped pushing current, so there
+  // is no step to see) and the trend needs minutes to notice. If the host we
+  // were enumerated on disappears, the cable is out - say so immediately.
+  // Debounced by one sample: usb_serial_jtag_is_connected() infers the link from
+  // SOF traffic, and a single dropped window shouldn't yank the chip.
+  // Probed ONCE per service call: the value is both an input to the decision and
+  // what the diagnostic below reports. (It used to be re-probed inside the log
+  // line, so the log could disagree with the decision it was supposed to explain
+  // - and it doubled the 2.5 ms USB probe for nothing.)
+  const bool host = usbHostAttached();
+  if (host) {
+    usb = true; hostGone = 0; hostSeen = true;
+  } else if (hostSeen && ++hostGone >= 2) {
+    usb = false; hostSeen = false; hostGone = 0;
+  }
+
+  if (step || baseMv < 0) {                       // a step invalidates the window
+    baseMv = g_batMv; baseMs = now;
+  } else if ((uint32_t)(now - baseMs) >= BAT_TREND_MS) {   // (d) slow trend
+    // Compare the two ENDS of a full 4-minute window, then always open a new
+    // one - exactly one decision per window. Testing every sample against a
+    // baseline that is kept until something crosses looks more responsive, but
+    // it is a repeated test at a fixed threshold: given enough samples, noise
+    // alone crosses it, and the sign of that crossing is a coin flip. Over a
+    // window this wide the two samples' noise is uncorrelated (~1 mV after 32x
+    // averaging + the EMA) while constant-current charge moves ~12 mV, so the
+    // real signal clears the 8 mV bar and noise never does.
+    int d = g_batMv - baseMv;
+    if (d >= BAT_TREND_MV)       usb = true;
+    else if (d <= -BAT_TREND_MV) usb = false;
+    baseMv = g_batMv; baseMs = now;
+  }
+  prevMv    = mv;
+  g_usbPower = usb;
+
+  // --- has the charger FINISHED? (this is what makes 100% reachable) ---------
+  // A terminated charge is the one state the voltage curve can't express: the
+  // pack sits high and stops climbing. Latch 100% after BAT_FULL_HOLD_MS of
+  // that, and hold it until the pack has really started draining (below
+  // BAT_FULL_CLEAR_MV), so the chip doesn't drop back to 96% the moment the cell
+  // relaxes off the charger's 4.20 V setpoint.
+
+  if (g_batMv < BAT_FULL_CLEAR_MV) {
+    g_batFull = false;
+  }
+  // This is a SLOPE over a fixed window, not a "has it moved" test. The obvious
+  // version - restart the window whenever the reading moves - never fires: any
+  // sample that wanders BAT_FULL_RISE_MV above the reference resets the clock, so
+  // at realistic ADC noise the window never runs to completion and 100% stays
+  // unreachable (simulation, +/-4 mV and up). Comparing the two ENDS of a whole
+  // 4-minute window instead is immune to that: noise between two samples that far
+  // apart is uncorrelated and averages out, while a real constant-current charge
+  // climbs ~3 mV/min = ~12 mV per window, far above the 6 mV bar.
+  if (!usb || g_batMv < BAT_FULL_MV) {
+    fullMv = -1;                                   // not a candidate for "full"
+  } else if (fullMv < 0) {
+    fullMv = g_batMv; fullMs = now;                // open the first window
+  } else if ((uint32_t)(now - fullMs) >= BAT_FULL_HOLD_MS) {
+    if (g_batMv - fullMv < BAT_FULL_RISE_MV) g_batFull = true;  // stopped climbing
+    fullMv = g_batMv; fullMs = now;                // and open the next window
+  }
+
+  // --- de-jittered % --------------------------------------------------------
+  // A one-way ratchet on top of the smoothing: charging can only count up,
+  // discharging can only count down. That is what every phone does, and it
+  // removes the last source of flicker.
+  // 100% is RESERVED for "the charger actually terminated" (g_batFull). While a
+  // charger is still pushing, the sensed node reads ~15-20 mV above the cell's
+  // true resting voltage - it supplies the device's ~120 mA and drives charge
+  // current through the cell's internal resistance - so the top of the curve is
+  // reachable while the cell is really at ~98%. Showing 100% there is a lie the
+  // unplug then exposes as a "drop" from 100 to 98. Cap at 99 until the charge
+  // is genuinely done; after that g_batFull pins 100% until the pack really
+  // drains (< BAT_FULL_CLEAR_MV), so unplugging a full unit does NOT dip.
+  uint8_t pct = batteryPercentFromMv(g_batMv);
+  if (g_batFull)                     pct = 100;
+  else if (g_usbPower && pct >= 100) pct = 99;
+
+  if (g_batPct == 255)     g_batPct = pct;
+  else if (g_usbPower)   { if (pct > g_batPct) g_batPct = pct; }
+  else                   { if (pct < g_batPct) g_batPct = pct; }
+
+  // One line per ~30 s naming every input to the decision. Charge state is
+  // inferred from analog trends, so "the icon is wrong" is otherwise impossible
+  // to debug in the field - this says which layer decided and on what numbers.
+  static uint32_t logMs = 0;
+  if (logMs == 0 || (uint32_t)(now - logMs) >= 30000) {
+    logMs = now;
+    Serial.printf("[BAT] raw=%d ema=%d pct=%u usb=%d full=%d host=%d step=%d sw=in\n",
+                  mv, g_batMv, g_batPct, (int)g_usbPower, (int)g_batFull,
+                  (int)host, (int)step);
+  }
+}
+
+// Cell state-of-charge for the UI + telemetry. 255 = sensing unavailable.
+static uint8_t batteryPercent()
+{
+  batteryService(false);
+  return g_batPct;
+}
+
+// True while the unit is on USB-C power (which, on this board, means charging).
+static bool isUsbCharging()
+{
+  batteryService(false);
+  return g_usbPower;
+}
+
+// True once the charger has terminated - the UI shows "Full" instead of a %.
+static bool isBatteryFull()
+{
+  batteryService(false);
+  return g_batFull;
 }
 
 // --- Low-battery protection (fw 1.5.3) --------------------------------------
@@ -1870,13 +2217,23 @@ static const int BAT_CRIT_MV = 3350;   // ~3-5% under load -> sleep to protect c
 static void enterBatterySleep(bool quiet)
 {
   recordStopReq = true;                        // abort any capture path cleanly
+  rtc_gpio_hold_dis((gpio_num_t)GND_OUT_PIN);  // re-arm below (this may be the
+                                               // timer-wake re-sleep, still held)
   if (!quiet) {
     wakeScreen();
     backlightSet(BL_FULL);
-    showStatus("Pin yeu - hay sac", "Thiet bi tam tat de bao ve pin");
+    showStatus("Battery low - charge now", "Sleeping to protect the battery");
     pumpGuiMs(2600);
   }
   backlightSet(0);                             // screen fully off for the sleep
+  // IO3 must KEEP sinking through deep sleep: a normal GPIO output is released
+  // when the digital core powers down, so a RECORD button whose common sits on
+  // IO3 would have no return path and the ext0 wake below could never fire.
+  // IO3 is RTC-capable, so latch it low in the RTC domain and hold it.
+  rtc_gpio_init((gpio_num_t)GND_OUT_PIN);
+  rtc_gpio_set_direction((gpio_num_t)GND_OUT_PIN, RTC_GPIO_MODE_OUTPUT_ONLY);
+  rtc_gpio_set_level((gpio_num_t)GND_OUT_PIN, 0);
+  rtc_gpio_hold_en((gpio_num_t)GND_OUT_PIN);
   rtc_gpio_pullup_en((gpio_num_t)REC_BTN_PIN); // hold the button HIGH while asleep
   rtc_gpio_pulldown_dis((gpio_num_t)REC_BTN_PIN);
   esp_sleep_enable_ext0_wakeup((gpio_num_t)REC_BTN_PIN, 0); // wake on press (LOW)
@@ -1886,6 +2243,62 @@ static void enterBatterySleep(bool quiet)
 
 // Called every loop: if the cell is critically low for a sustained window and not
 // on charge, protect it by sleeping. Never interrupts a recording/save in flight.
+// True while the battery switch is in the CONNECTED position. Debounced: a slide switch
+// bounces like any contact, and 40 ms is far longer than the bounce yet far shorter than a
+// human flip, so a real change is never missed and a bounce is never reported.
+static bool batterySwitchOn()
+{
+  // Seeded from the PIN on the first call, never from an optimistic default. Booting
+  // with the pack switched out used to publish one confident lie before the debounce
+  // caught up - measured on the bench as `pct=99` off the 5.34 V rail, 0.1 s ahead of
+  // the "no cell in circuit" line that contradicted it. A debounce exists to reject
+  // bounce, not to invent a starting state.
+  static int8_t   stable   = -1;        // -1 = not sampled yet
+  static int8_t   pending  = -1;
+  static uint32_t since    = 0;
+  const bool now = (digitalRead(BAT_SWITCH_PIN) == HIGH);
+  if (stable < 0) { stable = pending = (int8_t)now; return now; }
+  if (now != (bool)pending) { pending = (int8_t)now; since = millis(); }
+  else if (pending != stable && (millis() - since) >= 40) stable = pending;
+  return (bool)stable;
+}
+
+// "You plugged in to charge, but the switch is off, so nothing is charging."
+//
+// Warn only while the cable is actually in — with no USB there is nothing to say, and the
+// device is running off that same switch anyway. Re-nags every 30 s rather than once, because
+// the whole point is that the user walks away believing it is charging.
+static void serviceBatterySwitchWarning()
+{
+  static int8_t   lastOn  = -1;  // -1 = nothing reported yet
+  static uint32_t lastNag = 0;
+  const bool on  = batterySwitchOn();
+  const bool usb = isUsbCharging();
+
+  if (lastOn < 0) {
+    // Report the position the unit BOOTED in, as a state and not as a transition.
+    // It used to default to "connected", so a unit booted with the switch off
+    // announced a change that never happened - and a unit booted with it on
+    // announced nothing at all, leaving the boot log silent about the one input
+    // every battery number now depends on.
+    lastOn = (int8_t)on;
+    Serial.printf("[BAT] switch at boot -> %s\n", on ? "battery connected" : "battery CUT");
+  } else if (on != (bool)lastOn) {
+    lastOn = (int8_t)on;
+    lastNag = 0;                 // state changed - say something immediately
+    Serial.printf("[BAT] switch -> %s\n", on ? "battery connected" : "battery CUT");
+  }
+  if (on || !usb) return;
+
+  if (lastNag == 0 || (millis() - lastNag) >= 30000) {
+    lastNag = millis();
+    // 31 chars — the same length as the longest toast already shipping. showToast() sets no
+    // width and no LV_LABEL_LONG_WRAP, so the label auto-sizes and anything longer runs off
+    // both edges of the 240 px screen.
+    showToast("Not charging: switch to battery", 3000);
+  }
+}
+
 static void serviceBatteryGuard()
 {
   if (currentState == RECORDING || currentState == SAVING_TO_SD) return;
@@ -2200,6 +2613,15 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
   g_flagCount = 0;                         // fresh flag list for this take
                                            // (pre-crash flags lived in RAM and are lost)
   setStatePill("REC", COL_REC_BG, COL_REC);
+  // Hold-to-stop tracking, per take. `recHoldShown` is the last second drawn on the pill, so
+  // the redraw only happens when the number actually changes.
+  uint32_t recHoldSince = 0;
+  int      recHoldShown = -1;
+  // The take begins on the SECOND tap of a double-click, so the button may still be down (or
+  // bouncing) as capture starts. Without this, a user who holds that second tap would watch
+  // their recording stop three seconds after it began. Hold-to-stop only arms once the button
+  // has been seen released at least once.
+  bool     recHoldReady = false;
   logHeap("record start");
 
   // Write into 1-minute segment files; each finished minute is flushed to SD so
@@ -2304,10 +2726,41 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
       partFlushed = partWritten;
     }
 
-    // Physical buttons during capture: RECORD = stop, FLAG = mark this instant.
+    // Physical buttons during capture: RECORD = HOLD 3 s to stop, FLAG = mark this instant.
     // A remote "stop" command (connStopReq) ends the take exactly the same way —
     // before this, a server/app-started take could only be ended at the device.
-    if (btnPressed(recBtn) || connStopReq) {
+    //
+    // Stop reads the button's LEVEL, not an edge: a hold is a duration, and btnPressed() is a
+    // one-shot that fires once and then waits for a release. It is still called (and its
+    // result discarded) so the ISR latch is drained — otherwise every tap made during the take
+    // would queue up and the first one would fire the moment the take ended.
+    // The tap is consumed to drain the ISR latch (see above) AND used: a user who taps once
+    // mid-take is asking "why did nothing happen?", so answer them.
+    if (btnPressed(recBtn)) showToast("Hold 3s to stop recording", 1800);
+    bool recLow = (digitalRead(REC_BTN_PIN) == LOW);
+    if (!recLow) {
+      recHoldReady = true;                 // a clean release: the gesture may now be used
+      if (recHoldSince) {                  // let go early: put the pill back
+        recHoldSince = 0;
+        recHoldShown = -1;
+        setStatePill("REC", COL_REC_BG, COL_REC);
+      }
+    } else if (!recHoldReady) {
+      // Still holding the tap that started this take — not a stop gesture.
+    } else {
+      if (!recHoldSince) recHoldSince = millis();
+      uint32_t held = millis() - recHoldSince;
+      // Count down on the pill. A three-second hold with no feedback is indistinguishable
+      // from a button that is not working, and the user lets go at two.
+      int left = (int)((REC_HOLD_STOP_MS - (held < REC_HOLD_STOP_MS ? held : REC_HOLD_STOP_MS) + 999) / 1000);
+      if (left != recHoldShown) {
+        recHoldShown = left;
+        char hp[12];
+        snprintf(hp, sizeof(hp), "HOLD %d", left);
+        setStatePill(hp, COL_WARN_BG, COL_WARN);
+      }
+    }
+    if ((recHoldSince && (millis() - recHoldSince) >= REC_HOLD_STOP_MS) || connStopReq) {
       connStopReq = false;
       recordStopReq = true;
       // Acknowledge the stop on-screen THIS frame so the user sees it took and
@@ -2357,6 +2810,7 @@ static bool recordWavStreamToSd(const char *wavPath, uint32_t *outPcmBytes,
                             LV_SYMBOL_WARNING "  No audio detected - check mic");
       }
     }
+    serviceToast();
     lv_timer_handler();   // reads touch + paints; ~30 Hz keeps Stop instant
     // Yield to the scheduler so a multi-minute capture can't starve the idle
     // task (and trip its watchdog) - this is what keeps long records stable.
@@ -2574,15 +3028,23 @@ static void refreshHomeUpload()
     static uint8_t  batPct  = 255;
     static uint8_t  chgFrame = 0;
     static int8_t   wasCharging = -1;
+    static int8_t   wasInCircuit = -1;
     uint32_t now = millis();
-    // TEMP (fw 1.5.6): the voltage-trend charge detection isn't reliable yet, so
-    // hide the animated charging chip - always show the static %. Flip to 1 to
-    // restore the effect once detection (or a CHRG pin) is trustworthy. NOTE: the
-    // low-battery guard calls isUsbCharging() separately, so it's unaffected.
-    #define SHOW_CHARGE_EFFECT 0
-    bool charging = isUsbCharging();
+    // fw 1.5.33: the charging chip is BACK ON. 1.5.6 hid it because the old
+    // 5 s/±15 mV trend heuristic mis-called the state; detection is now layered
+    // (USB host + level + step + 4-min trend, see batteryService()) and a plug-in
+    // is caught inside one 3 s sample. Set to 0 to fall back to a static %.
+    #define SHOW_CHARGE_EFFECT 1
+    // With the switch out of the battery position there is nothing to charge, so the
+    // bolt-and-sweep animation would be a straight lie - and it used to run anyway,
+    // at the same time as the "Not charging: switch to battery" toast, on the same
+    // screen. isUsbCharging() only means "USB power is present"; charging needs a
+    // cell in the circuit to charge INTO.
+    bool inCircuit = batterySwitchOn();
+    bool charging = isUsbCharging() && inCircuit;
+    bool full     = isBatteryFull();
     if (!SHOW_CHARGE_EFFECT) charging = false;
-    bool sampled  = (lastBat == 0 || now - lastBat >= 5000);
+    bool sampled  = (lastBat == 0 || now - lastBat >= 3000);
     if (sampled) { lastBat = now; batPct = batteryPercent(); }
 
     char batTxt[28];
@@ -2590,11 +3052,13 @@ static void refreshHomeUpload()
       // Animated charge: a bolt + the battery glyph sweeping EMPTY->FULL on a
       // ~1.3 s loop (advances each ~250 ms refresh), drawn green, so plugging
       // in USB-C is unmistakable. Keeps showing the real % alongside.
+      // Once the charger has terminated the sweep stops on a full glyph and the
+      // chip reads "100%" - an animation that never ends looks like it's stuck.
       static const char *fill[5] = {
         LV_SYMBOL_BATTERY_EMPTY, LV_SYMBOL_BATTERY_1, LV_SYMBOL_BATTERY_2,
         LV_SYMBOL_BATTERY_3,     LV_SYMBOL_BATTERY_FULL,
       };
-      chgFrame = (uint8_t)((chgFrame + 1) % 5);
+      chgFrame = full ? 4 : (uint8_t)((chgFrame + 1) % 5);
       if (batPct == 255)
         snprintf(batTxt, sizeof(batTxt), LV_SYMBOL_CHARGE " %s", fill[chgFrame]);
       else
@@ -2602,17 +3066,29 @@ static void refreshHomeUpload()
                  fill[chgFrame], batPct);
       lv_label_set_text(homeBatText, batTxt);
       lv_obj_set_style_text_color(homeBatText, lv_color_hex(COL_OK), 0);
-    } else if (sampled || wasCharging == 1) {
-      // Static chip: redraw on a fresh sample, or right after charging stops.
-      if (batPct == 255)
-        snprintf(batTxt, sizeof(batTxt), "%s", batterySymbol(100));
-      else
-        snprintf(batTxt, sizeof(batTxt), "%s %u%%", batterySymbol(batPct), batPct);
+    } else if (sampled || wasCharging == 1 || wasInCircuit != (int8_t)inCircuit) {
+      // Static chip: redraw on a fresh sample, right after charging stops, or the
+      // moment the switch changes - that last one matters because the text below
+      // changes KIND, not just value, and waiting for the next sample would leave a
+      // percentage on screen for a pack that is no longer in the circuit.
+      uint32_t batCol;
+      if (!inCircuit) {
+        // No cell in the circuit: show that, not a number. The number that would be
+        // shown here is the charger's rail (5.35 V measured), which reads as 100%.
+        snprintf(batTxt, sizeof(batTxt), LV_SYMBOL_WARNING " Batt off");
+        batCol = COL_WARN;
+      } else {
+        if (batPct == 255)
+          snprintf(batTxt, sizeof(batTxt), "%s", batterySymbol(100));
+        else
+          snprintf(batTxt, sizeof(batTxt), "%s %u%%", batterySymbol(batPct), batPct);
+        batCol = (batPct < 15) ? COL_REC : (batPct < 35) ? COL_WARN : COL_OK;
+      }
       lv_label_set_text(homeBatText, batTxt);
-      uint32_t batCol = (batPct < 15) ? COL_REC : (batPct < 35) ? COL_WARN : COL_OK;
       lv_obj_set_style_text_color(homeBatText, lv_color_hex(batCol), 0);
     }
-    wasCharging = charging ? 1 : 0;
+    wasCharging  = charging ? 1 : 0;
+    wasInCircuit = (int8_t)inCircuit;
   }
 
   if (!homeUpText || !homeUpBar || !homeUpDot) return;
@@ -2817,8 +3293,12 @@ static void showHomeScreen()
 
   // Battery chip, top-right. Live-refreshed by refreshHomeUpload(). Only shown
   // when the board can actually sense the battery (see BAT_SENSE_ENABLED).
+  // Created when there is a level to show OR when the pack is switched out - the
+  // second case is exactly when the user needs to be told something, and a chip that
+  // is never created cannot say it (nor recover when the switch goes back on, since
+  // refreshHomeUpload() only ever updates an existing label).
   uint8_t batPct = batteryPercent();
-  if (batPct != 255) {
+  if (batPct != 255 || !batterySwitchOn()) {
     homeBatText = lv_label_create(lv_scr_act());
     setFont(homeBatText, &lv_font_montserrat_14);
     char batTxt[24];
@@ -3375,6 +3855,9 @@ static void finalizeSavedSession(const char *wavPath, const char *jsonPath,
   // window, so a double-tap meant for "stop" doesn't immediately start a new take.
   g_recHit = false;
   g_recSettleUntil = millis() + 700;
+  // The button was HELD to get here, so its release is still coming. Make sure that release
+  // (and any bounce on it) cannot be read as the first tap of a double-click.
+  g_recClickAt = 0;
   logHeap("session done");
 }
 
@@ -3847,9 +4330,21 @@ void setup()
   }
 
   currentState = BOOTING;
+  // IO3 = ground rail (see GND_OUT_PIN). Drive it BEFORE the buttons: if a button
+  // common sits on IO3, its pull-up can't read a press until the return exists.
+  // rtc_gpio_hold_dis + deinit release the hold enterBatterySleep() applied, so
+  // the normal GPIO driver can take the pin back after a deep-sleep wake.
+  rtc_gpio_hold_dis((gpio_num_t)GND_OUT_PIN);
+  rtc_gpio_deinit((gpio_num_t)GND_OUT_PIN);
+  pinMode(GND_OUT_PIN, OUTPUT);
+  digitalWrite(GND_OUT_PIN, LOW);
+
   pinMode(BOOT_BTN_PIN, INPUT_PULLUP); // hold 5 s to factory-reset
   pinMode(REC_BTN_PIN,  INPUT_PULLUP); // external RECORD button (active LOW)
   pinMode(FLAG_BTN_PIN, INPUT_PULLUP); // external FLAG button (active LOW)
+  // Must come after GND_OUT_PIN is driven low: if the switch returns through IO3, it has no
+  // path to ground until then and would read HIGH regardless of its position.
+  pinMode(BAT_SWITCH_PIN, INPUT_PULLUP);
   // FALLING edge = press (active LOW). ISR latches it instantly, so a press is
   // never lost while a core is blocked in capture/HTTP - see btnPressed().
   attachInterrupt(digitalPinToInterrupt(REC_BTN_PIN),  isrRecBtn,  FALLING);
@@ -4072,6 +4567,7 @@ void loop()
   serviceFactoryResetButton(); // hold BOOT 5 s -> wipe config + reboot
   serviceScreenDim();          // dim backlight after 5 min idle, wake on activity
   serviceBatteryGuard();       // sleep near-empty to protect the LiPo (fw 1.5.3)
+  serviceBatterySwitchWarning(); // warn when a charging cable is in but the switch is off
 
   // Physical RECORD button when idle: start a take from Home, otherwise jump
   // back to Home from any sub-screen. (While RECORDING, loop() is blocked inside
@@ -4082,13 +4578,29 @@ void loop()
       // Stray tap right after a take just ended - ignore (see g_recSettleUntil).
       // Wrap-safe compare: a settle window armed just before the ~49.7-day
       // millis() wrap must not latch the button dead until the next wrap.
+      g_recClickAt = 0;
     } else if (currentState == HOME && deviceReady()) {
-      runRecordSavePlaySession();
+      // Double-click to start. The first tap only arms; the second within the window fires.
+      uint32_t now = millis();
+      if (g_recClickAt && (uint32_t)(now - g_recClickAt) <= REC_DOUBLE_CLICK_MS) {
+        g_recClickAt = 0;
+        runRecordSavePlaySession();
+      } else {
+        g_recClickAt = now;
+        // Say what to do, in words. Without this the first tap is indistinguishable from a
+        // dead button, and the user's next move is to press harder rather than press again.
+        // The hint lasts exactly as long as the window, so what is on screen stays true.
+        showToast("Double-click to start recording", REC_DOUBLE_CLICK_MS);
+      }
     } else if (currentState == SESSIONS || currentState == SYNC ||
                currentState == CONNECTION || currentState == RESULTS) {
       showHomeScreen();
     }
   }
+
+  // The armed tap expires on its own; put Home back the way it was.
+  if (g_recClickAt && (uint32_t)(millis() - g_recClickAt) > REC_DOUBLE_CLICK_MS) g_recClickAt = 0;
+  serviceToast();
   if (btnPressed(flagBtn)) wakeScreen();   // FLAG acts only during a take; here just wake
 
   if (currentState != ERROR_STATE) {
@@ -4212,7 +4724,10 @@ void loop()
     static uint32_t lastTelemetry = 0;
     if (lastTelemetry == 0 || nowMs - lastTelemetry >= 10000) {
       lastTelemetry = nowMs;
-      connSetTelemetry((int)batteryPercent(), g_totalRecordings, readBatteryMv());
+      // g_batMv (the smoothed sample batteryPercent() itself used) rather than a
+      // fresh raw read, so the admin's "Cell mV" column always matches the % next
+      // to it - a mismatched pair is unusable for calibration.
+      connSetTelemetry((int)batteryPercent(), g_totalRecordings, g_batMv);
     }
 
     // Immediate GUI tick after any network/SD work so a screen rebuilt by the

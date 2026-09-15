@@ -113,12 +113,29 @@ static const char *SUPABASE_ANON_KEY =
   "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpsZ2RwaXZjYm1hb2Rnb2trZHZ6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDk3NTY5NTgsImV4cCI6MjA2NTMzMjk1OH0."
   "x58hiBi5EeRwbedrsrBzRkw7y2tFBw5ztIdmujZoPMQ";
 
+// True when a server URL speaks TLS. Decided by the SCHEME, and only the scheme.
+//
+// This used to be folded into serverIsSupabase() below, so TLS was chosen by testing the
+// hostname for "supabase.co". That works for exactly one backend. Point the recorder at any
+// other https host - a Cloudflare Worker, a self-hosted box - and the command poll, the
+// chunk upload and registration all built PLAIN HTTP requests against port 443 and failed
+// with nothing useful in the log. The two questions are unrelated: whether to speak TLS is
+// the scheme's business, whether to send an apikey header is the host's.
+static inline bool urlIsTls(const char *url)
+{
+  return url && strncmp(url, "https", 5) == 0;
+}
+
 // True when the provisioned server is a Supabase Functions endpoint (so we add
 // the apikey header). Plain mock-server / self-hosted endpoints skip it.
+// ⚠️ apikey ONLY. Never use this to decide TLS - see urlIsTls().
 static inline bool serverIsSupabase()
 {
   return strstr(cfgServer, "supabase.co") != nullptr;
 }
+
+// TLS for the provisioned command/upload server.
+static inline bool serverIsTls() { return urlIsTls(cfgServer); }
 
 static Preferences prefs;
 
@@ -823,6 +840,7 @@ static uint32_t trimPatientSyncedAudio(const char *pid, uint32_t keep = KEEP_AUD
 
 // Defined with the uploader further down; needed here to reset its memory.
 static void upResumeClear();
+static void upResumeLoad();
 static void strikeClearAll();
 
 // Stamp session (pid, n) with the CURRENT claim's device id ("owner_dev"),
@@ -1199,7 +1217,7 @@ static bool httpJson(const char *method, const char *path, const char *body,
   s_http.setConnectTimeout(2000); // don't hang the UI waiting to connect
   s_http.setTimeout(2500);        // ...or waiting on a reply
   bool began;
-  if (serverIsSupabase()) {
+  if (serverIsTls()) {
     // Set insecure once: re-calling it can churn the TLS client and defeat any
     // socket reuse the gateway does grant.
     static bool s_insecureSet = false;
@@ -1279,7 +1297,7 @@ static int sendSessionChunk(const char *host, int port, const char *metaQuery,
   // "uploading takes minutes". The pooled socket skips the handshake, so a chunk
   // POST is as quick as a poll. The GUI runs on core 1, so no pumping is needed here.
   char url[768];   // must hold hostport + full upMetaQuery + offset/final/total
-  bool tls = serverIsSupabase();
+  bool tls = serverIsTls();
   bool defaultPort = (tls && port == 443) || (!tls && port == 80);
   char hostport[110];
   if (defaultPort) snprintf(hostport, sizeof(hostport), "%s", host);
@@ -1358,11 +1376,55 @@ static char     upResumePid[24] = "";
 static uint32_t upResumeNum = 0;
 static size_t   upResumeOffset = 0;
 
+// The resume point must OUTLIVE A POWER CUT, not just a Wi-Fi drop.
+//
+// These three used to be plain RAM. That covered the common case - the net task keeps
+// running across a dropped AP, so a walk out of range resumed fine - but it lost
+// everything the moment the board actually lost power: a flat cell, a brownout, or (now)
+// a user flipping a battery switch mid-upload. The next boot then sent offset=0, the
+// server's parts no longer lined up, it answered 409, and a 118 MB session re-uploaded
+// from the first byte over whatever link was slow enough to stall it in the first place.
+//
+// Writes are rare by construction - upResumeSave() only runs when an upload STOPS (abort,
+// four failed retries, or ending without a final ack), never per slice - so this costs no
+// meaningful NVS wear. The namespace is separate from "sate" so a factory reset of the
+// account does not have to care about it.
+static void upResumePersist()
+{
+  prefs.begin("sate-up", false);
+  if (upResumeOffset > 0 && upResumePid[0]) {
+    prefs.putString("pid", upResumePid);
+    prefs.putUInt("num", upResumeNum);
+    prefs.putULong("off", (uint32_t)upResumeOffset);
+  } else {
+    prefs.remove("pid");
+    prefs.remove("num");
+    prefs.remove("off");
+  }
+  prefs.end();
+}
+
+// Called once from connBegin(): a resume point written before the power cut is only
+// useful if something reads it back.
+static void upResumeLoad()
+{
+  prefs.begin("sate-up", true);
+  prefs.getString("pid", upResumePid, sizeof(upResumePid));
+  upResumeNum = prefs.getUInt("num", 0);
+  upResumeOffset = (size_t)prefs.getULong("off", 0);
+  prefs.end();
+  if (upResumeOffset && upResumePid[0]) {
+    Serial.printf("[CONN] resume point restored from NVS: %s session %lu at %u\n",
+                  upResumePid, (unsigned long)upResumeNum, (unsigned)upResumeOffset);
+  }
+}
+
 static void upResumeSave(const char *pid, uint32_t num, size_t offset)
 {
   snprintf(upResumePid, sizeof(upResumePid), "%s", pid);
   upResumeNum = num;
   upResumeOffset = offset;
+  upResumePersist();
 }
 
 static void upResumeClear()
@@ -1370,6 +1432,7 @@ static void upResumeClear()
   upResumePid[0] = '\0';
   upResumeNum = 0;
   upResumeOffset = 0;
+  upResumePersist();
 }
 
 static bool upResumeMatches(const char *pid, uint32_t num)
@@ -2140,7 +2203,8 @@ static void handleProvisionTick()
     snprintf(url, sizeof(url), "%s/api/devices/register", provServer);
     WiFiClient plain;
     WiFiClientSecure tls;
-    bool useTls = strstr(provServer, "supabase.co") != nullptr;
+    bool useTls     = urlIsTls(provServer);
+    bool isSupabase = strstr(provServer, "supabase.co") != nullptr;
     if (useTls) {
       tls.setInsecure();
       tls.setHandshakeTimeout(5);   // fail a stalled handshake fast so we retry sooner
@@ -2153,7 +2217,7 @@ static void handleProvisionTick()
     bool ok = false;
     if (http.begin(client, url)) {
       http.addHeader("Content-Type", "application/json");
-      if (useTls) http.addHeader("apikey", SUPABASE_ANON_KEY);
+      if (isSupabase) http.addHeader("apikey", SUPABASE_ANON_KEY);
       code = http.POST((uint8_t *)body, strlen(body));
       Serial.printf("[CONN] register attempt %d code=%d freeHeap=%u maxAlloc=%u\n",
                     regAttempts + 1, code, (unsigned)ESP.getFreeHeap(),
@@ -2715,7 +2779,14 @@ void connInit(const char *fw)
   buildSerial();
   loadConfig();
   ownerTrackId();   // seed/refresh the reset-surviving owner record (see above)
-  Serial.printf("[CONN] serial=%s provisioned=%d\n", serialStr, provisioned);
+  upResumeLoad();   // a stalled upload's byte offset, if the last run lost power mid-send
+  // The STA MAC is printed here, not just shown on the About screen, because a
+  // MAC-allowlist / device-registration network (a campus "devices" SSID, say) hands out a
+  // DHCP lease and then silently drops every packet until the MAC is registered. From the
+  // outside that looks exactly like a working connection: the log says "Online (Wi-Fi)" with
+  // an IP, and nothing ever reaches the server. Having the MAC in the boot log is the
+  // difference between diagnosing that in a minute and chasing it for an afternoon.
+  Serial.printf("[CONN] serial=%s provisioned=%d mac=%s\n", serialStr, provisioned, connMac());
 
   if (provisioned) enterWifiTrying();
   else enterBleMode();
