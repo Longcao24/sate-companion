@@ -22,7 +22,10 @@ export function LoginScreen() {
   const { update } = useStore();
   const [method, setMethod] = useState<Method>("password");
 
-  const [email, setEmail] = useState("morgan@clinic.example.com");
+  // Starts EMPTY. It used to be pre-filled with a fake clinician's address, which
+  // in a shipped build reads as someone else's account already signed in - and it
+  // is one tap away from being submitted by a user who did not notice.
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
   const [code, setCode] = useState("");
@@ -136,6 +139,7 @@ export function LoginScreen() {
                 value={email}
                 onChangeText={setEmail}
                 keyboardType="email-address"
+                autoCapitalize="none"
               />
               <Field
                 label="Password"

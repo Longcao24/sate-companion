@@ -17,8 +17,10 @@ export function AddDeviceSheet({
   visible: boolean;
   onClose: () => void;
   onPickSate: () => void;
-  onPickPlaud: () => void;
-  onPickPendant: () => void;
+  // Optional: a build that does not support the family passes nothing and the
+  // row is not rendered at all, rather than being shown and then failing.
+  onPickPlaud?: () => void;
+  onPickPendant?: () => void;
 }) {
   return (
     <Modal
@@ -49,6 +51,7 @@ export function AddDeviceSheet({
             <Feather name="chevron-right" size={20} color={D.sub} />
           </Pressable>
 
+          {onPickPlaud && (
           <Pressable
             onPress={onPickPlaud}
             accessibilityRole="button"
@@ -63,7 +66,9 @@ export function AddDeviceSheet({
             </View>
             <Feather name="chevron-right" size={20} color={D.sub} />
           </Pressable>
+          )}
 
+          {onPickPendant && (
           <Pressable
             onPress={onPickPendant}
             accessibilityRole="button"
@@ -78,6 +83,7 @@ export function AddDeviceSheet({
             </View>
             <Feather name="chevron-right" size={20} color={D.sub} />
           </Pressable>
+          )}
 
           <Pressable
             onPress={onClose}

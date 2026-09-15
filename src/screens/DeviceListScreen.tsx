@@ -38,8 +38,9 @@ export function DeviceListScreen({
   onOpenSettings: () => void;
   onOpenPreview: () => void;
   onAddSate: () => void;
-  onAddPlaud: () => void;
-  onAddPendant: () => void;
+  // Undefined on a build that does not ship the family (see src/features.ts).
+  onAddPlaud?: () => void;
+  onAddPendant?: () => void;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
 
@@ -51,14 +52,20 @@ export function DeviceListScreen({
         setPickerOpen(false);
         onAddSate();
       }}
-      onPickPlaud={() => {
-        setPickerOpen(false);
-        onAddPlaud();
-      }}
-      onPickPendant={() => {
-        setPickerOpen(false);
-        onAddPendant();
-      }}
+      onPickPlaud={
+        onAddPlaud &&
+        (() => {
+          setPickerOpen(false);
+          onAddPlaud();
+        })
+      }
+      onPickPendant={
+        onAddPendant &&
+        (() => {
+          setPickerOpen(false);
+          onAddPendant();
+        })
+      }
     />
   );
 

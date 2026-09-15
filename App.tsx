@@ -9,6 +9,7 @@ import { PlaudSettingsScreen } from "./src/screens/PlaudSettingsScreen";
 import { makePendantLink } from "./src/pendant/PendantLink";
 import { KnownPendant, loadKnownPendants, rememberPendant } from "./src/pendant/PendantStore";
 import { PendantConnectScreen } from "./src/screens/PendantConnectScreen";
+import { PLAUD_ENABLED, PENDANT_ENABLED } from "./src/features";
 import { acquireRadio, registerRadio } from "./src/ble/radio";
 import { useManagedDevices } from "./src/devices/useManagedDevices";
 import { ManagedDevice, UploadedSession } from "./src/protocol";
@@ -89,6 +90,7 @@ function Root() {
   // Plaud). Loaded once so Home can show them as device rows on every launch.
   const [knownPendants, setKnownPendants] = useState<KnownPendant[]>([]);
   useEffect(() => {
+    if (!PENDANT_ENABLED) return;   // recorder-only build: nothing to list
     loadKnownPendants().then(setKnownPendants);
   }, []);
 
@@ -182,15 +184,18 @@ function Root() {
             // Route by family: a recorder has a detail screen; Plaud/pendant open
             // their own connect flow (reconnecting straight to that serial/id).
             const kind = d.kind ?? "sate";
-            if (kind === "plaud") openPlaud(d.serial);
-            else if (kind === "pendant") openPendant(d.serial);
+            // A recorder-only build should never have listed a Plaud/pendant row,
+            // but route defensively: opening a screen whose link is a mock would
+            // scan forever and look like broken hardware.
+            if (kind === "plaud") { if (PLAUD_ENABLED) openPlaud(d.serial); }
+            else if (kind === "pendant") { if (PENDANT_ENABLED) openPendant(d.serial); }
             else setScreen({ name: "recorderDetail", device: d });
           }}
           onOpenSettings={() => setScreen({ name: "settings" })}
           onOpenPreview={() => setScreen({ name: "preview" })}
           onAddSate={() => openSateFg({ name: "provision" })}
-          onAddPlaud={() => openPlaud()}
-          onAddPendant={() => openPendant()}
+          onAddPlaud={PLAUD_ENABLED ? () => openPlaud() : undefined}
+          onAddPendant={PENDANT_ENABLED ? () => openPendant() : undefined}
         />
       )}
       {screen.name === "recorderDetail" && (
