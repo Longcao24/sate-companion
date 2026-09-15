@@ -656,11 +656,26 @@ setup + prebuilt flash assets: `SETUP.md` + the **GitHub Release** (`gh release 
     SALT lines — reopening costs nothing, and an edited transcript marks the report stale
     instead of silently showing a report of something else. Missing column (`42703` /
     `PGRST204`) degrades to "generated but not saved", never to a lost report.
-  - **No reference values are sent yet**, so there are no z-scores: section 2 shows the
-    counts the service parsed (it returns `derived_counts` from its own SALT parse) under an
-    explicit note. The renderer already handles a populated `metrics_table` with z-bars. The
-    app's CHILDES norms cover only MLUm/MLUw and pairing them needs the metric VALUES before
-    the call, which today are computed inline in `RightSidebar.tsx`.
+  - **Reference values are OPT-IN, behind the "z-scores vs CHILDES TD" checkbox.** Unticked,
+    section 2 is the counts the service parsed (`derived_counts`) under an explicit note.
+    Ticked, `lsaMetricsService.ts` computes this sample's MLUm/MLUw/TNW/NDW with
+    `calculateSpeechAnalysis` (the app's own canonical metrics function) and pairs MLU with the
+    SAME CHILDES query the Analysis tab runs (Eng-NA / narrative / TD), so the two screens
+    cannot print different numbers for one recording; TNW/NDW come back `NO REF`. **The norms
+    are fetched BEFORE the report** — a norms failure then costs nothing, instead of spending a
+    ~20 s LLM call on a document that quietly lacks the comparison that was asked for. ⚠️
+    `RightSidebar.tsx` still computes MLU/NDW inline with its own copy of the same logic;
+    they agree today, and the next change there should make it consume
+    `calculateSpeechAnalysis` rather than leave two implementations in step by luck.
+  - **The drafted prose is EDITABLE, and edits are stored beside the response, never over it**
+    (`edits` in `recordings.lsa_report`; `mergeEdits()` applies them at render). The footer's
+    promise is that the observations are a model's draft that an SLP must review — so the
+    reviewer needs somewhere to put the review, every field must revert to what the model
+    actually wrote, and a report carrying the clinician's words says so in the footer. Only
+    prose is editable: a count or a z-score is computed, not an opinion to correct. Regenerating
+    replaces the draft, so it asks first when edits exist.
+  - **The age is entered as two number boxes (yr / mo), not the SALT `6;6` string** — that
+    notation is the wire format, not something to make a clinician type. A blank month is 0.
 
 ## Docs
 
