@@ -233,6 +233,11 @@ NOT "durably stored". See agent-memory `no-renumber-sessions` and [05-backend-su
 base_url/device_serial/device_id/device_key, `[record]`). `PROTECTED_SERIALS = ("SATE-D19EB8",)`
 — the real in-use unit; `ci`/`e2e` **refuse** to run against it.
 
+The CLI + Debugger ship to their own repo as a **git subtree** (`hwtest/` → `sate-cli` remote =
+`Longcao24/SATE-CLI`) — that's what a coworker clones to get `sate` / the Debugger without the
+rest of the monorepo. Edit here in `hwtest/`, never in the CLI repo; see
+[Debugger / CLI distribution](#debugger--cli-distribution-git-subtree--sate-cli-repo).
+
 | Command | What it does |
 |---------|--------------|
 | `sate ci` | **The standard firmware gate.** Reads `FIRMWARE_VERSION`, compiles + flashes the debug build, verifies the serial line is *alive* (not just enumerated — the USB-CDC wedge), signs in, runs the standard hands-off suite, writes `hwtest/ci-reports/fw-<version>_<stamp>.json`, exits non-zero on any FAIL/ERROR. `--no-flash` gates whatever is already on the board. |
@@ -457,6 +462,28 @@ cd react_app_sate-ui_update && npm run build
 cd .. && git subtree push --prefix=react_app_sate-ui_update webapp <branch>   # webapp = Longcao24/SATE_hardwave
 ```
 
+### Debugger / CLI distribution (git subtree → SATE-CLI repo)
+
+The `sate` CLI and the Debugger (`hwtest/`) are handed to coworkers as a **standalone repo**, so
+nobody needs the monorepo (or its firmware/app/backend source) just to flash and diagnose a board.
+It is the same mechanism as the web app — a git subtree of one directory:
+
+```bash
+git subtree push --prefix=hwtest sate-cli main    # sate-cli = Longcao24/SATE-CLI
+```
+
+- **`hwtest/` in this repo is the source of truth.** Make every change here and push the subtree;
+  never commit into `SATE-CLI` directly — a commit made there has to be pulled back
+  (`git subtree pull --prefix=hwtest sate-cli main`) or the next push conflicts.
+- The subtree's root is what the coworker sees: `sate` (the self-bootstrapping launcher),
+  `debug.command` / `build_app.command` (the Debugger window + the `SATE Debugger.app` build),
+  `QUICKSTART.md`, `config.example.toml`, and the `hwtest/` package. Keep `QUICKSTART.md` accurate —
+  it is that repo's landing page.
+- Nothing local or generated ships: `config.toml`, `.venv/`, `ci-reports/`, and the built
+  `SATE Debugger.app` are git-ignored (`hwtest/.gitignore`). `config.toml` holds an account
+  password + device key — **never** let it into the subtree.
+- Remote setup, once per clone: `git remote add sate-cli https://github.com/Longcao24/SATE-CLI.git`.
+
 ---
 
 ## Status + error-email alerting ops
@@ -470,6 +497,19 @@ in `status/`. A cron (`*/5 * * * *`) probes each **external** service in `TARGET
 (device-api, Supabase API, Storage, AI `/process` — a CF Worker CANNOT probe same-account
 CF resources, error 1042) and records to D1 (`sate-status`). On top of the up/down probes it emails
 the operator on any NEW problem and again when it clears (`evaluateAndAlert`):
+
+**Per-target probe throttle (`minIntervalSec`).** A `TARGETS` entry may carry `minIntervalSec` to
+rate-limit its *network* probe below the 5-min cron cadence — used for the **ngrok-tunneled** hosts
+to conserve ngrok's request quota. The **AI `/process`** target (`sate-v1-5.ngrok.io`) is set to
+`24 * 3600` (once per day), cutting it from ~288 hits/day to ~1. In `runChecks()`, before probing a
+throttled target it reads that component's newest `checks` row; if the last real probe was within
+`minIntervalSec` it **skips the fetch and re-inserts the last status/code** with the current `ts`
+(a carried reading, `carried:true` in the result) — so the 90-day bar stays continuous with no
+network call. The first probe (no history) always runs live. Alerting degrades gracefully: a carried
+`down` persists as `down` and keeps alerting (honest — we genuinely can't re-probe sooner), but a
+*new* AI outage isn't detected until the next real probe, i.e. up to 24h late. The CHILDES norms host
+(`childes-metrics.ngrok.app`) is also ngrok but is **not** throttled yet; add `minIntervalSec` if
+its quota becomes a concern. Every other tier still probes at full 5-min resolution.
 
 - **(a) a probed service DOWN**, and
 - **(b) the pipeline error digest** — it fetches device-api `GET /api/health/alerts?key=…`

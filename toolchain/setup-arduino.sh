@@ -32,7 +32,7 @@ arduino-cli lib install "lvgl@8.4.0"
 echo "==> 5/6  drop in the load-bearing configs (lv_conf + Freenove TFT_eSPI display setup)"
 LIBDIR="$(arduino-cli config get directories.user)/libraries"
 [ -d "$LIBDIR" ] || { echo "libraries dir not found at $LIBDIR"; exit 1; }
-# LVGL config — LV_TICK_CUSTOM=1 + LVGL heap in PSRAM (see SETUP.md / hardware.md §8.8)
+# LVGL config — LV_TICK_CUSTOM=1 + LVGL heap in PSRAM (see SETUP.md / doc/12-hardware.md §8.8)
 cp "$HERE/lv_conf.h" "$LIBDIR/lv_conf.h"
 # Freenove FNK0104AB display config: stock TFT_eSPI has no FNK setup, so overlay ours
 cp "$HERE/tft_eSPI_freenove/User_Setup_Select.h" "$LIBDIR/TFT_eSPI/User_Setup_Select.h"

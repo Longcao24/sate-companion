@@ -1,0 +1,342 @@
+/* ==========================================================================
+   SATE Design System v1.0.0
+   Drop-in stylesheet. No build step, no dependencies, no framework.
+
+     <link rel="stylesheet" href="sate.css">
+
+   For a Tailwind/React app use tailwind.preset.js instead — it emits the same
+   tokens as Tailwind utilities so you keep writing `bg-white border-gray-200`.
+
+   Values come from tokens.json, which was measured from what the SATE web app
+   actually renders. Do not edit values here; edit tokens.json and mirror.
+   Verify a project against the system with:  node verify.mjs <path>
+   ========================================================================== */
+
+:root {
+  /* ---- brand ---- */
+  --sate-primary: #2563eb;
+  --sate-primary-hover: #1d4ed8;
+  --sate-primary-soft: #eff6ff;
+  --sate-primary-border: #bfdbfe;
+
+  /* ---- surfaces ---- */
+  --sate-page: #fafafa;
+  --sate-raised: #ffffff;
+  --sate-sunken: #f9fafb;
+  --sate-muted-surface: #f3f4f6;
+
+  /* ---- borders ---- */
+  --sate-border: #e5e7eb;
+  --sate-border-strong: #d1d5db;
+
+  /* ---- text ---- */
+  --sate-text: #111827;
+  --sate-text-2: #374151;
+  --sate-muted: #4b5563;
+  --sate-subtle: #6b7280;
+  --sate-faint: #9ca3af;
+  --sate-on-primary: #ffffff;
+
+  /* ---- status ---- */
+  --sate-success: #16a34a; --sate-success-soft: #f0fdf4;
+  --sate-success-border: #bbf7d0; --sate-success-text: #15803d;
+  --sate-warning: #d97706; --sate-warning-soft: #fffbeb;
+  --sate-warning-border: #fde68a; --sate-warning-text: #b45309;
+  --sate-danger: #dc2626; --sate-danger-soft: #fef2f2;
+  --sate-danger-border: #fecaca; --sate-danger-text: #b91c1c;
+
+  /* ---- annotations (SEMANTIC — never reassign, never decorate) ---- */
+  --sate-pause: #3b82f6;            --sate-pause-bg: #bfdbfe;
+  --sate-filler: #f59e0b;           --sate-filler-bg: #fed7aa;
+  --sate-repetition: #eab308;       --sate-repetition-bg: #fef08a;
+  --sate-mispronunciation: #8b5cf6; --sate-mispronunciation-bg: #e9d5ff;
+  --sate-morpheme: #10b981;         --sate-morpheme-bg: #bbf7d0;
+  --sate-revision: #f97316;         --sate-revision-bg: #fed7aa;
+  --sate-utterance-error: #ef4444;  --sate-utterance-error-bg: #fecaca;
+  --sate-morpheme-omission: #dc2626;--sate-morpheme-omission-bg: #fecaca;
+  --sate-stuttering: #3b82f6;       --sate-stuttering-bg: #93c5fd;
+
+  /* ---- type ---- */
+  --sate-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu,
+               Cantarell, 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  --sate-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+
+  /* The scale tailwind.config.js expects but never defines. Keeping the same variable
+     names means dropping this file into the web app repairs its font-size utilities. */
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.25rem;
+  --text-2xl: 1.5rem;
+  --text-3xl: 1.875rem;
+
+  /* ---- shape & depth ---- */
+  --sate-radius-sm: 4px;
+  --sate-radius-md: 6px;
+  --sate-radius: 8px;
+  --sate-radius-xl: 12px;
+  --sate-radius-full: 9999px;
+  --sate-shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, .05);
+  --sate-shadow-md: 0 4px 6px -1px rgba(0, 0, 0, .1), 0 2px 4px -2px rgba(0, 0, 0, .1);
+  --sate-shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, .1), 0 4px 6px -4px rgba(0, 0, 0, .1);
+  --sate-shadow-modal: 0 4px 20px rgba(0, 0, 0, .15);
+
+  /* ---- space & layout ---- */
+  --sate-space-xs: 4px;  --sate-space-sm: 8px;  --sate-space-md: 12px;
+  --sate-space-lg: 18px; --sate-space-xl: 24px; --sate-space-2xl: 32px;
+  --sate-content-width: 1240px;
+  --sate-prose-width: 880px;
+  --sate-gutter: 24px;
+
+  /* ---- motion ---- */
+  --sate-fast: 120ms ease;
+  --sate-normal: 200ms ease-out;
+}
+
+/* ==========================================================================
+   Base
+   ========================================================================== */
+*, *::before, *::after { box-sizing: border-box; }
+
+body.sate {
+  margin: 0;
+  background: var(--sate-page);
+  color: var(--sate-text);
+  font-family: var(--sate-font);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.sate-mono, code, pre { font-family: var(--sate-mono); }
+
+a { color: var(--sate-primary); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* Visible focus everywhere. Do not remove this without replacing it — keyboard
+   users have no other way to tell where they are. */
+:focus-visible {
+  outline: 2px solid var(--sate-primary);
+  outline-offset: 2px;
+  border-radius: var(--sate-radius-sm);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+
+/* ==========================================================================
+   Layout — app shell
+   ========================================================================== */
+.sate-header {
+  background: var(--sate-raised);
+  border-bottom: 1px solid var(--sate-border);
+  padding: 14px var(--sate-gutter);
+  position: sticky; top: 0; z-index: 20;
+}
+.sate-header__inner {
+  max-width: var(--sate-content-width); margin: 0 auto;
+  display: flex; align-items: center; gap: var(--sate-gutter); flex-wrap: wrap;
+}
+.sate-wordmark { font-size: 22px; font-weight: 700; letter-spacing: -.02em; color: var(--sate-text); }
+.sate-wordmark span {
+  display: block; font-size: 11px; font-weight: 500;
+  color: var(--sate-subtle); margin-top: -2px; letter-spacing: .02em;
+}
+.sate-main { max-width: var(--sate-content-width); margin: 0 auto; padding: 26px var(--sate-gutter) 72px; }
+.sate-prose { max-width: var(--sate-prose-width); }
+
+/* ==========================================================================
+   Tabs — the app's primary navigation idiom (Layout/Header.tsx)
+   ========================================================================== */
+.sate-tabs { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.sate-tabs button {
+  background: transparent; border: 0; color: var(--sate-muted); cursor: pointer;
+  font: inherit; font-size: 14px; padding: 7px 14px;
+  border-radius: var(--sate-radius); transition: background-color var(--sate-fast), color var(--sate-fast);
+}
+.sate-tabs button:hover { color: var(--sate-text); background: var(--sate-sunken); }
+.sate-tabs button[aria-current="true"],
+.sate-tabs button[aria-selected="true"] {
+  background: var(--sate-primary); color: var(--sate-on-primary); font-weight: 500;
+}
+.sate-tabs .sate-tabs__sep { width: 1px; height: 22px; background: var(--sate-border); margin: 0 6px; }
+
+/* ==========================================================================
+   Card / surfaces
+   ========================================================================== */
+.sate-card {
+  background: var(--sate-raised);
+  border: 1px solid var(--sate-border);
+  border-radius: var(--sate-radius);
+  box-shadow: var(--sate-shadow-sm);
+  padding: var(--sate-space-lg);
+}
+.sate-card--flush { padding: 0; overflow: hidden; }
+
+.sate-grid { display: grid; gap: 14px; }
+.sate-grid--auto { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+
+.sate-stat__value { font-size: 25px; font-weight: 600; letter-spacing: -.02em; line-height: 1.25; }
+.sate-stat__label {
+  color: var(--sate-subtle); font-size: 11px;
+  text-transform: uppercase; letter-spacing: .06em;
+}
+
+/* ==========================================================================
+   Buttons
+   ========================================================================== */
+.sate-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  background: var(--sate-primary); color: var(--sate-on-primary);
+  border: 1px solid var(--sate-primary);
+  padding: 8px 15px; border-radius: var(--sate-radius);
+  font: inherit; font-size: 14px; font-weight: 500; cursor: pointer;
+  transition: background-color var(--sate-fast), border-color var(--sate-fast);
+}
+.sate-btn:hover { background: var(--sate-primary-hover); border-color: var(--sate-primary-hover); }
+.sate-btn--secondary {
+  background: var(--sate-raised); color: var(--sate-text-2); border-color: var(--sate-border-strong);
+}
+.sate-btn--secondary:hover { background: var(--sate-sunken); }
+.sate-btn--danger {
+  background: var(--sate-raised); color: var(--sate-danger); border-color: var(--sate-danger-border);
+}
+.sate-btn--danger:hover { background: var(--sate-danger-soft); }
+.sate-btn--ghost { background: transparent; color: var(--sate-muted); border-color: transparent; }
+.sate-btn--ghost:hover { background: var(--sate-sunken); color: var(--sate-text); }
+.sate-btn--sm { padding: 5px 11px; font-size: 13px; }
+.sate-btn--lg { padding: 11px 20px; font-size: 15px; }
+.sate-btn:disabled { opacity: .55; cursor: not-allowed; }
+
+/* ==========================================================================
+   Forms
+   ========================================================================== */
+.sate-input, .sate-select, .sate-textarea {
+  background: var(--sate-raised); border: 1px solid var(--sate-border-strong);
+  color: var(--sate-text); border-radius: var(--sate-radius);
+  padding: 8px 11px; font: inherit; font-size: 14px; width: 100%;
+  transition: border-color var(--sate-fast), box-shadow var(--sate-fast);
+}
+.sate-input:focus, .sate-select:focus, .sate-textarea:focus {
+  outline: none; border-color: var(--sate-primary);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, .12);
+}
+.sate-input::placeholder { color: var(--sate-faint); }
+.sate-input:disabled { background: var(--sate-muted-surface); color: var(--sate-faint); cursor: not-allowed; }
+.sate-label { display: block; font-size: 13px; color: var(--sate-muted); margin: var(--sate-space-md) 0 5px; }
+.sate-help { font-size: 13px; color: var(--sate-subtle); margin-top: 4px; }
+.sate-error { font-size: 13px; color: var(--sate-danger-text); margin-top: 4px; }
+
+/* Checkbox/radio chips — the app's multi-select idiom */
+.sate-choices { display: flex; flex-wrap: wrap; gap: var(--sate-space-sm); }
+.sate-choices label {
+  display: flex; align-items: center; gap: 7px; margin: 0;
+  background: var(--sate-raised); border: 1px solid var(--sate-border-strong);
+  padding: 7px 12px; border-radius: var(--sate-radius);
+  font-size: 13px; color: var(--sate-text-2); cursor: pointer;
+}
+.sate-choices label:hover { background: var(--sate-sunken); }
+.sate-choices input { width: auto; }
+
+/* ==========================================================================
+   Table
+   ========================================================================== */
+.sate-table { width: 100%; border-collapse: collapse; }
+.sate-table th {
+  text-align: left; color: var(--sate-subtle); font-weight: 500; font-size: 11px;
+  text-transform: uppercase; letter-spacing: .06em; white-space: nowrap;
+  padding: 9px 10px; border-bottom: 1px solid var(--sate-border);
+}
+.sate-table td { padding: 11px 10px; border-bottom: 1px solid var(--sate-border); vertical-align: middle; }
+.sate-table tr:last-child td { border-bottom: 0; }
+.sate-table--striped tbody tr:nth-child(even) { background: var(--sate-sunken); }
+/* Wide tables scroll inside their own box; the page must never scroll sideways. */
+.sate-tablewrap { overflow-x: auto; }
+
+/* ==========================================================================
+   Pills / badges
+   ========================================================================== */
+.sate-pill {
+  display: inline-block; padding: 2px 9px; border-radius: var(--sate-radius-full);
+  font-size: 12px; border: 1px solid var(--sate-border);
+  background: var(--sate-sunken); color: var(--sate-text-2);
+}
+.sate-pill--info    { color: var(--sate-primary-hover); border-color: var(--sate-primary-border); background: var(--sate-primary-soft); }
+.sate-pill--success { color: var(--sate-success-text); border-color: var(--sate-success-border); background: var(--sate-success-soft); }
+.sate-pill--warning { color: var(--sate-warning-text); border-color: var(--sate-warning-border); background: var(--sate-warning-soft); }
+.sate-pill--danger  { color: var(--sate-danger-text);  border-color: var(--sate-danger-border);  background: var(--sate-danger-soft); }
+
+/* ==========================================================================
+   Banner / inline messages
+   ========================================================================== */
+.sate-banner {
+  border-radius: var(--sate-radius); padding: 13px 16px; margin-bottom: 16px;
+  border: 1px solid var(--sate-border); border-left-width: 3px;
+  background: var(--sate-raised); box-shadow: var(--sate-shadow-sm);
+}
+.sate-banner--info    { background: var(--sate-primary-soft); border-color: var(--sate-primary-border); border-left-color: var(--sate-primary); }
+.sate-banner--success { background: var(--sate-success-soft); border-color: var(--sate-success-border); border-left-color: var(--sate-success); }
+.sate-banner--warning { background: var(--sate-warning-soft); border-color: var(--sate-warning-border); border-left-color: var(--sate-warning); }
+.sate-banner--danger  { background: var(--sate-danger-soft);  border-color: var(--sate-danger-border);  border-left-color: var(--sate-danger); }
+
+/* ==========================================================================
+   Annotations — the clinical vocabulary.
+   Colour IS the meaning here. Use .sate-ann--<type> only for that type.
+   ========================================================================== */
+.sate-ann { border-radius: var(--sate-radius-sm); padding: 0 2px; }
+.sate-ann--pause            { background: var(--sate-pause-bg); box-shadow: inset 0 -2px 0 var(--sate-pause); }
+.sate-ann--filler           { background: var(--sate-filler-bg); box-shadow: inset 0 -2px 0 var(--sate-filler); }
+.sate-ann--repetition       { background: var(--sate-repetition-bg); box-shadow: inset 0 -2px 0 var(--sate-repetition); }
+.sate-ann--mispronunciation { background: var(--sate-mispronunciation-bg); box-shadow: inset 0 -2px 0 var(--sate-mispronunciation); }
+.sate-ann--morpheme         { background: var(--sate-morpheme-bg); box-shadow: inset 0 -2px 0 var(--sate-morpheme); }
+.sate-ann--revision         { background: var(--sate-revision-bg); box-shadow: inset 0 -2px 0 var(--sate-revision); }
+.sate-ann--utterance-error  { background: var(--sate-utterance-error-bg); box-shadow: inset 0 -2px 0 var(--sate-utterance-error); }
+.sate-ann--morpheme-omission{ background: var(--sate-morpheme-omission-bg); box-shadow: inset 0 -2px 0 var(--sate-morpheme-omission); }
+
+/* Legend swatch. Always pair a swatch with its label — colour alone is not a
+   label for anyone with a colour-vision deficiency. */
+.sate-swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; }
+
+/* ==========================================================================
+   Code
+   ========================================================================== */
+.sate-pre {
+  background: var(--sate-sunken); border: 1px solid var(--sate-border);
+  border-radius: var(--sate-radius); padding: 14px; overflow-x: auto;
+  font-size: 13px; line-height: 1.55; color: var(--sate-text-2); margin: 10px 0;
+}
+.sate-code {
+  background: var(--sate-sunken); border: 1px solid var(--sate-border);
+  padding: 1px 6px; border-radius: 5px; font-size: .92em; color: var(--sate-text-2);
+}
+
+/* ==========================================================================
+   Toast
+   ========================================================================== */
+.sate-toast {
+  position: fixed; right: 20px; bottom: 20px; z-index: 50; max-width: 380px;
+  background: var(--sate-raised); border: 1px solid var(--sate-border);
+  border-left: 3px solid var(--sate-primary); border-radius: var(--sate-radius);
+  box-shadow: var(--sate-shadow-lg); padding: 12px 16px;
+}
+.sate-toast--danger { border-left-color: var(--sate-danger); }
+.sate-toast--success { border-left-color: var(--sate-success); }
+
+/* ==========================================================================
+   Utilities — a deliberately tiny set. Anything more, use Tailwind.
+   ========================================================================== */
+.sate-muted { color: var(--sate-muted); }
+.sate-subtle { color: var(--sate-subtle); }
+.sate-small { font-size: 13px; }
+.sate-h1 { font-size: 22px; font-weight: 600; letter-spacing: -.015em; margin: 0; }
+.sate-h2 { font-size: 15px; font-weight: 600; color: var(--sate-text-2); margin: 26px 0 10px; }
+.sate-lead { color: var(--sate-muted); margin: 4px 0 20px; }
+.sate-hidden { display: none !important; }
+
+@media (max-width: 900px) {
+  .sate-main { padding: 20px 16px 56px; }
+  .sate-tabs { overflow-x: auto; }
+}

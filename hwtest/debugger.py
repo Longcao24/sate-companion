@@ -269,7 +269,8 @@ class Debugger:
         f = section("2 · TEST RECORDING")
         add(f, "▶  Run automatic tests", lambda: self._run_tests_inproc(self.AUTO, sim=False),
             primary=True, wide=True)
-        add(f, "Live pipeline view (recorder → AI → done)…", self._open_pipeline, wide=True)
+        add(f, "Live pipeline view (recorder → AI → done · Q simulates)…",
+            self._open_pipeline, wide=True)
 
         # Every scenario the harness ships, individually selectable — so a bench run
         # can be narrowed to the one case you are chasing instead of the whole suite.
@@ -794,29 +795,57 @@ class Debugger:
         if self.device_id:
             return self.device_id
         srv = self.cfg.get("server", {}) or {}
-        if srv.get("device_id"):
-            self.device_id = str(srv["device_id"])
-            self.serial = self.serial or str(srv.get("device_serial", ""))
-            self.device_key = str(srv.get("device_key") or ("key-" + self.device_id))
+        pinned_id = str(srv.get("device_id") or "")
+        pinned_serial = str(srv.get("device_serial") or "")
+
+        # The account list is the SOURCE OF TRUTH; config.toml is only a hint.
+        #
+        # This used to return the config pin unconditionally, before ever looking
+        # at the account - so a config.toml left pointing at a board that is no
+        # longer claimed (a swapped bench unit) silently targeted a device that
+        # does not exist. Every remote record/reboot 404s, `sate ci` fails 5/7
+        # scenarios with "device never reported record start", and the panel
+        # cheerfully displays the wrong serial the whole time. Verify the pin
+        # against the account and fall back when it does not hold up.
+        claimed = []
+        if self.access_token:
+            try:
+                from hwtest import sate_account as A
+                claimed = [d for d in A.list_devices(self.access_token)
+                           if str(d.get("serial", "")).upper() not in self.PROTECTED_SERIALS]
+            except Exception:  # noqa: BLE001
+                claimed = []
+
+        def _adopt(d):
+            self.device_id = str(d.get("id") or d.get("device_id") or "")
+            self.serial = str(d.get("serial") or d.get("device_serial") or d.get("name") or "")
+            self.device_key = "key-" + self.device_id if self.device_id else ""
             return self.device_id
-        if not self.access_token:
+
+        if claimed:
+            for d in claimed:                       # pin still valid -> keep it
+                if pinned_id and str(d.get("id") or d.get("device_id") or "") == pinned_id:
+                    return _adopt(d)
+                if pinned_serial and str(d.get("serial", "")).upper() == pinned_serial.upper():
+                    return _adopt(d)
+            if pinned_id or pinned_serial:
+                self.q.put(("log", f"  config.toml points at {pinned_serial or pinned_id}, which "
+                            f"is NOT claimed to this account — ignoring it.", "bad"))
+            if len(claimed) == 1:
+                did = _adopt(claimed[0])
+                self.q.put(("log", f"  using the account's only claimed device: {self.serial}", "ok"))
+                return did
+            self.q.put(("log", f"  {len(claimed)} devices claimed — set [server] device_serial "
+                        f"in config.toml to pick one: "
+                        + ", ".join(str(d.get('serial', '?')) for d in claimed), "bad"))
             return ""
-        try:
-            from hwtest import sate_account as A
-            if self.serial:
-                dk, did = A.device_key_for(self.access_token, self.serial)
-                if did:
-                    self.device_key, self.device_id = dk, did
-                    return self.device_id
-            devs = [d for d in A.list_devices(self.access_token)
-                    if str(d.get("serial", "")).upper() not in self.PROTECTED_SERIALS]
-            if len(devs) == 1:
-                d = devs[0]
-                self.device_id = str(d.get("id") or d.get("device_id") or "")
-                self.serial = str(d.get("serial") or d.get("device_serial") or d.get("name") or "")
-                self.device_key = "key-" + self.device_id if self.device_id else ""
-        except Exception:  # noqa: BLE001
-            pass
+
+        # No account list (offline / not signed in): fall back to the pin so the
+        # tool still works on a bench with no network.
+        if pinned_id:
+            self.device_id = pinned_id
+            self.serial = self.serial or pinned_serial
+            self.device_key = str(srv.get("device_key") or ("key-" + self.device_id))
         return self.device_id
 
     def _remote(self, op):

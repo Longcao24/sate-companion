@@ -11,12 +11,19 @@
 // docs site, service monitor, and cf-processor Worker are intentionally NOT here.
 // Monitor those from an external prober (see status/README.md). Verify/adjust these
 // URLs for your project (Supabase ref, ngrok host).
+import { renderPipelinePage } from './pipeline.js';
+
 const SUPA = 'https://zlgdpivcbmaodgokkdvz.supabase.co';
 const TARGETS = [
   { name: 'device-api (edge fn)', url: SUPA.replace('.supabase.co', '.functions.supabase.co') + '/device-api/firmware/latest', expect: [200, 401, 404], reachableIsUp: true },
   { name: 'Supabase API', url: SUPA + '/rest/v1/', expect: [200, 401, 404], reachableIsUp: true },
   { name: 'Storage (firmware)', url: SUPA + '/storage/v1/object/public/firmware/', expect: [200, 400, 404], reachableIsUp: true },
-  { name: 'AI /process', url: 'https://sate-v1-5.ngrok.io/', expect: [200, 404, 502], reachableIsUp: true },
+  // ngrok-tunneled — probed at most once per DAY to conserve ngrok request quota.
+  // Between real probes the last recorded status is carried forward (no network hit),
+  // so the 90-day history stays continuous. See the throttle in runChecks().
+  // Trade-off: an AI outage can go unnoticed for up to 24h here (a carried-forward
+  // `down` still alerts, but a fresh outage isn't seen until the next real probe).
+  { name: 'AI /process', url: 'https://sate-v1-5.ngrok.io/', expect: [200, 404, 502], reachableIsUp: true, minIntervalSec: 24 * 3600 },
   { name: 'Norms API (edge fn)', url: SUPA + '/functions/v1/childes-norms', expect: [200, 400, 401, 405], reachableIsUp: true },
   { name: 'Norms data (CHILDES)', url: 'https://childes-metrics.ngrok.app/', expect: [200, 404, 405, 502], reachableIsUp: true },
   { name: 'Web app (clinician)', url: 'https://sate-hardwave.vercel.app/', expect: [200, 401, 404], reachableIsUp: true },
@@ -66,6 +73,20 @@ async function handle(req, env) {
     if (url.pathname === '/api/history') {
       return Response.json(await history(env));
     }
+    // Live pipeline map. Static HTML only — it authenticates the VIEWER with
+    // their own SATE account in the browser and reads Supabase/device-api
+    // directly with that JWT, so this Worker holds no credentials and serves no
+    // device data itself. Do not add a server-side data route here without
+    // re-reading the auth note at the top of src/pipeline.js.
+    if (url.pathname === '/pipeline') {
+      return new Response(renderPipelinePage(), {
+        headers: {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'no-store',
+          'x-robots-tag': 'noindex, nofollow',
+        },
+      });
+    }
     return new Response(await renderPage(env), {
       headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
     });
@@ -76,6 +97,26 @@ async function runChecks(env) {
   const stmts = [];
   const results = [];
   for (const t of TARGETS) {
+    // Rate-limited target (e.g. ngrok tunnels): if the last real probe was within
+    // minIntervalSec, skip the network call and carry the last status forward so the
+    // history bar stays continuous without spending an upstream request.
+    // `carried = 0` is LOAD-BEARING: the carried row we write below is itself the
+    // newest row for this component, so an unfiltered "last row" lookup always sees a
+    // probe 5 minutes old and the target is never re-probed again — ever. (That is
+    // exactly what happened 2026-08-04 → 2026-08-11: one live probe, then 2,314
+    // identical copies.) Only a REAL probe may reset the throttle window.
+    if (t.minIntervalSec) {
+      const last = await env.DB.prepare(
+        'SELECT ts, status, code, latency_ms FROM checks WHERE component = ? AND carried = 0 ORDER BY ts DESC LIMIT 1'
+      ).bind(t.name).first();
+      if (last && (now - last.ts) < t.minIntervalSec) {
+        results.push({ name: t.name, status: last.status, code: last.code, latency: last.latency_ms, carried: true });
+        stmts.push(env.DB.prepare(
+          'INSERT INTO checks (component, ts, status, code, latency_ms, carried) VALUES (?,?,?,?,?,1)'
+        ).bind(t.name, now, last.status, last.code, last.latency_ms));
+        continue;
+      }
+    }
     let status = 'down', code = 0;
     const start = Date.now();
     try {
@@ -97,7 +138,7 @@ async function runChecks(env) {
     const latency = Date.now() - start;
     results.push({ name: t.name, status, code, latency });
     stmts.push(env.DB.prepare(
-      'INSERT INTO checks (component, ts, status, code, latency_ms) VALUES (?,?,?,?,?)'
+      'INSERT INTO checks (component, ts, status, code, latency_ms, carried) VALUES (?,?,?,?,?,0)'
     ).bind(t.name, now, status, code, latency));
   }
   stmts.push(env.DB.prepare('DELETE FROM checks WHERE ts < ?').bind(now - (WINDOW_DAYS + 10) * DAY));

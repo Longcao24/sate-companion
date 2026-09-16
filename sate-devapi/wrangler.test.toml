@@ -1,0 +1,43 @@
+# Test configuration for `wrangler dev --local`, used by test/run.mjs.
+#
+# Same Worker, minus the pieces that cannot run on a laptop:
+#   - no [[containers]] / Durable Object: the container needs Docker and a GPU, and the
+#     test suite stands in for it by driving /internal/* directly. That is not a shortcut —
+#     /internal IS the container's whole contract, so exercising it tests exactly what the
+#     container would do, deterministically and without a transcription box.
+#   - no [[send_email]]: sendEmail() no-ops when the binding is absent.
+#   - no custom domains or cron.
+#
+# Secrets are plain vars here. These values never leave the local machine.
+
+name = "sate-devapi-test"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "sate-devapi-test"
+database_id = "00000000-0000-4000-8000-000000000000"
+
+[[r2_buckets]]
+binding = "AUDIO"
+bucket_name = "sate-devapi-audio-test"
+
+[vars]
+PORTAL_HOST = "localhost"
+API_HOST = "localhost"
+EMAIL_FROM = "noreply@example.test"
+EMAIL_FROM_NAME = "SATE Developer Platform (test)"
+OPERATOR_EMAIL = "operator@example.test"
+
+# Deliberately small so the oversize path is testable without pushing 50 MB through a pipe.
+MAX_UPLOAD_MB = "1"
+JOB_RETENTION_DAYS = "30"
+AUDIO_RETENTION_HOURS = "0"
+MAX_ATTEMPTS = "2"
+STUCK_MINUTES = "45"
+BOOTSTRAP_ADMIN_EMAIL = "admin@example.test"
+
+INTERNAL_SECRET = "test-internal-secret"
+TICK_SECRET = "test-tick-secret"

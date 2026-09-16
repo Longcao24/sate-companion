@@ -1,0 +1,54 @@
+Pass	s-7fd914ed: queued → processing → done in 14s; rows=1 stored=True recording=e325c7c6-33ef-4bd0-99c1-bb28d72dfd40 no_text=False
+Pass	status=done attempts=2 ai=2 finalize=1
+Pass	status=error attempts=3 ai=3 audio_kept=True err=transient, gave up after 3 attempts: AI
+Pass	status=error attempts=1 ai=1 requeues=0 (no blind retry)
+Pass	status=done attempts=2 finalize=1 (one result, no duplicate)
+Pass	status=error attempts=3 finalize=0 — no Completed session created || DEFECT: malformed JSON consumed 3 attempts. processor.py's own comment classifies a 'malformed AI response' as Permanent, but r.json() is parsed OUTSIDE call_ai's try block, so it falls to loop()'s generic `except Exception` and is retried as transient.
+Pass	missing-segments → error in 1 attempt (rejected, not stored); empty-text → no_text=True, recording=None
+Pass	replayed the identical take: HTTP 200 id=s-7fd914ed idempotent=True; rows for session 92 = 1
+Pass	lost-response replay: finalize called 2x, recordings created=1, terminal=done; duplicate rejected as already_linked=True || DEFECT: a finalize whose RESPONSE was lost leaves the row already finalized, yet the worker still calls requeue_session() — the job returns to `queued` and is processed again (a second paid AI call and a second recordings-bucket copy). No duplicate reaches the user because finalize-session's recording_id guard catches it, but the terminal state IS regressed. Whether requeue_session() itself refuses to move a `done` row could not be verified: the async_processor_state_machine migration SQL is not checked into the repo.
+Pass	503 then recovery → status=done attempts=2 audio_kept=True one result
+Fail	status=error (no ghost Completed) but rec_upload=3 orphan object(s) left in the recordings bucket || DEFECT: the audio was copied into the recordings bucket 3x — once per retry, each under a NEW timestamped key (3 distinct paths). When the DB write keeps failing, every attempt leaves an orphaned clinical audio object behind and nothing removes them. BE-011 requires the orphan object to be reconciled or safely removed.
+Fail	retry on a non-error session → HTTP 409 ({'error': 'Only a failed session can be retried'}); after forcing error → retry HTTP 200, status now queued, attempts=0 || DEFECT: retrySession() resets attempts to 0 and nulls process_error, so the previous failure is no longer traceable on the row — BE-012 requires 'previous failure remains traceable' / an audit record of the retry.
+Recorded	server half exercised via the firmware's own upload route: one session, one object, terminal=done. Recording on the device, Web review and PDF export are not automatable here.
+Pass	serial=SATE-443EAC n=92 bytes=242732==242732 rate=16000 created_at=2026-09-07T02:59:09.529736+00:00 (UTC, 14s skew)
+Blocked	the RECORD button is a physical gesture (double-click to start, 3 s hold to stop); sate ci drives the device by REMOTE command and never touches the button
+Blocked	needs the recorder capturing for 30 min
+Blocked	needs the recorder capturing for 45 min
+Blocked	needs a take at the ~62-min firmware ceiling; RQ-07 also still undefined
+Blocked	needs the recorder's direct Wi-Fi chunked upload and a real AP interruption
+Blocked	needs the recorder off-network
+Blocked	needs the recorder + AP control
+Blocked	needs the recorder + AP control
+Blocked	needs the recorder's chunked upload mid-flight
+Blocked	needs the recorder
+Pass	POST /sessions/:id/retry is refused unless status=='error' → HTTP 409. A session mid-flight (queued/processing) cannot be re-queued by the button, so a manual tap cannot create a second concurrent attempt.
+Blocked	needs five real takes on the device
+Blocked	needs the device
+Blocked	needs the device off-network
+Blocked	needs several real queued takes plus a forced AI failure on one of them
+Blocked	needs a device power-cycle
+Blocked	needs the device
+Blocked	needs a physical power cut
+Blocked	needs a drained battery on the board
+Blocked	needs a nearly full SD card
+Blocked	needs a nearly full SD card
+Blocked	needs precisely timed power loss
+Blocked	needs the device
+Pass	unauthenticated=401; anon-key-only=401; GET=404; POST=404; DELETE=404; bogus=404; PostgREST=200; anon PostgREST rows=0
+Pass	before logout API=200; logout→HTTP 204; after logout API=401, /auth/v1/user=403
+Fail	caller isAdmin=True; /admin/status=200 /admin/users=200 /admin/devices=200; POST /firmware=400 || DEFECT: POST /api/firmware is not authorization-gated. The probe reached the handler's input validation (HTTP 400, {'error': 'A version is required (e.g. 1.1.0)'}) rather than an authz check, and in source the route is registered ABOVE the `/admin` block while publishFirmware() never calls isAdmin() — so any authenticated account can publish a fleet-wide OTA image. (This run's caller IS an admin, so the 403 was not expected for them; the defect is proven by the missing gate in code plus the handler being reached. Confirming it empirically needs a second, non-admin account.)
+Pass	audio route → HTTP 302 redirect to a signed URL expiring in 3599s (1 h policy); tampered signature → HTTP 400
+Fail	DELETE → HTTP 204; session row gone=True; device-sessions object gone=True; derived recording survived=True; audit table found=False || DEFECT: deleting the session did NOT delete the recording it produced. deleteSession() removes the sate_device_sessions row and its object in the device-sessions bucket, but the derived `recordings` row (e325c7c6-33ef-4bd0-99c1-bb28d72dfd40) and its copy of the audio in the recordings bucket (bc324864-51a6-4328-be68-d7b0dadaabce/1788749956355_device_SATE-443EAC_s92.wav) both survive. The take still appears in the web app and the audio is still downloadable, so 'delete' does not delete the clinical data — the opposite of what a retention/erasure request needs. ; no audit-trail table is reachable (sate_audit_log=404, audit_log=404, sate_events=404, session_audit=404) — deletions and retries leave no auditable record, which SEC-007 and BE-012 both require.
+Fail	edit saved=True updated_at bumped=False; server-side version columns=none; history tables found=False || DEFECT: `recordings.updated_at` did not change when the transcript was rewritten — the column exists but nothing maintains it, so even 'when was this last edited' is not answerable from the row. ; the edit overwrites `recordings.transcript` in place. There is no version column and no history table (recording_versions=404, transcript_versions=404, recording_history=404, transcript_history=404). Undo/redo lives only in the browser's localStorage (`historyService.ts`, key `transcript_history_<id>`, capped at 50 states), so history is per-browser, invisible to anyone else, and lost on cache clear, a different device, or another user opening the same recording. WEB-005 asks for versioning of a saved transcript; the server keeps exactly one version.
+Fail	A→HTTP 200, B→HTTP 200 against the same pre-image; winner='writer B'; conflict detected=False; malformed save→HTTP 400 || DEFECT: writer B's save (HTTP 200) silently overwrote writer A's — final text is 'writer B'. Saves go straight to PostgREST with no version check, no If-Match/ETag and no updated_at precondition, so two clinicians editing the same transcript lose one set of edits with no warning and no way to recover it (there is no server-side history to recover from).
+Pass	/sessions/raw (the pre-chunking upload path, no `total`, no `flags`) is still accepted by device-api v21+ → HTTP 200. Legacy firmware keeps uploading.
+Pass	the upload API carries NO client timestamp — created_at is the database's own UTC default, so a wrong recorder clock cannot skew stored time (observed skew 14s). DST is not representable: storage is UTC throughout.
+Pass	0.4s floor: AI calls=0 → finalized no_text=True, no retry loop
+Pass	AI answered with no words → status=done no_text=True recording=None (no empty report)
+Blocked	needs real multi-speaker audio captured on the device and a human judging the transcript
+Blocked	needs battery/thermal telemetry from a running board
+Blocked	needs the recorder's own detection on a MAC-allowlist / no-egress AP
+Blocked	needs the recorder + two APs
+Blocked	needs the recorder + a controllable AP
+Blocked	needs the recorder + a captive portal

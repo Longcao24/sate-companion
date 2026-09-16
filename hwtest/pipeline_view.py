@@ -24,7 +24,14 @@ The tester sets the record duration ("45", "1:30", "5m"/"5p"); the test records
 exactly that long, and when the row lands the actual audio length
 ((bytes-44)/32000 for 16-kHz mono S16LE) is checked against the target.
 
-Standalone: `python3 pipeline_view.py` / `sate pipeline`. From the Debugger:
+Press **Q** to run the whole thing as a SIMULATION — no device, no server, no
+network (`hwtest/pipeline_sim.py`). It feeds this view the same event stream the
+poll thread does, so every stage, timing and byte count is rendered by the real
+code path; only the data is synthetic. Esc aborts it. That is the one case where
+the map lights up without real audio, and it says so on screen the whole time.
+
+Standalone: `python3 pipeline_view.py` / `sate pipeline` (add `--sim` to open with
+no config/login and go straight into the simulation). From the Debugger:
 open_pipeline() (pre-authenticated).
 """
 from __future__ import annotations
@@ -35,6 +42,7 @@ import time
 import tkinter as tk
 
 from hwtest import pipeline as P
+from hwtest import pipeline_sim as SIM
 
 # ---- palette (debugger.py + the architecture diagram) ----
 BG = "#eef1f5"
@@ -76,7 +84,8 @@ class PipelineView:
     DONE_BANNER_S = 12.0
 
     def __init__(self, root: tk.Misc, token: str, serial: str, device_id: str,
-                 base_url: str, anon_key: str, *, own_root: bool = False):
+                 base_url: str, anon_key: str, *, own_root: bool = False,
+                 offline: bool = False):
         self.token, self.serial = token, serial
         self.device_id, self.base_url, self.anon = device_id, base_url, anon_key
         self.q: "queue.Queue[tuple]" = queue.Queue()
@@ -100,6 +109,9 @@ class PipelineView:
         self._baseline = None             # newest row created-ts before the take
         self._last_done = None            # (SessionState, wall) — brief banner
         self._target_s = None             # tester-set duration for this test
+        self.offline = offline            # no server at all (sim-only window)
+        self.simulating = False           # Q — offline replay of the whole journey
+        self._sim_stop = None             # threading.Event, set by Esc / close
 
         w = root if own_root else tk.Toplevel(root)
         self.win = w
@@ -157,10 +169,19 @@ class PipelineView:
                  highlightcolor=ACCENT).pack(side="left")
         tk.Label(bar, text='("45" · "1:30" · "5m"/"5p") — the recorder records exactly this long',
                  bg=BG, fg=INK2, font=("Menlo", 9)).pack(side="left", padx=(6, 0))
-        tk.Label(bar, text="server rows + tier health · 2 s", bg=BG, fg=INK2,
-                 font=("Menlo", 9)).pack(side="right")
+        tk.Label(bar, text="Q = simulate the whole pipeline (offline) · Esc stops it",
+                 bg=BG, fg=INK2, font=("Menlo", 9)).pack(side="right")
 
-        threading.Thread(target=self._poll_loop, daemon=True).start()
+        # Q anywhere in the window. The binding sits on the toplevel, so it also
+        # fires while the duration Entry has focus — skip it there, or typing in
+        # the box would launch a run.
+        for seq in ("<KeyPress-q>", "<KeyPress-Q>"):
+            w.bind(seq, self._on_q)
+        w.bind("<Escape>", lambda e: self._sim_abort())
+        w.focus_set()
+
+        if not offline:
+            threading.Thread(target=self._poll_loop, daemon=True).start()
         self._tick()
 
     # ================================================================ the map
@@ -268,10 +289,20 @@ class PipelineView:
         cv.create_text(20, CH - 12, anchor="w", fill=INK2, font=("Menlo", 8),
                        text="corner dot = tier health, probed live · green up · amber degraded · red down")
 
+        # simulation badge — empty unless Q is running; the map must never light
+        # up on synthetic data without saying so.
+        self.sim_badge = cv.create_text(CW - 20, CH - 12, anchor="e", text="",
+                                        fill=WARNC, font=("Menlo", 9, "bold"))
+
     # ================================================================ data
     def _poll_loop(self):
         n = 0
         while not self._closed:
+            if self.simulating:
+                # the simulation owns the event stream — a real snapshot landing
+                # mid-run would fight it for the same state machine
+                time.sleep(0.3)
+                continue
             try:
                 snap = P.snapshot(self.token, self.serial)
                 self.q.put(("snap", snap))
@@ -363,6 +394,92 @@ class PipelineView:
             finally:
                 self.q.put(("test_done", None))
         threading.Thread(target=work, daemon=True).start()
+
+    # =========================================================== simulation (Q)
+    def _on_q(self, ev=None):
+        """Q — but not while the tester is typing in the duration box."""
+        if isinstance(self.win.focus_get(), tk.Entry):
+            return
+        self._sim_start()
+
+    def _sim_start(self):
+        if self.simulating or self.testing:
+            return
+        try:
+            dur = self.parse_duration(self.dur_var.get())
+        except Exception:  # noqa: BLE001
+            self._say('bad duration — use "45", "1:30" or "5m"')
+            return
+        if not 3 <= dur <= 3600:
+            self._say("duration must be 3 s … 60 min")
+            return
+        # never paint over REAL audio: the sim pauses polling, so starting it now
+        # would blind the tester to the take actually moving through the system
+        if self.snap and (self.snap.device_state in ("recording", "uploading") or self.snap.active):
+            self._say("a real take is in flight — Q is disabled until it finishes", 5.0)
+            return
+
+        # start from a clean slate: any half-finished REAL take state would make
+        # the simulated row look like it belongs to it
+        self._reset_flow_state()
+        try:
+            while True:
+                self.q.get_nowait()
+        except queue.Empty:
+            pass
+
+        self.simulating = True
+        self._sim_stop = threading.Event()
+        self._target_s = dur
+        self._test_enabled = False
+        self.test_btn.config(bg="#9aa4b2", cursor="arrow", text="▶  simulation running — Esc to stop")
+        self.dev_lbl.config(text="SIMULATION · no device, no server", fg=WARNC)
+        self.cv.itemconfigure(self.sim_badge, text="SIMULATION — synthetic data")
+
+        prof = SIM.SimProfile(take_seconds=dur, serial=self.serial or "SIM-RECORDER")
+        stop = self._sim_stop
+
+        def work():
+            try:
+                for kind, payload in SIM.stream(prof, stop):
+                    if self._closed or stop.is_set():
+                        break
+                    self.q.put((kind, payload))
+            except Exception as e:  # noqa: BLE001
+                self.q.put(("err", f"simulation: {e}"))
+            finally:
+                self.q.put(("sim_done", None))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _sim_abort(self):
+        if self.simulating and self._sim_stop:
+            self._sim_stop.set()
+
+    def _reset_flow_state(self):
+        self.snap = None
+        self.upprog = None
+        self._up_hist = []
+        self._rec_started = None
+        self._expect_new = False
+        self._expect_started = 0.0
+        self._gap_started = None
+        self._baseline = None
+        self._last_done = None
+        self._target_s = None
+        self._poll_err = None
+
+    def _sim_finish(self):
+        self.simulating = False
+        self._sim_stop = None
+        self._reset_flow_state()
+        self._test_enabled = True
+        self.test_btn.config(bg=ACCENT, cursor="hand2", text="▶  Run pipeline test")
+        self.cv.itemconfigure(self.sim_badge, text="")
+        self.dev_lbl.config(text=f"{self.serial} · …", fg=INK2)
+        # the simulated tier health was synthetic: drop it and let the real probe
+        # repaint the dots rather than leave green behind
+        self.infra = {}
+        self._apply_infra()
 
     # ================================================================ state
     def _flow(self):
@@ -564,7 +681,10 @@ class PipelineView:
                     self.snap = payload
                     self._poll_err = None
                     self._snap_at = time.time()
-                    self.dev_lbl.config(text=f"{self.serial} · {payload.device_state}")
+                    self.dev_lbl.config(
+                        text=(f"SIMULATION · {payload.device_state}" if self.simulating
+                              else f"{self.serial} · {payload.device_state}"),
+                        fg=(WARNC if self.simulating else INK2))
                     self._apply_history(payload)
                 elif kind == "infra":
                     self.infra = payload
@@ -577,6 +697,10 @@ class PipelineView:
                     self.testing = False
                     self._test_enabled = True
                     self.test_btn.config(bg=ACCENT, cursor="hand2", text="▶  Run pipeline test")
+                elif kind == "simphase":
+                    self.cv.itemconfigure(self.sim_badge, text=str(payload))
+                elif kind == "sim_done":
+                    self._sim_finish()
         except queue.Empty:
             pass
 
@@ -644,6 +768,8 @@ class PipelineView:
 
     def _close(self):
         self._closed = True
+        if self._sim_stop:
+            self._sim_stop.set()      # don't leave the sim thread sleeping on a dead window
         self.win.destroy()
 
 
@@ -653,10 +779,20 @@ def open_pipeline(root, *, token, serial, device_id, base_url, anon_key):
 
 
 def main() -> int:
+    import sys
     import tomllib
     from pathlib import Path
 
     from hwtest import sate_account as A
+
+    if "--sim" in sys.argv:
+        # no config, no login, no network: the map opens and simulates itself.
+        root = tk.Tk()
+        v = PipelineView(root, "", "SIM-RECORDER", "", "", "", own_root=True, offline=True)
+        root.after(400, v._sim_start)
+        root.mainloop()
+        return 0
+
     cfgp = Path(__file__).resolve().parent / "config.toml"
     cfg = tomllib.loads(cfgp.read_text()) if cfgp.exists() else {}
     acc = cfg.get("account", {})

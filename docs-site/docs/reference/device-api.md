@@ -13,6 +13,13 @@ right handler internally.
 
 <div class="badge-row"><span class="sate-badge">Device API</span><span class="sate-badge">device + app + admin</span><span class="sate-badge">3 caller types</span><span class="sate-badge">audio, sessions, firmware</span></div>
 
+:::tip[Building your own application on SATE?]
+This page describes the **internal** API that SATE's own recorders and apps use. If you want
+to send audio and get a transcript and speech report back from your own product, you want the
+**[Developer API](./developer-api.md)** — public, API-key authenticated, with a self-service
+portal at <https://developers-sate.long-cao.dev>.
+:::
+
 ## What it does
 
 The API is responsible for the parts of the system that need to be shared and durable:

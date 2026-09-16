@@ -27,6 +27,11 @@ routes, columns, and constants. They describe what is actually built and running
 | [07-runbook.md](07-runbook.md) | Build / flash / deploy commands, firmware version history, publishing an OTA release, `err-get-1` recipe, `resync_all`, go-live checklist, troubleshooting |
 | [08-plaud.md](08-plaud.md) | Optional Plaud recorder integration: device-lock safety, where it plugs in, token-off-device auth, sync flow, flag markers |
 | [09-pendant.md](09-pendant.md) | SATE Pendant (XIAO nRF52840): where it plugs in, source map, BLE profile, **SoftDevice-corruption flash trap**, nap mode |
+| [10-manual-testing.md](10-manual-testing.md) | Hands-on test passes against a real board + backend |
+| [11-user-testing.md](11-user-testing.md) | Plain-language recorder test script for a non-technical tester |
+| [12-hardware.md](12-hardware.md) | **Deep hardware reference:** board + chips, pin map, build/flash, audio + SD layout, session metadata, **the full device↔server contract (claim/register, heartbeat, chunked upload, verify, OTA, BLE GATT)**, and the memory / RAM / core optimization playbook |
+| [13-system-test.md](13-system-test.md) | **Full system test, user-side.** All 88 cases (65 P0) from `SATE_Complete_English_Test_Cases.xlsx`, rewritten as steps a person can run with a recorder, a phone and a browser — each with a **server-side note** naming the actual table, route and constant to check, plus the known defects that will make specific cases fail |
+| [14-l816.md](14-l816.md) | **SATE L816 handheld recorder** (Android-only): the `55 AA` BLE protocol, the three-notify setup, the legacy length quirk, the four rules that make a transfer trustworthy, and why the ASC-VI codec pins this family to Android |
 
 ## System in one paragraph
 
@@ -139,7 +144,6 @@ Notes on what actually lives where:
 
 ## Related root docs
 
-- `hardware.md` — deep hardware reference + the memory / RAM / core optimization playbook.
 - `hardware-supabase.md` — the original device → Supabase → AI → `recordings` integration note.
 - `plaud-integration.md` — Plaud "Connect with Plaud" build steps + file map (see [08-plaud.md](08-plaud.md)).
 - `CLAUDE.md` — project rules & accumulated gotchas (Plaud device-lock safety, the one-shared-BleManager rule, build/verify commands, the async-AI redesign).

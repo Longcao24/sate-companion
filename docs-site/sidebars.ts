@@ -26,7 +26,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Reference',
       collapsed: false,
-      items: ['reference/device-api', 'reference/ble-protocol', 'reference/data-model', 'reference/cli'],
+      items: ['hardware', 'reference/device-api', 'reference/developer-api', 'reference/ble-protocol', 'reference/data-model', 'reference/cli'],
     },
     {
       type: 'category',

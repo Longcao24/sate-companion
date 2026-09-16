@@ -1,0 +1,124 @@
+{
+  "_comment": [
+    "Current test scope. Set 2026-07-29 on instruction: the mobile app and the pendant are",
+    "not being tested; the web app IS a main target.",
+    "",
+    "In focus:      SATE recorder · backend + AI pipeline · web app · PDF export · security",
+    "Out of focus:  mobile app (iOS/Android) · pendant / BLE accessory",
+    "",
+    "Scope was assigned from each case's Components field, not by category name, because the",
+    "categories cut across surfaces — e.g. SATE-SEC-003 sits under Security but its components",
+    "are 'SATE Web App; Mobile App', so the web half stays in and the app half drops out.",
+    "",
+    "Values:",
+    "  In scope            Run it as written.",
+    "  In scope (reduced)  Run it, but only the part that does not involve the app or pendant.",
+    "                      'reduced_note' says exactly what to drop.",
+    "  Deferred            Do not run. 'reason' says which surface put it out of scope.",
+    "",
+    "Read by build-test-workbook.py, gen-system-test.py and the test runner. Change it here",
+    "only, then regenerate all three.",
+    "",
+    "TO PUT THE APP BACK IN SCOPE: set every 'Deferred - mobile app' entry to 'In scope' and",
+    "clear the reduced notes. Nothing else needs editing."
+  ],
+
+  "focus": {
+    "in": ["SATE recorder firmware", "Backend, queue and AI pipeline", "Web app", "PDF export",
+           "Security and data isolation"],
+    "out": ["Mobile app (iOS / Android)", "Pendant / BLE accessory"]
+  },
+
+  "scope": {
+    "SATE-BLE-001": "Deferred - pendant / BLE",
+    "SATE-BLE-002": "Deferred - pendant / BLE",
+    "SATE-BLE-003": "Deferred - pendant / BLE",
+    "SATE-BLE-004": "Deferred - pendant / BLE",
+    "SATE-BLE-005": "Deferred - pendant / BLE",
+    "SATE-BLE-006": "Deferred - pendant / BLE",
+    "SATE-BLE-007": "Deferred - pendant / BLE",
+    "SATE-BLE-008": "Deferred - pendant / BLE",
+
+    "SATE-APP-001": "Deferred - mobile app",
+    "SATE-APP-002": "Deferred - mobile app",
+    "SATE-APP-003": "Deferred - mobile app",
+    "SATE-APP-004": "Deferred - mobile app",
+    "SATE-APP-005": "Deferred - mobile app",
+    "SATE-APP-006": "Deferred - mobile app",
+    "SATE-APP-007": "Deferred - mobile app",
+    "SATE-APP-008": "Deferred - mobile app",
+
+    "SATE-LONG-005": "Deferred - mobile app",
+    "SATE-SEC-004": "Deferred - mobile app",
+    "SATE-COMP-001": "Deferred - mobile app",
+    "SATE-COMP-005": "Deferred - mobile app",
+    "SATE-QUE-006": "Deferred - mobile app",
+
+    "SATE-E2E-006": "In scope (reduced)",
+    "SATE-NET-005": "In scope (reduced)",
+    "SATE-NET-006": "In scope (reduced)",
+    "SATE-NET-007": "In scope (reduced)",
+    "SATE-LONG-006": "In scope (reduced)",
+    "SATE-SEC-003": "In scope (reduced)",
+    "SATE-COMP-003": "In scope (reduced)",
+    "SATE-COMP-004": "In scope (reduced)",
+
+    "SATE-NET-004": "In scope",
+    "SATE-NET-008": "In scope",
+    "SATE-NET-009": "In scope",
+    "SATE-NET-010": "In scope",
+    "SATE-QUE-005": "In scope",
+    "SATE-LONG-004": "In scope"
+  },
+
+  "reduced_note": {
+    "SATE-E2E-006": "Repeat Stop / Save / Upload on the recorder only. Skip the app's Submit control.",
+    "SATE-NET-005": "Recorder idle or asleep when connectivity returns. Skip phone background / screen-lock.",
+    "SATE-NET-006": "Recorder's own network detection only. Skip the app's detection.",
+    "SATE-NET-007": "Recorder behind the captive portal only. Skip the app.",
+    "SATE-LONG-006": "Recorder battery, temperature, storage and backend processing time. Skip phone metrics.",
+    "SATE-SEC-003": "Web app logout and token invalidation only. Skip mobile app logout.",
+    "SATE-COMP-003": "Older recorder firmware against the current backend. Skip the older app build.",
+    "SATE-COMP-004": "Recorder clock and stored timestamps. Skip phone clock skew."
+  },
+
+  "run_note": {
+    "_comment": "Cases whose Components read 'SATE Recorder OR Mobile App'. Fully in scope — just run the recorder path.",
+    "SATE-NET-004": "Run the recorder's direct Wi-Fi upload path.",
+    "SATE-NET-008": "Run the recorder's direct Wi-Fi upload path.",
+    "SATE-NET-009": "Run the recorder's direct Wi-Fi upload path.",
+    "SATE-NET-010": "Use the recorder's retry, or the web app's Retry control.",
+    "SATE-QUE-005": "Restart the recorder, not the app.",
+    "SATE-LONG-004": "Run the recorder's direct Wi-Fi upload path."
+  },
+
+  "deferral_note": {
+    "SATE-QUE-006": "This case exists to prove the two delivery paths deduplicate. With the mobile app out of scope there is only one path in use, so the duplicate-session risk cannot materialise — but the gap it was written to catch (no database unique constraint behind the dedup probe) stays unproven. Run it before the app ships.",
+    "SATE-SEC-004": "Pending-session isolation across an account switch is purely mobile-app local storage.",
+    "SATE-COMP-001": "iOS / Android version matrix.",
+    "SATE-COMP-005": "Low-end phone performance.",
+    "SATE-LONG-005": "Phone lock and app backgrounding during a long recording. The recorder records standalone over Wi-Fi, so nothing here applies to the in-scope path."
+  },
+
+  "coverage_impact": {
+    "_comment": "Computed from the requirement links. Recheck after any scope change.",
+    "requirements_losing_all_coverage": [
+      {
+        "id": "RQ-22",
+        "topic": "Pending data during logout/account switch",
+        "definition_status": "Required",
+        "covered_only_by": ["SATE-APP-006", "SATE-APP-007", "SATE-APP-008", "SATE-SEC-004"],
+        "note": "Every case covering this requirement is a mobile-app case. Deferring the app leaves a REQUIRED requirement with zero test coverage. Acceptable only while the app is not shipping."
+      }
+    ],
+    "requirements_losing_most_coverage": [
+      {
+        "id": "RQ-19",
+        "topic": "Supported platform matrix",
+        "cases_before": 21,
+        "cases_after": 9,
+        "note": "Expected — most of the platform matrix is phone models and OS versions."
+      }
+    ]
+  }
+}

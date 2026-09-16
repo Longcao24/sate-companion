@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SATE Design System</title>
+<link rel="stylesheet" href="sate.css">
+<style>
+  /* Page furniture for this reference only — not part of the system. */
+  .swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(178px, 1fr)); gap: 12px; }
+  .sw-card { border: 1px solid var(--sate-border); border-radius: var(--sate-radius); overflow: hidden;
+             background: var(--sate-raised); box-shadow: var(--sate-shadow-sm); }
+  .sw-chip { height: 62px; }
+  .sw-meta { padding: 9px 11px; font-size: 12px; line-height: 1.45; }
+  .sw-meta b { display: block; font-weight: 600; }
+  .sw-meta code { font-size: 11px; color: var(--sate-subtle); }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .spec { font-size: 12px; color: var(--sate-subtle); margin-top: 6px; }
+  section { margin-bottom: 40px; }
+  h2.sec { font-size: 19px; font-weight: 600; color: var(--sate-text); letter-spacing: -.01em;
+           margin: 44px 0 4px; padding-top: 20px; border-top: 1px solid var(--sate-border); }
+  h2.sec + p { color: var(--sate-muted); margin: 0 0 18px; }
+  h3.sub { font-size: 13px; font-weight: 600; color: var(--sate-muted); text-transform: uppercase;
+           letter-spacing: .06em; margin: 24px 0 10px; }
+</style>
+</head>
+<body class="sate">
+
+<header class="sate-header">
+  <div class="sate-header__inner">
+    <div class="sate-wordmark">SATE<span>Design System v1.0.0</span></div>
+    <nav class="sate-tabs">
+      <button aria-current="true">Reference</button>
+      <button onclick="document.querySelector('#colour').scrollIntoView({behavior:'smooth'})">Colour</button>
+      <button onclick="document.querySelector('#components').scrollIntoView({behavior:'smooth'})">Components</button>
+      <button onclick="document.querySelector('#annotations').scrollIntoView({behavior:'smooth'})">Annotations</button>
+    </nav>
+    <button class="sate-btn sate-btn--secondary sate-btn--sm" onclick="toast()">Test a toast</button>
+  </div>
+</header>
+
+<main class="sate-main">
+
+  <h1 class="sate-h1">SATE Design System</h1>
+  <p class="sate-lead" style="max-width:640px">Every token and component, rendered. Tokens
+    were measured from what the clinical web app actually ships — not from its config files,
+    which disagree with it. See <code class="sate-code">README.md</code> for the audit.</p>
+
+  <div class="sate-banner sate-banner--info">
+    <strong>Using this in a new tool?</strong> Link <code class="sate-code">sate.css</code>
+    for plain HTML, or extend <code class="sate-code">tailwind.preset.js</code> for React.
+    Then run <code class="sate-code">node verify.mjs ./src</code> to catch colour drift
+    before it ships.
+  </div>
+
+  <!-- ================= COLOUR ================= -->
+  <h2 class="sec" id="colour">Colour</h2>
+  <p>Blue means action. Grey carries the interface. Status colours are for state, never decoration.</p>
+
+  <h3 class="sub">Brand</h3>
+  <div class="swatches">
+    <div class="sw-card"><div class="sw-chip" style="background:#2563eb"></div>
+      <div class="sw-meta"><b>Primary</b><code>#2563eb</code> · blue-600<br><span class="sate-subtle">Buttons, active tab, links</span></div></div>
+    <div class="sw-card"><div class="sw-chip" style="background:#1d4ed8"></div>
+      <div class="sw-meta"><b>Primary hover</b><code>#1d4ed8</code> · blue-700<br><span class="sate-subtle">Hover / pressed only</span></div></div>
+    <div class="sw-card"><div class="sw-chip" style="background:#eff6ff"></div>
+      <div class="sw-meta"><b>Primary soft</b><code>#eff6ff</code> · blue-50<br><span class="sate-subtle">Info tint</span></div></div>
+    <div class="sw-card"><div class="sw-chip" style="background:#bfdbfe"></div>
+      <div class="sw-meta"><b>Primary border</b><code>#bfdbfe</code> · blue-200<br><span class="sate-subtle">Edge on a tint</span></div></div>
+  </div>
+
+  <h3 class="sub">Surface &amp; border</h3>
+  <div class="swatches">
+    <div class="sw-card"><div class="sw-chip" style="background:#fafafa"></div>
+      <div class="sw-meta"><b>Page</b><code>#fafafa</code><br><span class="sate-subtle">Body background</span></div></div>
+    <div class="sw-card"><div class="sw-chip" style="background:#ffffff;border-bottom:1px solid #e5e7eb"></div>
+      <div class="sw-meta"><b>Raised</b><code>#ffffff</code><br><span class="sate-subtle">Cards, header, inputs</span></div></div>
+    <div class="sw-card"><div class="sw-chip" style="background:#f9fafb;border-bottom:1px solid #e5e7eb"></div>
+      <div class="sw-meta"><b>Sunken</b><code>#f9fafb</code> · gray-50<br><span class="sate-subtle">Table head, code, hover</span></div></div>
+    <div class="sw-card"><div class="sw-chip" style="background:#e5e7eb"></div>
+      <div class="sw-meta"><b>Border</b><code>#e5e7eb</code> · gray-200<br><span class="sate-subtle">Cards, rules</span></div></div>
+    <div class="sw-card"><div class="sw-chip" style="background:#d1d5db"></div>
+      <div class="sw-meta"><b>Border strong</b><code>#d1d5db</code> · gray-300<br><span class="sate-subtle">Inputs, interactive</span></div></div>
+  </div>
+
+  <h3 class="sub">Text</h3>
+  <div class="sate-card">
+    <p style="color:#111827;font-size:17px;font-weight:600">Primary — #111827 · gray-900 · headings and body</p>
+    <p style="color:#374151;margin-top:8px">Secondary — #374151 · gray-700 · dense body copy</p>
+    <p style="color:#4b5563;margin-top:8px">Muted — #4b5563 · gray-600 · the most-used text colour. Labels, captions, secondary copy.</p>
+    <p style="color:#6b7280;margin-top:8px">Subtle — #6b7280 · gray-500 · placeholders, timestamps, small-caps labels</p>
+    <p style="color:#9ca3af;margin-top:8px">Faint — #9ca3af · gray-400 · disabled only. Below 4.5:1 on white — never for content.</p>
+  </div>
+
+  <h3 class="sub">Status</h3>
+  <div class="swatches">
+    <div class="sw-card"><div class="sw-chip" style="background:#16a34a"></div>
+      <div class="sw-meta"><b>Success</b><code>#16a34a</code> · green-600</div></div>
+    <div class="sw-card"><div class="sw-chip" style="background:#d97706"></div>
+      <div class="sw-meta"><b>Warning</b><code>#d97706</code> · amber-600</div></div>
+    <div class="sw-card"><div class="sw-chip" style="background:#dc2626"></div>
+      <div class="sw-meta"><b>Danger</b><code>#dc2626</code> · red-600</div></div>
+  </div>
+
+  <!-- ================= TYPE ================= -->
+  <h2 class="sec">Typography</h2>
+  <p>The app's system stack. Body is 14px — this is a dense product; use 15–16px only for prose.</p>
+  <div class="sate-card">
+    <div style="font-size:1.875rem;line-height:2.25rem;font-weight:600;letter-spacing:-.02em">3xl · 30px — page title</div>
+    <div style="font-size:1.5rem;line-height:2rem;font-weight:600;margin-top:10px">2xl · 24px — section</div>
+    <div style="font-size:1.25rem;line-height:1.75rem;font-weight:600;margin-top:10px">xl · 20px</div>
+    <div style="font-size:1.125rem;line-height:1.75rem;margin-top:10px">lg · 18px</div>
+    <div style="font-size:1rem;line-height:1.5rem;margin-top:10px">base · 16px — prose</div>
+    <div style="font-size:.875rem;line-height:1.25rem;margin-top:10px">sm · 14px — the interface default</div>
+    <div style="font-size:.75rem;line-height:1rem;margin-top:10px;color:var(--sate-muted)">xs · 12px — captions, pills</div>
+    <p class="spec">⚠️ In the web app these utilities are broken — they map to undefined
+      <code class="sate-code">var(--text-*)</code>. See README.md.</p>
+  </div>
+
+  <!-- ================= COMPONENTS ================= -->
+  <h2 class="sec" id="components">Components</h2>
+  <p>Everything <code class="sate-code">sate.css</code> ships.</p>
+
+  <h3 class="sub">Buttons</h3>
+  <div class="sate-card">
+    <div class="row">
+      <button class="sate-btn">Primary</button>
+      <button class="sate-btn sate-btn--secondary">Secondary</button>
+      <button class="sate-btn sate-btn--danger">Danger</button>
+      <button class="sate-btn sate-btn--ghost">Ghost</button>
+      <button class="sate-btn" disabled>Disabled</button>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="sate-btn sate-btn--sm">Small</button>
+      <button class="sate-btn">Default</button>
+      <button class="sate-btn sate-btn--lg">Large</button>
+    </div>
+    <p class="spec">One primary per view. If two things look equally important, neither is.</p>
+  </div>
+
+  <h3 class="sub">Stats</h3>
+  <div class="sate-grid sate-grid--auto">
+    <div class="sate-card"><div class="sate-stat__label">Requests (30d)</div><div class="sate-stat__value">12,481</div></div>
+    <div class="sate-card"><div class="sate-stat__label">Audio processed</div><div class="sate-stat__value">834 min</div></div>
+    <div class="sate-card"><div class="sate-stat__label">Errors</div><div class="sate-stat__value">17</div></div>
+    <div class="sate-card"><div class="sate-stat__label">Active developers</div><div class="sate-stat__value">6</div></div>
+  </div>
+
+  <h3 class="sub">Forms</h3>
+  <div class="sate-card" style="max-width:520px">
+    <label class="sate-label" for="d1">Name</label>
+    <input class="sate-input" id="d1" placeholder="Production backend">
+    <label class="sate-label" for="d2">Limit applies</label>
+    <select class="sate-select" id="d2"><option>per month</option><option>in total (lifetime)</option></select>
+    <label class="sate-label" for="d3">Notes</label>
+    <textarea class="sate-textarea" id="d3" rows="2" placeholder="Optional"></textarea>
+    <p class="sate-help">Helper text sits under the field it explains.</p>
+    <label class="sate-label">Scopes</label>
+    <div class="sate-choices">
+      <label><input type="checkbox" checked> transcript:read</label>
+      <label><input type="checkbox" checked> report:read</label>
+      <label><input type="checkbox"> annotations:read</label>
+    </div>
+    <label class="sate-label" for="d4">Disabled</label>
+    <input class="sate-input" id="d4" value="Not editable" disabled>
+    <p class="sate-error">Error text uses danger-700, never plain red.</p>
+  </div>
+
+  <h3 class="sub">Pills</h3>
+  <div class="sate-card">
+    <div class="row">
+      <span class="sate-pill">neutral</span>
+      <span class="sate-pill sate-pill--info">info</span>
+      <span class="sate-pill sate-pill--success">active</span>
+      <span class="sate-pill sate-pill--warning">pending</span>
+      <span class="sate-pill sate-pill--danger">locked</span>
+    </div>
+    <p class="spec">Pills state a fact. If it can be clicked it is a button, not a pill.</p>
+  </div>
+
+  <h3 class="sub">Banners</h3>
+  <div class="sate-banner sate-banner--info"><strong>Info.</strong> Something worth knowing before you act.</div>
+  <div class="sate-banner sate-banner--success"><strong>Success.</strong> The thing you asked for happened.</div>
+  <div class="sate-banner sate-banner--warning"><strong>Warning.</strong> Allowed, but you should understand the consequence.</div>
+  <div class="sate-banner sate-banner--danger"><strong>Blocked.</strong> Say what went wrong and what to do about it.</div>
+
+  <h3 class="sub">Table</h3>
+  <div class="sate-card sate-card--flush">
+    <div class="sate-tablewrap"><table class="sate-table">
+      <tr><th>Developer</th><th>Key</th><th>Scopes</th><th>Requests</th><th>Status</th></tr>
+      <tr><td>alex@clinic.test</td><td class="sate-mono sate-subtle">sate_live_9f3a2c…</td>
+        <td><span class="sate-pill sate-pill--info">transcript</span> <span class="sate-pill sate-pill--info">report</span></td>
+        <td>1,204</td><td><span class="sate-pill sate-pill--success">active</span></td></tr>
+      <tr><td>sam@lab.test</td><td class="sate-mono sate-subtle">sate_live_04b71e…</td>
+        <td><span class="sate-pill sate-pill--info">report</span></td>
+        <td>318</td><td><span class="sate-pill sate-pill--danger">locked</span></td></tr>
+      <tr><td>jo@partner.test</td><td class="sate-mono sate-subtle">sate_live_7c1d55…</td>
+        <td><span class="sate-pill sate-pill--info">transcript</span></td>
+        <td>27</td><td><span class="sate-pill sate-pill--warning">pending</span></td></tr>
+    </table></div>
+  </div>
+  <p class="spec">Wrap every table in <code class="sate-code">.sate-tablewrap</code> — wide
+    content scrolls in its own box, never the page.</p>
+
+  <h3 class="sub">Code</h3>
+  <pre class="sate-pre">curl -X POST https://api-sate.long-cao.dev/v1/jobs \
+  -H "Authorization: Bearer sate_live_..." \
+  -F audio=@sample.wav</pre>
+  <p>Inline: <code class="sate-code">--sate-primary</code>.</p>
+
+  <!-- ================= ANNOTATIONS ================= -->
+  <h2 class="sec" id="annotations">Annotation palette</h2>
+  <p>Clinical vocabulary, not decoration. A pause is this blue in every SATE tool, forever —
+     never reassign one, and never borrow one because it looks right.</p>
+
+  <div class="sate-card">
+    <p style="font-size:16px;line-height:2.4">
+      we went <span class="sate-ann sate-ann--pause">to</span> the park and
+      <span class="sate-ann sate-ann--filler">um</span>
+      <span class="sate-ann sate-ann--repetition">the the</span>
+      <span class="sate-ann sate-ann--mispronunciation">doggy</span>
+      <span class="sate-ann sate-ann--morpheme">runned</span>
+      <span class="sate-ann sate-ann--revision">away — no, outside</span>
+      <span class="sate-ann sate-ann--morpheme-omission">yesterday</span>
+    </p>
+    <div class="row" style="margin-top:18px;gap:16px">
+      <span class="sate-small"><i class="sate-swatch" style="background:#3b82f6"></i>Pause</span>
+      <span class="sate-small"><i class="sate-swatch" style="background:#f59e0b"></i>Filler</span>
+      <span class="sate-small"><i class="sate-swatch" style="background:#eab308"></i>Repetition</span>
+      <span class="sate-small"><i class="sate-swatch" style="background:#8b5cf6"></i>Mispronunciation</span>
+      <span class="sate-small"><i class="sate-swatch" style="background:#10b981"></i>Morpheme</span>
+      <span class="sate-small"><i class="sate-swatch" style="background:#f97316"></i>Revision</span>
+      <span class="sate-small"><i class="sate-swatch" style="background:#ef4444"></i>Utterance error</span>
+      <span class="sate-small"><i class="sate-swatch" style="background:#dc2626"></i>Morpheme omission</span>
+    </div>
+    <p class="spec">Always pair the swatch with its word. Around 1 in 12 men has a
+      colour-vision deficiency, and clinicians make judgements from this.</p>
+  </div>
+
+  <!-- ================= SHAPE ================= -->
+  <h2 class="sec">Shape &amp; elevation</h2>
+  <p>One radius, one shadow, unless you have a specific reason.</p>
+  <div class="sate-grid sate-grid--auto">
+    <div class="sate-card" style="box-shadow:var(--sate-shadow-sm)"><b>shadow-sm</b>
+      <div class="sate-small sate-muted">Cards. The default — 102 uses in the app.</div></div>
+    <div class="sate-card" style="box-shadow:var(--sate-shadow-md)"><b>shadow-md</b>
+      <div class="sate-small sate-muted">Raised / hovered cards.</div></div>
+    <div class="sate-card" style="box-shadow:var(--sate-shadow-lg)"><b>shadow-lg</b>
+      <div class="sate-small sate-muted">Popovers, dropdowns, toasts.</div></div>
+    <div class="sate-card" style="box-shadow:var(--sate-shadow-modal)"><b>shadow-modal</b>
+      <div class="sate-small sate-muted">Modals only.</div></div>
+  </div>
+  <div class="row" style="margin-top:14px">
+    <div style="width:88px;height:56px;background:#fff;border:1px solid var(--sate-border);border-radius:4px;
+                display:grid;place-items:center;font-size:12px">4px</div>
+    <div style="width:88px;height:56px;background:#fff;border:1px solid var(--sate-border);border-radius:6px;
+                display:grid;place-items:center;font-size:12px">6px</div>
+    <div style="width:88px;height:56px;background:#fff;border:2px solid var(--sate-primary);border-radius:8px;
+                display:grid;place-items:center;font-size:12px;font-weight:600">8px · default</div>
+    <div style="width:88px;height:56px;background:#fff;border:1px solid var(--sate-border);border-radius:12px;
+                display:grid;place-items:center;font-size:12px">12px</div>
+    <div style="width:88px;height:56px;background:#fff;border:1px solid var(--sate-border);border-radius:9999px;
+                display:grid;place-items:center;font-size:12px">pill</div>
+  </div>
+
+  <p class="sate-muted sate-small" style="margin-top:44px">
+    SATE Design System v1.0.0 · tokens in <code class="sate-code">tokens.json</code> ·
+    check a project with <code class="sate-code">node verify.mjs &lt;path&gt;</code>
+  </p>
+</main>
+
+<script>
+  function toast() {
+    const el = document.createElement('div');
+    el.className = 'sate-toast sate-toast--success';
+    el.innerHTML = '<strong>Saved.</strong><div class="sate-small sate-muted">Toasts sit bottom-right and clear themselves.</div>';
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 3500);
+  }
+</script>
+</body>
+</html>

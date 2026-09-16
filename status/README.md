@@ -36,6 +36,18 @@ project**). Each target:
   root needs auth but is clearly alive).
 - `authSecret` — name of a Worker secret sent as `Authorization: Bearer` (e.g. an
   admin JWT so a target can be `…/device-api/admin/status`).
+- `minIntervalSec` — rate-limit this target's **network** probe below the 5-min cron.
+  Between real probes the last recorded status is carried forward (re-inserted with the
+  current timestamp — no fetch), so the 90-day bar stays continuous without spending an
+  upstream request. Used for the **ngrok** hosts to conserve ngrok quota: the AI
+  `/process` target is `24 * 3600` (once per day → ~1 hit/day instead of ~288). The
+  cost: a fresh AI outage isn't seen until the next real probe (≤24h later); a
+  carried-forward `down` keeps alerting in the meantime.
+  ⚠️ Carried rows are written with `checks.carried = 1` and the throttle only measures
+  from `carried = 0` rows. Do NOT drop that filter: the carried row is the newest row
+  for the component, so an unfiltered "last probe" lookup sees a 5-minute-old probe
+  forever and the target is never probed again (that bug ran 2026-08-04 → 08-11 —
+  one real AI probe, 2,314 copies, a status page that looked live and wasn't).
 
 ## Deploy / operate
 
@@ -43,6 +55,7 @@ project**). Each target:
 cd status
 npx wrangler deploy                         # deploy the Worker + cron
 npx wrangler d1 execute sate-status --remote --file=schema.sql   # (first time)
+npx wrangler d1 execute sate-status --remote --file=migrations/001_carried.sql  # existing DBs, once
 curl https://sate-status.longcao.workers.dev/check               # probe now (seed)
 ```
 

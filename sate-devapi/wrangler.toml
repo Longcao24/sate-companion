@@ -1,0 +1,88 @@
+# SATE Developer API — standalone Worker + D1 + R2 + Container.
+#
+# Deliberately its own everything: own database, own auth, own domain, own container.
+# It shares exactly ONE thing with the SATE clinical stack — the AI transcription box
+# (AI_PROCESS_URL) — and even that is reached through a priority gate so a developer's
+# batch can never make a clinician's recording wait (see container/app/processor.py).
+#
+# Deploy:
+#   npx wrangler d1 create sate-devapi          # paste the id below
+#   npx wrangler d1 execute sate-devapi --remote --file=./schema.sql
+#   npx wrangler r2 bucket create sate-devapi-audio
+#   npx wrangler secret put AI_PROCESS_URL      # the transcription endpoint
+#   npx wrangler secret put INTERNAL_SECRET     # container <-> Worker shared secret
+#   npx wrangler secret put TICK_SECRET         # gates POST /tick
+#   npx wrangler secret put CLINICAL_PROBE_URL  # optional, see [vars] notes
+#   npx wrangler secret put CLINICAL_PROBE_KEY  # optional
+#   npx wrangler deploy
+
+name = "sate-devapi"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+compatibility_flags = ["nodejs_compat"]
+
+# One Worker serves both the portal and the public API; the hostname decides which.
+# Both are provisioned as custom domains on deploy.
+routes = [
+  { pattern = "api-sate.long-cao.dev", custom_domain = true },
+  { pattern = "developers-sate.long-cao.dev", custom_domain = true },
+]
+
+# Keep the container warm and sweep expired jobs/sessions once a minute.
+[triggers]
+crons = ["* * * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "sate-devapi"
+database_id = "52c7c0fa-c6af-4761-8478-2645ce3a72cf"
+
+# Uploaded audio. Purged as soon as a job finishes (AUDIO_RETENTION_HOURS = 0), so the
+# bucket holds only in-flight work — a developer's audio is not a permanent liability.
+[[r2_buckets]]
+binding = "AUDIO"
+bucket_name = "sate-devapi-audio"
+
+# The long-lived processor. A Worker cannot hold the AI call (~100 s origin timeout, and
+# a long take runs far past that), so the whole point of this container is that it has no
+# wall-clock at all.
+[[containers]]
+class_name = "DevProcessor"
+image = "./container/Dockerfile"
+max_instances = 1
+instance_type = "standard-1"
+
+[[durable_objects.bindings]]
+name = "PROCESSOR"
+class_name = "DevProcessor"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["DevProcessor"]
+
+# Notification email to the operator when a developer requests access, and to the
+# developer when they are approved. The EMAIL_FROM domain must already be onboarded
+# (Dashboard -> Compute -> Email Service); an un-onboarded sender fails at send(), not deploy.
+[[send_email]]
+name = "EMAIL"
+
+[vars]
+PORTAL_HOST = "developers-sate.long-cao.dev"
+API_HOST = "api-sate.long-cao.dev"
+EMAIL_FROM = "noreply@mail.long-cao.dev"
+EMAIL_FROM_NAME = "SATE Developer Platform"
+OPERATOR_EMAIL = "caothohoanglong2404@gmail.com"
+
+MAX_UPLOAD_MB = "50"          # a Worker request body caps at 100 MB; 50 MB ~= 26 min of 16 kHz mono WAV
+JOB_RETENTION_DAYS = "30"     # results are hard-deleted after this
+AUDIO_RETENTION_HOURS = "0"   # 0 = purge the uploaded audio the moment the job finishes
+MAX_ATTEMPTS = "3"
+STUCK_MINUTES = "45"          # a job left in 'processing' longer than this is reclaimed
+
+# Bootstrap: the first developer to register with this email is auto-approved as admin.
+# Everyone else lands as 'pending' until an admin approves them.
+BOOTSTRAP_ADMIN_EMAIL = "caothohoanglong2404@gmail.com"
+SATE_TEXT_API_URL = "https://sate-apis.ngrok-free.app"   # c-unit / maze / morpheme text-analysis service (Shuwei). ngrok — update if the tunnel URL changes.
+
+[observability]
+enabled = true

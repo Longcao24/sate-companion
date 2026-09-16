@@ -112,6 +112,7 @@ const config: Config = {
         {
           title: 'Reference',
           items: [
+            {label: 'Hardware', to: '/hardware'},
             {label: 'device-api', to: '/reference/device-api'},
             {label: 'BLE protocol', to: '/reference/ble-protocol'},
             {label: 'Data model', to: '/reference/data-model'},

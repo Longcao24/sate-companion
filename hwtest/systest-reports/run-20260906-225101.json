@@ -1,0 +1,1183 @@
+{
+  "meta": {
+    "started": "2026-09-06 22:50:24 EDT",
+    "device_serial": "SATE-443EAC",
+    "firmware": "?",
+    "device_state": "?",
+    "api": "?"
+  },
+  "results": [
+    {
+      "tc": "SATE-BE-002",
+      "title": "AI returns 500 once, then succeeds",
+      "status": "PASS",
+      "detail": "status=done attempts=2 ai=2 finalize=1",
+      "tier": "component",
+      "evidence": {
+        "case": "be002_5xx_once",
+        "settled": true,
+        "status": "done",
+        "attempts": 2,
+        "no_text": false,
+        "recording_id": "rec-1",
+        "process_error": null,
+        "calls": {
+          "ai": 2,
+          "finalize": 1,
+          "rec_upload": 1,
+          "download": 2,
+          "requeue": 1,
+          "fail": 0,
+          "claim": 4
+        },
+        "finalize_payloads": [
+          {
+            "session_id": "s-faketest",
+            "transcript": {
+              "segments": [
+                {
+                  "start": 0.0,
+                  "end": 3.0,
+                  "text": "session forty two begins now",
+                  "words": [
+                    {
+                      "word": "session",
+                      "start": 0.0,
+                      "end": 0.25
+                    },
+                    {
+                      "word": "forty",
+                      "start": 0.3,
+                      "end": 0.55
+                    },
+                    {
+                      "word": "two",
+                      "start": 0.6,
+                      "end": 0.85
+                    },
+                    {
+                      "word": "begins",
+                      "start": 0.8999999999999999,
+                      "end": 1.15
+                    },
+                    {
+                      "word": "now",
+                      "start": 1.2,
+                      "end": 1.45
+                    }
+                  ]
+                }
+              ],
+              "language": "en"
+            },
+            "rec_path": "u-1/1788749425854_device_SATE-TEST01_s7.wav",
+            "file_name": "device_SATE-TEST01_s7.wav",
+            "file_size": 96044
+          }
+        ],
+        "audio_still_in_storage": true,
+        "recordings_created": 1,
+        "events": [
+          "1788749424.833 claim -> attempt 1",
+          "1788749424.835 AI call 1 -> ['status']",
+          "1788749425.848 requeue",
+          "1788749425.852 claim -> attempt 2",
+          "1788749425.854 AI call 2 -> ['json']",
+          "1788749425.857 recordings upload",
+          "1788749425.858 finalize 1 no_text=None -> {'status': 200}"
+        ],
+        "constants": {
+          "MAX_ATTEMPTS": 3,
+          "MIN_AUDIO_SEC": 0.4,
+          "AI_READ_TIMEOUT_S": 3600
+        }
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-BE-003",
+      "title": "AI returns 5xx on all three allowed attempts",
+      "status": "PASS",
+      "detail": "status=error attempts=3 ai=3 audio_kept=True err=transient, gave up after 3 attempts: AI ",
+      "tier": "component",
+      "evidence": {
+        "case": "be003_5xx_all",
+        "settled": true,
+        "status": "error",
+        "attempts": 3,
+        "no_text": false,
+        "recording_id": null,
+        "process_error": "transient, gave up after 3 attempts: AI 503: {\"error\": \"ai fault\"}",
+        "calls": {
+          "ai": 3,
+          "finalize": 0,
+          "rec_upload": 0,
+          "download": 3,
+          "requeue": 2,
+          "fail": 1,
+          "claim": 5
+        },
+        "finalize_payloads": [],
+        "audio_still_in_storage": true,
+        "recordings_created": 0,
+        "events": [
+          "1788749427.981 claim -> attempt 1",
+          "1788749427.983 AI call 1 -> ['status']",
+          "1788749428.988 requeue",
+          "1788749428.992 claim -> attempt 2",
+          "1788749428.994 AI call 2 -> ['status']",
+          "1788749431.005 requeue",
+          "1788749431.009 claim -> attempt 3",
+          "1788749431.012 AI call 3 -> ['status']",
+          "1788749431.013 fail: transient, gave up after 3 attempts: AI 503: {\"error\": \"ai fault\"}"
+        ],
+        "constants": {
+          "MAX_ATTEMPTS": 3,
+          "MIN_AUDIO_SEC": 0.4,
+          "AI_READ_TIMEOUT_S": 3600
+        }
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-BE-004",
+      "title": "AI returns a non-retryable 4xx error",
+      "status": "PASS",
+      "detail": "status=error attempts=1 ai=1 requeues=0 (no blind retry)",
+      "tier": "component",
+      "evidence": {
+        "case": "be004_4xx",
+        "settled": true,
+        "status": "error",
+        "attempts": 1,
+        "no_text": false,
+        "recording_id": null,
+        "process_error": "AI 400: {\"error\": \"ai fault\"}",
+        "calls": {
+          "ai": 1,
+          "finalize": 0,
+          "rec_upload": 0,
+          "download": 1,
+          "requeue": 0,
+          "fail": 1,
+          "claim": 3
+        },
+        "finalize_payloads": [],
+        "audio_still_in_storage": true,
+        "recordings_created": 0,
+        "events": [
+          "1788749433.134 claim -> attempt 1",
+          "1788749433.135 AI call 1 -> ['status']",
+          "1788749433.136 fail: AI 400: {\"error\": \"ai fault\"}"
+        ],
+        "constants": {
+          "MAX_ATTEMPTS": 3,
+          "MIN_AUDIO_SEC": 0.4,
+          "AI_READ_TIMEOUT_S": 3600
+        }
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-BE-005",
+      "title": "AI request times out, then succeeds",
+      "status": "PASS",
+      "detail": "status=done attempts=2 finalize=1 (one result, no duplicate)",
+      "tier": "component",
+      "evidence": {
+        "case": "be005_timeout_then_ok",
+        "settled": true,
+        "status": "done",
+        "attempts": 2,
+        "no_text": false,
+        "recording_id": "rec-1",
+        "process_error": null,
+        "calls": {
+          "ai": 2,
+          "finalize": 1,
+          "rec_upload": 1,
+          "download": 2,
+          "requeue": 1,
+          "fail": 0,
+          "claim": 4
+        },
+        "finalize_payloads": [
+          {
+            "session_id": "s-faketest",
+            "transcript": {
+              "segments": [
+                {
+                  "start": 0.0,
+                  "end": 3.0,
+                  "text": "session forty two begins now",
+                  "words": [
+                    {
+                      "word": "session",
+                      "start": 0.0,
+                      "end": 0.25
+                    },
+                    {
+                      "word": "forty",
+                      "start": 0.3,
+                      "end": 0.55
+                    },
+                    {
+                      "word": "two",
+                      "start": 0.6,
+                      "end": 0.85
+                    },
+                    {
+                      "word": "begins",
+                      "start": 0.8999999999999999,
+                      "end": 1.15
+                    },
+                    {
+                      "word": "now",
+                      "start": 1.2,
+                      "end": 1.45
+                    }
+                  ]
+                }
+              ],
+              "language": "en"
+            },
+            "rec_path": "u-1/1788749438269_device_SATE-TEST01_s7.wav",
+            "file_name": "device_SATE-TEST01_s7.wav",
+            "file_size": 96044
+          }
+        ],
+        "audio_still_in_storage": true,
+        "recordings_created": 1,
+        "events": [
+          "1788749435.250 claim -> attempt 1",
+          "1788749435.251 AI call 1 -> ['sleep']",
+          "1788749438.263 requeue",
+          "1788749438.266 claim -> attempt 2",
+          "1788749438.269 AI call 2 -> ['json']",
+          "1788749438.271 recordings upload",
+          "1788749438.273 finalize 1 no_text=None -> {'status': 200}"
+        ],
+        "constants": {
+          "MAX_ATTEMPTS": 3,
+          "MIN_AUDIO_SEC": 0.4,
+          "AI_READ_TIMEOUT_S": 2
+        }
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-BE-006",
+      "title": "AI returns malformed JSON",
+      "status": "PASS",
+      "detail": "status=error attempts=3 finalize=0 \u2014 no Completed session created",
+      "tier": "component",
+      "evidence": {
+        "case": "be006_malformed_json",
+        "settled": true,
+        "status": "error",
+        "attempts": 3,
+        "no_text": false,
+        "recording_id": null,
+        "process_error": "JSONDecodeError: Expecting value: line 1 column 1 (char 0)",
+        "calls": {
+          "ai": 3,
+          "finalize": 0,
+          "rec_upload": 0,
+          "download": 3,
+          "requeue": 2,
+          "fail": 1,
+          "claim": 5
+        },
+        "finalize_payloads": [],
+        "audio_still_in_storage": true,
+        "recordings_created": 0,
+        "events": [
+          "1788749440.398 claim -> attempt 1",
+          "1788749440.399 AI call 1 -> ['raw']",
+          "1788749440.401 requeue",
+          "1788749440.402 claim -> attempt 2",
+          "1788749440.403 AI call 2 -> ['raw']",
+          "1788749440.404 requeue",
+          "1788749440.405 claim -> attempt 3",
+          "1788749440.406 AI call 3 -> ['raw']",
+          "1788749440.407 fail: JSONDecodeError: Expecting value: line 1 column 1 (char 0)"
+        ],
+        "constants": {
+          "MAX_ATTEMPTS": 3,
+          "MIN_AUDIO_SEC": 0.4,
+          "AI_READ_TIMEOUT_S": 3600
+        }
+      },
+      "findings": [
+        "malformed JSON consumed 3 attempts. processor.py's own comment classifies a 'malformed AI response' as Permanent, but r.json() is parsed OUTSIDE call_ai's try block, so it falls to loop()'s generic `except Exception` and is retried as transient."
+      ]
+    },
+    {
+      "tc": "SATE-BE-007",
+      "title": "AI returns valid JSON with missing/partial fields",
+      "status": "PASS",
+      "detail": "missing-segments \u2192 error in 1 attempt (rejected, not stored); empty-text \u2192 no_text=True, recording=None",
+      "tier": "component",
+      "evidence": {
+        "missing_segments": {
+          "case": "be007_missing_segments",
+          "settled": true,
+          "status": "error",
+          "attempts": 1,
+          "no_text": false,
+          "recording_id": null,
+          "process_error": "AI returned no segments",
+          "calls": {
+            "ai": 1,
+            "finalize": 0,
+            "rec_upload": 0,
+            "download": 1,
+            "requeue": 0,
+            "fail": 1,
+            "claim": 3
+          },
+          "finalize_payloads": [],
+          "audio_still_in_storage": true,
+          "recordings_created": 0,
+          "events": [
+            "1788749442.537 claim -> attempt 1",
+            "1788749442.538 AI call 1 -> ['json']",
+            "1788749442.539 fail: AI returned no segments"
+          ],
+          "constants": {
+            "MAX_ATTEMPTS": 3,
+            "MIN_AUDIO_SEC": 0.4,
+            "AI_READ_TIMEOUT_S": 3600
+          }
+        },
+        "empty_segments": {
+          "case": "be007_empty_segments",
+          "settled": true,
+          "status": "done",
+          "attempts": 1,
+          "no_text": true,
+          "recording_id": null,
+          "process_error": null,
+          "calls": {
+            "ai": 1,
+            "finalize": 1,
+            "rec_upload": 0,
+            "download": 1,
+            "requeue": 0,
+            "fail": 0,
+            "claim": 3
+          },
+          "finalize_payloads": [
+            {
+              "session_id": "s-faketest",
+              "no_text": true
+            }
+          ],
+          "audio_still_in_storage": true,
+          "recordings_created": 0,
+          "events": [
+            "1788749444.659 claim -> attempt 1",
+            "1788749444.661 AI call 1 -> ['json']",
+            "1788749444.662 finalize 1 no_text=True -> {'status': 200}"
+          ],
+          "constants": {
+            "MAX_ATTEMPTS": 3,
+            "MIN_AUDIO_SEC": 0.4,
+            "AI_READ_TIMEOUT_S": 3600
+          }
+        }
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-BE-009",
+      "title": "Out-of-order status updates or late responses",
+      "status": "PASS",
+      "detail": "lost-response replay: finalize called 2x, recordings created=1, terminal=done; duplicate rejected as already_linked=True",
+      "tier": "component",
+      "evidence": {
+        "case": "be009_late_duplicate_finalize",
+        "settled": true,
+        "status": "done",
+        "attempts": 2,
+        "no_text": false,
+        "recording_id": "rec-1",
+        "process_error": null,
+        "calls": {
+          "ai": 2,
+          "finalize": 2,
+          "rec_upload": 2,
+          "download": 2,
+          "requeue": 1,
+          "fail": 0,
+          "claim": 3
+        },
+        "finalize_payloads": [
+          {
+            "session_id": "s-faketest",
+            "transcript": {
+              "segments": [
+                {
+                  "start": 0.0,
+                  "end": 3.0,
+                  "text": "session forty two begins now",
+                  "words": [
+                    {
+                      "word": "session",
+                      "start": 0.0,
+                      "end": 0.25
+                    },
+                    {
+                      "word": "forty",
+                      "start": 0.3,
+                      "end": 0.55
+                    },
+                    {
+                      "word": "two",
+                      "start": 0.6,
+                      "end": 0.85
+                    },
+                    {
+                      "word": "begins",
+                      "start": 0.8999999999999999,
+                      "end": 1.15
+                    },
+                    {
+                      "word": "now",
+                      "start": 1.2,
+                      "end": 1.45
+                    }
+                  ]
+                }
+              ],
+              "language": "en"
+            },
+            "rec_path": "u-1/1788749446783_device_SATE-TEST01_s7.wav",
+            "file_name": "device_SATE-TEST01_s7.wav",
+            "file_size": 96044
+          },
+          {
+            "session_id": "s-faketest",
+            "transcript": {
+              "segments": [
+                {
+                  "start": 0.0,
+                  "end": 3.0,
+                  "text": "session forty two begins now",
+                  "words": [
+                    {
+                      "word": "session",
+                      "start": 0.0,
+                      "end": 0.25
+                    },
+                    {
+                      "word": "forty",
+                      "start": 0.3,
+                      "end": 0.55
+                    },
+                    {
+                      "word": "two",
+                      "start": 0.6,
+                      "end": 0.85
+                    },
+                    {
+                      "word": "begins",
+                      "start": 0.8999999999999999,
+                      "end": 1.15
+                    },
+                    {
+                      "word": "now",
+                      "start": 1.2,
+                      "end": 1.45
+                    }
+                  ]
+                }
+              ],
+              "language": "en"
+            },
+            "rec_path": "u-1/1788749447802_device_SATE-TEST01_s7.wav",
+            "file_name": "device_SATE-TEST01_s7.wav",
+            "file_size": 96044
+          }
+        ],
+        "audio_still_in_storage": true,
+        "recordings_created": 1,
+        "events": [
+          "1788749446.782 claim -> attempt 1",
+          "1788749446.783 AI call 1 -> ['json']",
+          "1788749446.784 recordings upload",
+          "1788749446.785 finalize 1 no_text=None -> {'status': 500, 'apply': True}",
+          "1788749446.785 finalize applied server-side, then answered 500 \u2014 response lost",
+          "1788749447.795 requeue",
+          "1788749447.799 claim -> attempt 2",
+          "1788749447.803 AI call 2 -> ['json']",
+          "1788749447.804 recordings upload",
+          "1788749447.805 finalize 2 no_text=None -> {'status': 200}",
+          "1788749447.805 LATE/DUPLICATE finalize -> already_linked, no second recording"
+        ],
+        "constants": {
+          "MAX_ATTEMPTS": 3,
+          "MIN_AUDIO_SEC": 0.4,
+          "AI_READ_TIMEOUT_S": 3600
+        }
+      },
+      "findings": [
+        "a finalize whose RESPONSE was lost leaves the row already finalized, yet the worker still calls requeue_session() \u2014 the job returns to `queued` and is processed again (a second paid AI call and a second recordings-bucket copy). No duplicate reaches the user because finalize-session's recording_id guard catches it, but the terminal state IS regressed. Whether requeue_session() itself refuses to move a `done` row could not be verified: the async_processor_state_machine migration SQL is not checked into the repo."
+      ]
+    },
+    {
+      "tc": "SATE-BE-010",
+      "title": "Cloudflare or Edge Function temporarily unavailable",
+      "status": "PASS",
+      "detail": "503 then recovery \u2192 status=done attempts=2 audio_kept=True one result",
+      "tier": "component",
+      "evidence": {
+        "case": "be010_edge_unavailable_then_ok",
+        "settled": true,
+        "status": "done",
+        "attempts": 2,
+        "no_text": false,
+        "recording_id": "rec-1",
+        "process_error": null,
+        "calls": {
+          "ai": 2,
+          "finalize": 2,
+          "rec_upload": 2,
+          "download": 2,
+          "requeue": 1,
+          "fail": 0,
+          "claim": 4
+        },
+        "finalize_payloads": [
+          {
+            "session_id": "s-faketest",
+            "transcript": {
+              "segments": [
+                {
+                  "start": 0.0,
+                  "end": 3.0,
+                  "text": "session forty two begins now",
+                  "words": [
+                    {
+                      "word": "session",
+                      "start": 0.0,
+                      "end": 0.25
+                    },
+                    {
+                      "word": "forty",
+                      "start": 0.3,
+                      "end": 0.55
+                    },
+                    {
+                      "word": "two",
+                      "start": 0.6,
+                      "end": 0.85
+                    },
+                    {
+                      "word": "begins",
+                      "start": 0.8999999999999999,
+                      "end": 1.15
+                    },
+                    {
+                      "word": "now",
+                      "start": 1.2,
+                      "end": 1.45
+                    }
+                  ]
+                }
+              ],
+              "language": "en"
+            },
+            "rec_path": "u-1/1788749448909_device_SATE-TEST01_s7.wav",
+            "file_name": "device_SATE-TEST01_s7.wav",
+            "file_size": 96044
+          },
+          {
+            "session_id": "s-faketest",
+            "transcript": {
+              "segments": [
+                {
+                  "start": 0.0,
+                  "end": 3.0,
+                  "text": "session forty two begins now",
+                  "words": [
+                    {
+                      "word": "session",
+                      "start": 0.0,
+                      "end": 0.25
+                    },
+                    {
+                      "word": "forty",
+                      "start": 0.3,
+                      "end": 0.55
+                    },
+                    {
+                      "word": "two",
+                      "start": 0.6,
+                      "end": 0.85
+                    },
+                    {
+                      "word": "begins",
+                      "start": 0.8999999999999999,
+                      "end": 1.15
+                    },
+                    {
+                      "word": "now",
+                      "start": 1.2,
+                      "end": 1.45
+                    }
+                  ]
+                }
+              ],
+              "language": "en"
+            },
+            "rec_path": "u-1/1788749449927_device_SATE-TEST01_s7.wav",
+            "file_name": "device_SATE-TEST01_s7.wav",
+            "file_size": 96044
+          }
+        ],
+        "audio_still_in_storage": true,
+        "recordings_created": 1,
+        "events": [
+          "1788749448.908 claim -> attempt 1",
+          "1788749448.910 AI call 1 -> ['json']",
+          "1788749448.910 recordings upload",
+          "1788749448.911 finalize 1 no_text=None -> {'status': 503}",
+          "1788749449.920 requeue",
+          "1788749449.924 claim -> attempt 2",
+          "1788749449.927 AI call 2 -> ['json']",
+          "1788749449.929 recordings upload",
+          "1788749449.931 finalize 2 no_text=None -> {'status': 200}"
+        ],
+        "constants": {
+          "MAX_ATTEMPTS": 3,
+          "MIN_AUDIO_SEC": 0.4,
+          "AI_READ_TIMEOUT_S": 3600
+        }
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-BE-011",
+      "title": "Audio upload succeeds but database/session update fails",
+      "status": "FAIL",
+      "detail": "status=error (no ghost Completed) but rec_upload=3 orphan object(s) left in the recordings bucket",
+      "tier": "component",
+      "evidence": {
+        "case": "be011_db_update_fails",
+        "settled": true,
+        "status": "error",
+        "attempts": 3,
+        "no_text": false,
+        "recording_id": null,
+        "process_error": "transient, gave up after 3 attempts: finalize 500: {\"error\": \"finalize fault\"}",
+        "calls": {
+          "ai": 3,
+          "finalize": 3,
+          "rec_upload": 3,
+          "download": 3,
+          "requeue": 2,
+          "fail": 1,
+          "claim": 5
+        },
+        "finalize_payloads": [
+          {
+            "session_id": "s-faketest",
+            "transcript": {
+              "segments": [
+                {
+                  "start": 0.0,
+                  "end": 3.0,
+                  "text": "session forty two begins now",
+                  "words": [
+                    {
+                      "word": "session",
+                      "start": 0.0,
+                      "end": 0.25
+                    },
+                    {
+                      "word": "forty",
+                      "start": 0.3,
+                      "end": 0.55
+                    },
+                    {
+                      "word": "two",
+                      "start": 0.6,
+                      "end": 0.85
+                    },
+                    {
+                      "word": "begins",
+                      "start": 0.8999999999999999,
+                      "end": 1.15
+                    },
+                    {
+                      "word": "now",
+                      "start": 1.2,
+                      "end": 1.45
+                    }
+                  ]
+                }
+              ],
+              "language": "en"
+            },
+            "rec_path": "u-1/1788749452042_device_SATE-TEST01_s7.wav",
+            "file_name": "device_SATE-TEST01_s7.wav",
+            "file_size": 96044
+          },
+          {
+            "session_id": "s-faketest",
+            "transcript": {
+              "segments": [
+                {
+                  "start": 0.0,
+                  "end": 3.0,
+                  "text": "session forty two begins now",
+                  "words": [
+                    {
+                      "word": "session",
+                      "start": 0.0,
+                      "end": 0.25
+                    },
+                    {
+                      "word": "forty",
+                      "start": 0.3,
+                      "end": 0.55
+                    },
+                    {
+                      "word": "two",
+                      "start": 0.6,
+                      "end": 0.85
+                    },
+                    {
+                      "word": "begins",
+                      "start": 0.8999999999999999,
+                      "end": 1.15
+                    },
+                    {
+                      "word": "now",
+                      "start": 1.2,
+                      "end": 1.45
+                    }
+                  ]
+                }
+              ],
+              "language": "en"
+            },
+            "rec_path": "u-1/1788749453060_device_SATE-TEST01_s7.wav",
+            "file_name": "device_SATE-TEST01_s7.wav",
+            "file_size": 96044
+          },
+          {
+            "session_id": "s-faketest",
+            "transcript": {
+              "segments": [
+                {
+                  "start": 0.0,
+                  "end": 3.0,
+                  "text": "session forty two begins now",
+                  "words": [
+                    {
+                      "word": "session",
+                      "start": 0.0,
+                      "end": 0.25
+                    },
+                    {
+                      "word": "forty",
+                      "start": 0.3,
+                      "end": 0.55
+                    },
+                    {
+                      "word": "two",
+                      "start": 0.6,
+                      "end": 0.85
+                    },
+                    {
+                      "word": "begins",
+                      "start": 0.8999999999999999,
+                      "end": 1.15
+                    },
+                    {
+                      "word": "now",
+                      "start": 1.2,
+                      "end": 1.45
+                    }
+                  ]
+                }
+              ],
+              "language": "en"
+            },
+            "rec_path": "u-1/1788749455082_device_SATE-TEST01_s7.wav",
+            "file_name": "device_SATE-TEST01_s7.wav",
+            "file_size": 96044
+          }
+        ],
+        "audio_still_in_storage": true,
+        "recordings_created": 0,
+        "events": [
+          "1788749452.041 claim -> attempt 1",
+          "1788749452.043 AI call 1 -> ['json']",
+          "1788749452.043 recordings upload",
+          "1788749452.044 finalize 1 no_text=None -> {'status': 500}",
+          "1788749453.054 requeue",
+          "1788749453.057 claim -> attempt 2",
+          "1788749453.060 AI call 2 -> ['json']",
+          "1788749453.061 recordings upload",
+          "1788749453.063 finalize 2 no_text=None -> {'status': 500}",
+          "1788749455.074 requeue",
+          "1788749455.078 claim -> attempt 3",
+          "1788749455.082 AI call 3 -> ['json']",
+          "1788749455.083 recordings upload",
+          "1788749455.085 finalize 3 no_text=None -> {'status': 500}",
+          "1788749455.086 fail: transient, gave up after 3 attempts: finalize 500: {\"error\": \"finalize fault\"}"
+        ],
+        "constants": {
+          "MAX_ATTEMPTS": 3,
+          "MIN_AUDIO_SEC": 0.4,
+          "AI_READ_TIMEOUT_S": 3600
+        }
+      },
+      "findings": [
+        "the audio was copied into the recordings bucket 3x \u2014 once per retry, each under a NEW timestamped key (3 distinct paths). When the DB write keeps failing, every attempt leaves an orphaned clinical audio object behind and nothing removes them. BE-011 requires the orphan object to be reconciled or safely removed."
+      ]
+    },
+    {
+      "tc": "SATE-E2E-002",
+      "title": "Very short recording near the minimum duration",
+      "status": "PASS",
+      "detail": "0.4s floor: AI calls=0 \u2192 finalized no_text=True, no retry loop",
+      "tier": "component",
+      "evidence": {
+        "case": "e2e002_short_take",
+        "settled": true,
+        "status": "done",
+        "attempts": 1,
+        "no_text": true,
+        "recording_id": null,
+        "process_error": null,
+        "calls": {
+          "ai": 0,
+          "finalize": 1,
+          "rec_upload": 0,
+          "download": 1,
+          "requeue": 0,
+          "fail": 0,
+          "claim": 3
+        },
+        "finalize_payloads": [
+          {
+            "session_id": "s-faketest",
+            "no_text": true
+          }
+        ],
+        "audio_still_in_storage": true,
+        "recordings_created": 0,
+        "events": [
+          "1788749457.196 claim -> attempt 1",
+          "1788749457.197 finalize 1 no_text=True -> {'status': 200}"
+        ],
+        "constants": {
+          "MAX_ATTEMPTS": 3,
+          "MIN_AUDIO_SEC": 0.4,
+          "AI_READ_TIMEOUT_S": 3600
+        }
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-E2E-003",
+      "title": "Silent or near-silent recording",
+      "status": "PASS",
+      "detail": "AI answered with no words \u2192 status=done no_text=True recording=None (no empty report)",
+      "tier": "component",
+      "evidence": {
+        "case": "e2e003_silent",
+        "settled": true,
+        "status": "done",
+        "attempts": 1,
+        "no_text": true,
+        "recording_id": null,
+        "process_error": null,
+        "calls": {
+          "ai": 1,
+          "finalize": 1,
+          "rec_upload": 0,
+          "download": 1,
+          "requeue": 0,
+          "fail": 0,
+          "claim": 3
+        },
+        "finalize_payloads": [
+          {
+            "session_id": "s-faketest",
+            "no_text": true
+          }
+        ],
+        "audio_still_in_storage": true,
+        "recordings_created": 0,
+        "events": [
+          "1788749459.314 claim -> attempt 1",
+          "1788749459.316 AI call 1 -> ['json']",
+          "1788749459.316 finalize 1 no_text=True -> {'status': 200}"
+        ],
+        "constants": {
+          "MAX_ATTEMPTS": 3,
+          "MIN_AUDIO_SEC": 0.4,
+          "AI_READ_TIMEOUT_S": 3600
+        }
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-E2E-004",
+      "title": "Noisy recording with multiple speakers and interruptions",
+      "status": "BLOCKED",
+      "detail": "needs real multi-speaker audio captured on the device and a human judging the transcript",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-E2E-006",
+      "title": "Repeated Stop, Save, Upload actions on the recorder",
+      "status": "BLOCKED",
+      "detail": "the RECORD button is a physical gesture (double-click to start, 3 s hold to stop); sate ci drives the device by REMOTE command and never touches the button",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-LONG-001",
+      "title": "Recording at the 30-minute boundary",
+      "status": "BLOCKED",
+      "detail": "needs the recorder capturing for 30 min",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-LONG-002",
+      "title": "Forty-five-minute recording",
+      "status": "BLOCKED",
+      "detail": "needs the recorder capturing for 45 min",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-LONG-003",
+      "title": "Maximum supported recording duration",
+      "status": "BLOCKED",
+      "detail": "needs a take at the ~62-min firmware ceiling; RQ-07 also still undefined",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-LONG-004",
+      "title": "Long-session upload interrupted and resumed",
+      "status": "BLOCKED",
+      "detail": "needs the recorder's direct Wi-Fi chunked upload and a real AP interruption",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-LONG-006",
+      "title": "Battery, temperature, memory, storage, processing-time observation",
+      "status": "BLOCKED",
+      "detail": "needs battery/thermal telemetry from a running board",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-001",
+      "title": "Recording starts and ends while fully offline",
+      "status": "BLOCKED",
+      "detail": "needs the recorder off-network",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-002",
+      "title": "Internet connection lost during recording",
+      "status": "BLOCKED",
+      "detail": "needs the recorder + AP control",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-003",
+      "title": "Internet lost after Stop but before upload starts",
+      "status": "BLOCKED",
+      "detail": "needs the recorder + AP control",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-004",
+      "title": "Internet drops during an active upload",
+      "status": "BLOCKED",
+      "detail": "needs the recorder's chunked upload mid-flight",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-005",
+      "title": "Connectivity returns while the recorder is idle or asleep",
+      "status": "BLOCKED",
+      "detail": "needs the recorder",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-006",
+      "title": "Wi-Fi connected but no Internet access",
+      "status": "BLOCKED",
+      "detail": "needs the recorder's own detection on a MAC-allowlist / no-egress AP",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-008",
+      "title": "Switch Wi-Fi network or hotspot during upload",
+      "status": "BLOCKED",
+      "detail": "needs the recorder + two APs",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-009",
+      "title": "Rapidly flapping or weak network",
+      "status": "BLOCKED",
+      "detail": "needs the recorder + a controllable AP",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-007",
+      "title": "Captive portal or authentication-required Wi-Fi",
+      "status": "BLOCKED",
+      "detail": "needs the recorder + a captive portal",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-QUE-001",
+      "title": "Five recordings made consecutively while online",
+      "status": "BLOCKED",
+      "detail": "needs five real takes on the device",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-QUE-002",
+      "title": "Start a new recording while the previous session is uploading",
+      "status": "BLOCKED",
+      "detail": "needs the device",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-QUE-003",
+      "title": "Five offline recordings queued and uploaded later",
+      "status": "BLOCKED",
+      "detail": "needs the device off-network",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-QUE-004",
+      "title": "One queued session fails while later sessions continue",
+      "status": "BLOCKED",
+      "detail": "needs several real queued takes plus a forced AI failure on one of them",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-QUE-005",
+      "title": "Queue order and status persist across recorder restart",
+      "status": "BLOCKED",
+      "detail": "needs a device power-cycle",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-REC-001",
+      "title": "Graceful recorder restart during an active recording",
+      "status": "BLOCKED",
+      "detail": "needs the device",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-REC-002",
+      "title": "Forced power loss during an active recording",
+      "status": "BLOCKED",
+      "detail": "needs a physical power cut",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-REC-003",
+      "title": "Low-battery shutdown during recording",
+      "status": "BLOCKED",
+      "detail": "needs a drained battery on the board",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-REC-004",
+      "title": "Insufficient local storage before recording starts",
+      "status": "BLOCKED",
+      "detail": "needs a nearly full SD card",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-REC-005",
+      "title": "Local storage becomes full during recording",
+      "status": "BLOCKED",
+      "detail": "needs a nearly full SD card",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-REC-006",
+      "title": "Restart during the local save/finalization step",
+      "status": "BLOCKED",
+      "detail": "needs precisely timed power loss",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-REC-007",
+      "title": "Restart after recording stops but before upload begins",
+      "status": "BLOCKED",
+      "detail": "needs the device",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    }
+  ]
+}

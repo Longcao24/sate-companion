@@ -1,1 +1,8 @@
-{"label":"Reference","position":5,"link":{"type":"generated-index","description":"device-api endpoints, BLE protocol, data model."}}
+{
+"label": "Reference",
+"position": 5,
+"link": {
+"type": "generated-index",
+"description": "The Developer API for third-party applications, the internal device-api, BLE protocol, and data model."
+}
+}

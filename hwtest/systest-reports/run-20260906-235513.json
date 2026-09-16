@@ -1,0 +1,570 @@
+{
+  "meta": {
+    "started": "2026-09-06 23:54:34 EDT",
+    "device_serial": "SATE-443EAC",
+    "firmware": "1.5.36",
+    "device_state": "offline since 2026-09-02T15:01:14.413+00:00",
+    "api": "v21+"
+  },
+  "results": [
+    {
+      "tc": "SATE-BE-001",
+      "title": "Standard backend status progression and result persistence",
+      "status": "PASS",
+      "detail": "s-bb8b2c8d: queued \u2192 processing \u2192 done in 15s; rows=1 stored=True recording=fc8f9f28-51c3-42e4-82b3-d0cae6683b60 no_text=False",
+      "tier": "live",
+      "evidence": {
+        "session": {
+          "id": "s-bb8b2c8d",
+          "device_serial": "SATE-443EAC",
+          "patient_id": "Standalone",
+          "session_number": 92,
+          "sample_rate": 16000,
+          "bytes": 242732,
+          "created_at": "2026-09-07T03:54:39.11314+00:00",
+          "processed": true,
+          "processed_at": "2026-09-07T03:54:47.408+00:00",
+          "recording_id": "fc8f9f28-51c3-42e4-82b3-d0cae6683b60",
+          "process_error": null,
+          "no_text": false,
+          "status": "done",
+          "attempts": 1,
+          "flags": null,
+          "at": "2026-09-07T03:54:39.11314+00:00",
+          "_status_path": [
+            "queued",
+            "processing",
+            "done"
+          ]
+        },
+        "verify": {
+          "stored": true
+        },
+        "upload_ms": 713
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-E2E-001",
+      "title": "Standard online recording \u2192 upload \u2192 processing \u2192 review \u2192 PDF",
+      "status": "INFO",
+      "detail": "server half exercised via the firmware's own upload route: one session, one object, terminal=done. Recording on the device, Web review and PDF export are not automatable here.",
+      "tier": "live",
+      "evidence": {
+        "session_id": "s-bb8b2c8d"
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-E2E-005",
+      "title": "Session metadata, timestamp, time-zone, device association",
+      "status": "PASS",
+      "detail": "serial=SATE-443EAC n=92 bytes=242732==242732 rate=16000 created_at=2026-09-07T03:54:39.11314+00:00 (UTC, 15s skew)",
+      "tier": "live",
+      "evidence": {
+        "id": "s-bb8b2c8d",
+        "device_serial": "SATE-443EAC",
+        "patient_id": "Standalone",
+        "session_number": 92,
+        "sample_rate": 16000,
+        "bytes": 242732,
+        "created_at": "2026-09-07T03:54:39.11314+00:00",
+        "processed": true,
+        "processed_at": "2026-09-07T03:54:47.408+00:00",
+        "recording_id": "fc8f9f28-51c3-42e4-82b3-d0cae6683b60",
+        "process_error": null,
+        "no_text": false,
+        "status": "done",
+        "attempts": 1,
+        "flags": null,
+        "at": "2026-09-07T03:54:39.11314+00:00",
+        "_status_path": [
+          "queued",
+          "processing",
+          "done"
+        ]
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-COMP-004",
+      "title": "Time zone, DST transition, device clock skew",
+      "status": "PASS",
+      "detail": "the upload API carries NO client timestamp \u2014 created_at is the database's own UTC default, so a wrong recorder clock cannot skew stored time (observed skew 15s). DST is not representable: storage is UTC throughout.",
+      "tier": "live",
+      "evidence": {
+        "created_at": "2026-09-07T03:54:39.11314+00:00",
+        "skew_s": 14.724514
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-COMP-003",
+      "title": "Older app/firmware version against current backend",
+      "status": "PASS",
+      "detail": "/sessions/raw (the pre-chunking upload path, no `total`, no `flags`) is still accepted by device-api v21+ \u2192 HTTP 200. Legacy firmware keeps uploading.",
+      "tier": "live",
+      "evidence": {
+        "http": 200
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-BE-008",
+      "title": "Duplicate AI callback or duplicate result submission",
+      "status": "PASS",
+      "detail": "replayed the identical take: HTTP 200 id=s-bb8b2c8d idempotent=True; rows for session 92 = 1",
+      "tier": "live",
+      "evidence": {
+        "replay": {
+          "id": "s-bb8b2c8d",
+          "idempotent": true
+        },
+        "rows": 1
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-SEC-006",
+      "title": "Signed audio/report URL expiry and sharing",
+      "status": "PASS",
+      "detail": "audio route \u2192 HTTP 302 redirect to a signed URL expiring in 3599s (1 h policy); tampered signature \u2192 HTTP 400",
+      "tier": "live",
+      "evidence": {
+        "status": 302,
+        "expires_in_s": 3599,
+        "tampered_status": 400
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-SEC-002",
+      "title": "Direct URL or session-ID manipulation",
+      "status": "PASS",
+      "detail": "unauthenticated=401; anon-key-only=401; GET=404; POST=404; DELETE=404; bogus=404; PostgREST=200; anon PostgREST rows=0",
+      "tier": "live",
+      "evidence": {
+        "unauthenticated GET /api/sessions": 401,
+        "anon-key-only GET /api/sessions": 401,
+        "GET audio of a non-owned id": 404,
+        "POST retry on a non-owned id": 404,
+        "DELETE a non-owned id": 404,
+        "bogus device key on /sessions/verify": 404,
+        "PostgREST sate_device_sessions with anon key only": 200
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-SEC-005",
+      "title": "Role-based access to review, edit, export, retry, administration",
+      "status": "FAIL",
+      "detail": "admin caller: /admin/status=200 /admin/users=200 /admin/devices=200, POST /firmware=400 (reaches validation, as an admin should); non-admin caller: /admin/status=None POST /firmware=None",
+      "tier": "live",
+      "evidence": {
+        "isAdmin": true,
+        "admin_status": 200,
+        "firmware_publish_admin": 400,
+        "firmware_publish_nonadmin": null,
+        "admin_status_nonadmin": null,
+        "firmware_body": {
+          "error": "A version is required (e.g. 1.1.0)"
+        }
+      },
+      "findings": [
+        "could not create a throwaway non-admin account, so the firmware gate was only verified from source and via the admin path."
+      ]
+    },
+    {
+      "tc": "SATE-BE-012",
+      "title": "Manual reprocess after final processing failure",
+      "status": "PASS",
+      "detail": "retry on a non-error session \u2192 HTTP 409; after forcing error \u2192 retry HTTP 200, status now queued, attempts reset to 0; audit rows for this session=1 (previous_error preserved=True)",
+      "tier": "live",
+      "evidence": {
+        "guard": [
+          409,
+          {
+            "error": "Only a failed session can be retried"
+          }
+        ],
+        "retry": [
+          200,
+          {
+            "id": "s-bb8b2c8d",
+            "status": "queued"
+          }
+        ],
+        "after": {
+          "id": "s-bb8b2c8d",
+          "device_serial": "SATE-443EAC",
+          "patient_id": "Standalone",
+          "session_number": 92,
+          "sample_rate": 16000,
+          "bytes": 242732,
+          "created_at": "2026-09-07T03:54:39.11314+00:00",
+          "processed": true,
+          "processed_at": "2026-09-07T03:54:47.408+00:00",
+          "recording_id": "fc8f9f28-51c3-42e4-82b3-d0cae6683b60",
+          "process_error": null,
+          "no_text": false,
+          "status": "queued",
+          "attempts": 0,
+          "flags": null,
+          "at": "2026-09-07T03:54:39.11314+00:00"
+        },
+        "audit": [
+          {
+            "id": 3,
+            "session_id": "s-bb8b2c8d",
+            "user_id": "bc324864-51a6-4328-be68-d7b0dadaabce",
+            "action": "retry",
+            "detail": {
+              "previous_error": "systest: forced failure",
+              "previous_status": "error",
+              "previous_attempts": 1
+            },
+            "created_at": "2026-09-07T03:55:03.273126+00:00"
+          }
+        ]
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-010",
+      "title": "Manual Retry tapped while automatic retry is already running",
+      "status": "PASS",
+      "detail": "POST /sessions/:id/retry is refused unless status=='error' \u2192 HTTP 409. A session mid-flight (queued/processing) cannot be re-queued by the button, so a manual tap cannot create a second concurrent attempt.",
+      "tier": "live",
+      "evidence": {
+        "http": 409,
+        "body": {
+          "error": "Only a failed session can be retried"
+        }
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-SEC-007",
+      "title": "Deletion, retention, audit trail, and sensitive logging",
+      "status": "PASS",
+      "detail": "DELETE \u2192 HTTP 204; session row gone=True; device-sessions object gone=True; derived recording survived=False; audit table found=True; delete audit rows=1",
+      "tier": "live",
+      "evidence": {
+        "delete": 204,
+        "row_gone": true,
+        "verify": {
+          "stored": false
+        },
+        "audit": {
+          "sate_session_audit": 200,
+          "sate_audit_log": 404,
+          "audit_log": 404,
+          "session_audit": 404
+        },
+        "recording_after_delete": null,
+        "recording_path": null
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-WEB-005",
+      "title": "Edit and save transcript with versioning",
+      "status": "PASS",
+      "detail": "edit saved=True; updated_at bumped=True; `version` column=2; prior transcript kept in recording_versions (1 row(s), v1 = 'original text')",
+      "tier": "live",
+      "evidence": {
+        "saved": true,
+        "updated_at_bumped": true,
+        "history_tables": {
+          "recording_versions": 200,
+          "transcript_versions": 404,
+          "recording_history": 404,
+          "transcript_history": 404
+        },
+        "versions": 1
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-WEB-006",
+      "title": "Save failure and concurrent transcript editing",
+      "status": "PASS",
+      "detail": "both writers saved from v2: A\u2192HTTP 200, B\u2192HTTP 409 (this transcript was changed by someone else (now at ); winner='writer A' at v3; malformed save\u2192HTTP 400",
+      "tier": "live",
+      "evidence": {
+        "a": 200,
+        "b": 409,
+        "final_text": "writer A",
+        "malformed": 400,
+        "base_version": 2
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-SEC-003",
+      "title": "Logout and token invalidation",
+      "status": "PASS",
+      "detail": "before logout API=200; logout\u2192HTTP 204; after logout API=401, /auth/v1/user=403",
+      "tier": "live",
+      "evidence": {
+        "pre": 200,
+        "logout": 204,
+        "post_api": 401,
+        "post_auth": 403
+      },
+      "findings": []
+    },
+    {
+      "tc": "SATE-E2E-004",
+      "title": "Noisy recording with multiple speakers and interruptions",
+      "status": "BLOCKED",
+      "detail": "needs real multi-speaker audio captured on the device and a human judging the transcript",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-E2E-006",
+      "title": "Repeated Stop, Save, Upload actions on the recorder",
+      "status": "BLOCKED",
+      "detail": "the RECORD button is a physical gesture (double-click to start, 3 s hold to stop); sate ci drives the device by REMOTE command and never touches the button",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-LONG-001",
+      "title": "Recording at the 30-minute boundary",
+      "status": "BLOCKED",
+      "detail": "needs the recorder capturing for 30 min",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-LONG-002",
+      "title": "Forty-five-minute recording",
+      "status": "BLOCKED",
+      "detail": "needs the recorder capturing for 45 min",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-LONG-003",
+      "title": "Maximum supported recording duration",
+      "status": "BLOCKED",
+      "detail": "needs a take at the ~62-min firmware ceiling; RQ-07 also still undefined",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-LONG-004",
+      "title": "Long-session upload interrupted and resumed",
+      "status": "BLOCKED",
+      "detail": "needs the recorder's direct Wi-Fi chunked upload and a real AP interruption",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-LONG-006",
+      "title": "Battery, temperature, memory, storage, processing-time observation",
+      "status": "BLOCKED",
+      "detail": "needs battery/thermal telemetry from a running board",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-001",
+      "title": "Recording starts and ends while fully offline",
+      "status": "BLOCKED",
+      "detail": "needs the recorder off-network",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-002",
+      "title": "Internet connection lost during recording",
+      "status": "BLOCKED",
+      "detail": "needs the recorder + AP control",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-003",
+      "title": "Internet lost after Stop but before upload starts",
+      "status": "BLOCKED",
+      "detail": "needs the recorder + AP control",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-004",
+      "title": "Internet drops during an active upload",
+      "status": "BLOCKED",
+      "detail": "needs the recorder's chunked upload mid-flight",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-005",
+      "title": "Connectivity returns while the recorder is idle or asleep",
+      "status": "BLOCKED",
+      "detail": "needs the recorder",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-006",
+      "title": "Wi-Fi connected but no Internet access",
+      "status": "BLOCKED",
+      "detail": "needs the recorder's own detection on a MAC-allowlist / no-egress AP",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-008",
+      "title": "Switch Wi-Fi network or hotspot during upload",
+      "status": "BLOCKED",
+      "detail": "needs the recorder + two APs",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-009",
+      "title": "Rapidly flapping or weak network",
+      "status": "BLOCKED",
+      "detail": "needs the recorder + a controllable AP",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-NET-007",
+      "title": "Captive portal or authentication-required Wi-Fi",
+      "status": "BLOCKED",
+      "detail": "needs the recorder + a captive portal",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-QUE-001",
+      "title": "Five recordings made consecutively while online",
+      "status": "BLOCKED",
+      "detail": "needs five real takes on the device",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-QUE-002",
+      "title": "Start a new recording while the previous session is uploading",
+      "status": "BLOCKED",
+      "detail": "needs the device",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-QUE-003",
+      "title": "Five offline recordings queued and uploaded later",
+      "status": "BLOCKED",
+      "detail": "needs the device off-network",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-QUE-004",
+      "title": "One queued session fails while later sessions continue",
+      "status": "BLOCKED",
+      "detail": "needs several real queued takes plus a forced AI failure on one of them",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-QUE-005",
+      "title": "Queue order and status persist across recorder restart",
+      "status": "BLOCKED",
+      "detail": "needs a device power-cycle",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-REC-001",
+      "title": "Graceful recorder restart during an active recording",
+      "status": "BLOCKED",
+      "detail": "needs the device",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-REC-002",
+      "title": "Forced power loss during an active recording",
+      "status": "BLOCKED",
+      "detail": "needs a physical power cut",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-REC-003",
+      "title": "Low-battery shutdown during recording",
+      "status": "BLOCKED",
+      "detail": "needs a drained battery on the board",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-REC-004",
+      "title": "Insufficient local storage before recording starts",
+      "status": "BLOCKED",
+      "detail": "needs a nearly full SD card",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-REC-005",
+      "title": "Local storage becomes full during recording",
+      "status": "BLOCKED",
+      "detail": "needs a nearly full SD card",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-REC-006",
+      "title": "Restart during the local save/finalization step",
+      "status": "BLOCKED",
+      "detail": "needs precisely timed power loss",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    },
+    {
+      "tc": "SATE-REC-007",
+      "title": "Restart after recording stops but before upload begins",
+      "status": "BLOCKED",
+      "detail": "needs the device",
+      "tier": "hardware",
+      "evidence": {},
+      "findings": []
+    }
+  ]
+}

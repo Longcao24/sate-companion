@@ -2,7 +2,7 @@
 
 Everything a fresh Mac needs to build and flash the **SATE Recorder** (ESP32-S3) and the
 **SATE Pendant** (XIAO nRF52840). Firmware source is in the repo — `SATE_Recorder/` and
-`SATE_Pendant/`. Deeper reference: [`hardware.md`](hardware.md), [`doc/07-runbook.md`](doc/07-runbook.md),
+`SATE_Pendant/`. Deeper reference: [`doc/12-hardware.md`](doc/12-hardware.md), [`doc/07-runbook.md`](doc/07-runbook.md),
 [`doc/09-pendant.md`](doc/09-pendant.md).
 
 ## Fastest paths — pick what you need
@@ -62,7 +62,7 @@ arduino-cli upload -p /dev/cu.usbmodem101 \
 ### Publishing an OTA release (fleet update)
 Bump `FIRMWARE_VERSION` in `SATE_Recorder/SATE_Recorder.ino`, compile, upload the **app** bin
 (`SATE_Recorder.ino.bin`, ~1.7 MB — not the merged bin) to the `firmware` Storage bucket + insert a
-`sate_firmware` row. Full recipe: [`doc/07-runbook.md`](doc/07-runbook.md), [`hardware.md` §12](hardware.md).
+`sate_firmware` row. Full recipe: [`doc/07-runbook.md`](doc/07-runbook.md), [`doc/12-hardware.md` §12](doc/12-hardware.md).
 
 **Before publishing, run the hardware-in-the-loop harness on a real board** (`hwtest/`, Python):
 `cd hwtest && python3 run.py --config config.toml` (`python3 gui.py` / `python3 dashboard.py` for a

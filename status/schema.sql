@@ -5,7 +5,12 @@ CREATE TABLE IF NOT EXISTS checks (
   ts          INTEGER NOT NULL,   -- unix seconds
   status      TEXT    NOT NULL,   -- 'up' | 'degraded' | 'down'
   code        INTEGER,            -- HTTP status (0 = no response)
-  latency_ms  INTEGER
+  latency_ms  INTEGER,
+  -- 1 = no network call happened; this row copies the last REAL probe forward so the
+  -- 90-day bar stays continuous for a rate-limited target (minIntervalSec). The
+  -- throttle in runChecks() only counts carried = 0 rows — without this flag the
+  -- carried row resets the window and the target is never probed again.
+  carried     INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS checks_comp_ts ON checks (component, ts);
 

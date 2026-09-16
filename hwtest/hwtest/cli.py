@@ -1270,7 +1270,7 @@ _HELP_GROUPS = [
     ]),
     ("Graphical tools", [
         ("debug",      "desktop Debugger app — screen mirror + remote control + flashing"),
-        ("pipeline",   "live animated map of the audio pipeline (desktop window)"),
+        ("pipeline",   "live animated map of the audio pipeline (Q simulates a full run)"),
         ("gui",        "launch the native test window"),
         ("dashboard",  "launch the browser test dashboard"),
     ]),
@@ -1347,8 +1347,10 @@ def build_parser() -> argparse.ArgumentParser:
     inf.set_defaults(func=cmd_infra)
 
     pl = sub.add_parser("pipeline", help="live animated map of the audio pipeline (desktop window)")
+    pl.add_argument("--sim", action="store_true",
+                    help="open with no config/login and simulate a full run (also: press Q in the window)")
     pl.set_defaults(func=lambda a: __import__("subprocess").call(
-        [sys.executable, str(REPO / "hwtest" / "pipeline_view.py")]))
+        [sys.executable, str(REPO / "hwtest" / "pipeline_view.py")] + (["--sim"] if a.sim else [])))
 
     d = sub.add_parser("devices", help="list connected devices")
     d.add_argument("--ble", action="store_true", help="also scan for the pendant over BLE")

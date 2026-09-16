@@ -6,9 +6,18 @@ the part most worth reading — **how the firmware is optimized for memory, RAM,
 and the two CPU cores** so long recordings run smooth and never reboot.
 
 Firmware lives in `SATE_Recorder/` (sketch `SATE_Recorder.ino` — folder matches the
-`.ino`, so `arduino-cli` builds it in place). Current source version: **fw 1.5.13**
+`.ino`, so `arduino-cli` builds it in place). Current source version: **fw 1.5.33**
 (`FIRMWARE_VERSION`; dual-core, two external buttons, screen). No GitHub release has been cut for it
 yet, so the prebuilt flash assets are still tagged `fw-1.5.12`. Rollback tag: `fw-0.9.1-working`.
+
+**Looking for the device↔server contract** (how a recorder is claimed, what it sends, every
+endpoint and header)? That is [§7](#7-connectivity--the-device--server-contract) — the pairing,
+API-call, upload, verify, and OTA reference, written so you can reproduce a recorder's traffic
+with `curl`. The **read/monitoring half** — the operator-facing endpoints for watching that
+traffic — is [§7.13](#713-readmonitoring-api--watching-the-traffic-live).
+
+> **Watch it live:** <https://status-sate.long-cao.dev/pipeline> — the animated pipeline map
+> in the browser, signed in with your SATE account. No CLI install; monitoring only.
 
 The **pendant** firmware (XIAO nRF52840, a separate wearable) lives in `SATE_Pendant/`
 with its own `HARDWARE.md` + `flash_xiao.sh` — see that folder and `doc/09-pendant.md`.
@@ -90,6 +99,21 @@ register interface. Begun once, before display init.
 | FLAG button | 14 | external, active LOW, `INPUT_PULLUP` to GND (fw 1.2.0+) |
 | **LCD backlight** | **45** | active HIGH; driven by **LEDC PWM** for auto-dim (fw 1.4.0, §8.25). Defined in the TFT_eSPI `FNK0104AB` setup, not the `.ino`. |
 | **Battery sense** | **9** | ADC1, behind the board's on-board **0.5 divider** (read ×2). `batteryPercent()` → Home chip + heartbeat telemetry (§8.27). *Not* GPIO34 — that's a classic-ESP32 pin, wrong on the S3. |
+| **IO3 — ground rail** | **3** | **Not a signal.** Driven a hard **LOW for the whole life of the firmware** (fw 1.5.33) so a button/LED common wired to IO3 always has a return path. See the note below. |
+
+**IO3 as a ground rail (fw 1.5.33).** `GND_OUT_PIN 3` is set `OUTPUT`/`LOW` in
+`setup()` — *before* the buttons, since a button common on IO3 has no return until
+the pin is driven — and is latched low **through deep sleep** as well
+(`rtc_gpio_set_direction` + `rtc_gpio_hold_en` in `enterBatterySleep()`, released
+with `rtc_gpio_hold_dis` at the top of `setup()`). Without that hold the pin floats
+while asleep and the **RECORD wake button would be dead**, because its ext0 wake
+needs to pull GPIO2 down *through IO3*.
+- ⚠️ **It is a GPIO, not the ground plane** — keep the sink under ~**20 mA**. A
+  pull-up button is ~100 µA; an LED needs its own resistor. Never hang the
+  speaker/backlight return on it.
+- IO3 *is* an S3 strapping pin (JTAG_SEL) but strapping is sampled only at reset
+  and nothing external drives it high, so driving it low afterwards is safe.
+- IO3 is free because RECORD moved to GPIO2 in fw 1.2.14.
 
 **Demo buttons (fw 1.2.0+):** two external push buttons in `SATE_Recorder/`.
 - **RECORD (GPIO2):** on Home a press starts a take, press again stops it; from
@@ -223,26 +247,512 @@ Capture/playback both stream through one **static 4 KB** buffer
 /sate/patients/<patient_id>/session_XXXX.synced     "on server" marker
 ```
 
+Exact names (`sessionPath()` / `sessionPartFile()` in `connectivity.cpp`):
+`session_%04lu.part%02d.wav`, `session_%04lu.json`, `session_%04lu.synced`.
+`<patient_id>` is a directory name — in practice **`Standalone`**, the default
+bucket the recorder records into (patient assignment is optional and normally done
+later on the web report, so `/sate/patients/Standalone/` is the dir you will actually
+see on a field card).
+
 Session "exists" if it has any part file, a legacy merged `.wav`, **or** a
-`.synced` marker. After a successful upload the audio is deleted and only
-`.synced` (+ `.json`) remain, so the SD doesn't fill with synced audio — but the
-session still counts for numbering so reboots never overwrite a recording.
+`.synced` marker — that is what keeps a reclaimed slot numbered so a reboot can
+never overwrite a take.
+
+### Session `.json` — every field, and who reads it
+
+Written by `writeSessionMetadata()` (`SATE_Recorder.ino`) when the take ends, and
+again in the crash-give-up path (`.ino` ~L3560, a minimal JSON carrying at least
+`owner_dev`). The uploader reads it back on every sweep.
+
+| Field | Type | Meaning / who consumes it |
+|---|---|---|
+| `firmware_version` | string | build that recorded the take |
+| `patient_id` | string | SD dir + the `patient_id` query param on upload (`Standalone` by default) |
+| `patient_name` / `age` / `session_type` / `clinician` | string | roster copy, JSON-escaped |
+| `session_number` | 1…99 | the slot; **wraps**, so it is NOT a global ordering key |
+| `take_seq` | uint32, monotonic | lifetime take counter (NVS `sate-seq`). The **recency rank** used by retention — it never wraps, so it survives the 99 wrap. A crash-resumed take re-stamps a fresh value (still newest). Missing (legacy) → falls back to the session number |
+| `owner_dev` | string | the `device_id` of the claim that recorded it. **The uploader skips any session whose stamp ≠ the current `device_id`** — a factory-reset unit claimed by another account can never upload the previous account's audio under the new key |
+| `audio_path` | string | part00 path |
+| `audio_pcm_bytes` / `duration_seconds` | uint32 | PCM payload and length |
+| `sample_rate` / `bit_depth` / `channels` | 16000 / 16 / 1 | uploaded as `&sample_rate=` |
+| `created_ms_since_boot` | uint32 | the device has no RTC — server `created_at` is the real timestamp |
+| `peak_abs` | uint32 | peak \|sample\| of the capture. Near-zero on a full-length take = dead/muted mic; rides the upload as `&peak=` so the dashboard can flag it **before** the audio is trimmed |
+| `flags_ms` | number[] | FLAG-button offsets (ms). Uploaded as `&flags=12000,45000` → `recordings.flags` → amber ticks on the web report's seek bar |
+
+### Session numbering — allocate, never renumber
+
+- Numbers live in **1…`SESSION_NUM_MAX` (99)** and are allocated **monotonically**:
+  highest existing + 1, and past 99 the counter wraps to the **lowest free** slot.
+  A per-dir NVS high-water (`hw%08x`) keeps allocation monotonic across deletes; it
+  only resets at the wrap.
+- **Holes are legal, and deletes never renumber.** `deleteSession()` removes only that
+  session's own files and shifts nothing. The old renumber machinery (NVS `sate-del`
+  journal, `recoverInterruptedDelete()`, `compactPatientDir()`, `renameSessionFiles()`)
+  is **gone** — it caused the worst bug class in the project (renumber under a live
+  upload splicing two takes together, a trash tap after a renumber deleting the wrong
+  take, a power cut mid-renumber reusing a slot). Every scan iterates the directory;
+  **never write code that assumes contiguous `1..N`.**
+- A delete during an upload defers and drops **only** the uploader if it is latched on
+  that exact `(patient, number)` (`upDropReq` / `connNotifySessionDeleted()`); any other
+  session's upload is untouched.
+
+### Lifecycle of one take on the card
+
+```
+record ──► session_NNNN.part00.wav (+ .json)      audio + metadata on SD
+   │        part01, part02 …                      flushed every ~5 s, new part each 60 s
+   ▼
+upload ──► .synced written                        TOMBSTONE: slot stays numbered
+   │                                              (audio still on the card)
+   ▼
+reclaim ─► audio parts deleted, .json + .synced kept
+           ONLY after GET /api/sessions/verify answers stored:true (§7.7)
+           and only for takes older than the newest KEEP_AUDIO_SESSIONS = 5
+```
+
+Full deletion stays **user-only** (the Delete button → `deleteSessionFiles()`). Any doubt
+during reclaim — offline, non-2xx, parse failure, byte mismatch — **keeps** the audio and
+retries on the next sweep (5 min; a take the server keeps answering `stored:false` for is
+parked for 6 h so it can't starve the sweep). See §8.10.
 
 ---
 
-## 7. Connectivity + auto-sync
+## 7. Connectivity — the device ↔ server contract
 
-- **Wi-Fi mode:** auto-uploads sessions to the SATE server, polls
-  `GET /api/devices/:id/commands` (~3 s) for `sync_now` / `reload_patients` /
-  `record` / `reboot`.
-- **BLE mode:** when Wi-Fi is down, advertises to the companion app for
-  provisioning + bridge sync.
+Everything a recorder does with the outside world. Written so you can reproduce it with
+`curl`: exact paths, headers, query params, response bodies, timeouts, and what the
+firmware does with each failure. Implementation: `SATE_Recorder/connectivity.cpp`;
+server side: `react_app_sate-ui_update/supabase/functions/device-api/index.ts` (**v18**).
 
-**Auto-sync is automatic and hands-off.** On a new recording (or on going
-online at boot) the device flags an upload sweep; `connLoop()` then uploads each
-pending session one ~1 MB slice at a time, writes `.synced`, deletes the local
-audio, and moves on. Validated end-to-end at scale (a 64 MB / ~33-min session
-auto-uploads cleanly; device stays online throughout).
+### 7.1 Identity — four names for one recorder
+
+| Name | Example | Where it comes from | Lifetime |
+|---|---|---|---|
+| **serial** | `SATE-D19EB8` | `buildSerial()` — bytes 3/4/5 of the **eFuse factory MAC**, readable before the radio is up | burned in, never changes |
+| **device_id** | `dev-sate-d19eb8` | server, on register: `'dev-' + serial.toLowerCase()` | changes identity on every (re)claim |
+| **device_key** | `key-dev-sate-d19eb8` | server, on register: `'key-' + device_id` | the recorder's only credential |
+| **owner_dev** | `dev-sate-d19eb8` | the `device_id` stamped into each session JSON at record time | per take |
+
+⚠️ **The device key is derivable from the serial**, which is printed on the unit and
+broadcast in BLE advertising. Treat `key-…` as an identifier, not a secret, until the
+scheme is replaced — see `doc/05-backend-supabase.md` and the audit notes.
+
+Config lives in **NVS namespace `sate`** (`Preferences`): `ssid`, `pass`, `server`,
+`dev_id`, `dev_key`. A second namespace `sate-own` holds the previous `device_id` so the
+firmware can detect the unit changed hands. `connFactoryReset()` clears `sate` and reboots.
+**A full-chip `--erase` wipes NVS = same as a factory reset** — see §3.
+
+### 7.2 The two transports
+
+| Mode (`ConnMode`) | When | What it does |
+|---|---|---|
+| `CONN_WIFI_ONLINE` | creds valid + associated | upload sessions, poll commands, heartbeat, verify, OTA |
+| `CONN_WIFI_TRYING` | associating | retries every `WIFI_RETRY_PERIOD_MS` = 90 s |
+| `CONN_BLE_ADV` | no Wi-Fi, or Change-Wi-Fi mode | advertises the SATE service so the app can provision / bridge-sync |
+| `CONN_BLE_CONNECTED` | app connected | provisioning + BLE session bridge |
+| `CONN_OFF` | SD failed / not started | — |
+
+`connLoop()` is the whole net body and runs on a **core-0 task** (`connStartNetTask()`) so
+TLS never stalls the GUI/buttons — **except during provisioning**, which deliberately runs
+on the main loop so the register TLS handshake gets a clean heap (§8.23).
+
+### 7.3 How a path becomes a URL
+
+`cfgServer` is the stored base, including any path prefix:
+
+```
+https://<project>.supabase.co/functions/v1/device-api     ← production
+http://192.168.0.138:4000                                 ← mock-server (mock-server/)
+```
+
+`httpJson()` concatenates `cfgServer + path`, so `/api/devices/x/commands` becomes
+`…/functions/v1/device-api/api/devices/x/commands`. The edge function strips a leading
+`/api`, and **accepts both `/api/*` and `/*`**.
+
+Headers the firmware sends on every authenticated call:
+
+| Header | Value | Note |
+|---|---|---|
+| `Authorization` | `Bearer key-dev-<serial-lower>` | omitted on register (no key yet) |
+| `apikey` | the Supabase **anon** key | only when the host is `*.supabase.co` |
+| `Content-Type` | `application/json`, or `audio/wav` for chunks | |
+
+TLS is `setInsecure()` (no CA bundle on-device). Sockets are pooled
+(`setReuse(true)`) — one warm HTTPS connection carries the poll *and* the chunk uploads,
+because a fresh handshake under Wi-Fi+BLE coexistence can stall for seconds.
+
+`curl` equivalent of any device call:
+
+```bash
+BASE="https://<project>.supabase.co/functions/v1/device-api"
+KEY="key-dev-sate-d19eb8"        # device key
+ANON="<supabase anon key>"
+curl -s "$BASE/api/devices/dev-sate-d19eb8/commands?pending=0&state=idle&fw=1.5.32" \
+  -H "Authorization: Bearer $KEY" -H "apikey: $ANON"
+```
+
+### 7.4 Connecting a device to the system (the claim flow)
+
+Three parties: the **web/mobile app** (user JWT), the **recorder** (BLE, then Wi-Fi), and
+**device-api**. A recorder is useless until it holds a `device_id` + `device_key`.
+
+```
+ App (user JWT)                Recorder                    device-api
+      │                            │                            │
+ 1.   ├─ POST /devices/claim-token ─────────────────────────────►│  row in sate_claim_tokens
+      │◄──────────────── { token: "claim-1a2b3c4d" } ────────────┤  single use
+      │                            │                            │
+ 2.   ├─ BLE write CHAR_CONTROL ──►│  {"op":"provision",         │
+      │   (ssid, pass, server,     │   "ssid","pass",            │
+      │    claim_token)            │   "server","claim_token"}   │
+      │                            │                            │
+ 3.   │◄─ notify CHAR_STATUS ──────┤  {"ev":"state","state":"connecting"}
+      │                            ├─ WiFi.begin(ssid, pass)     │
+      │                            │  ≤28 s, re-begin every 8 s  │
+      │                            │                            │
+ 4.   │                            ├─ POST /api/devices/register ►│  claim_token → user_id
+      │                            │◄─ {device_id, device_key} ──┤  upsert sate_devices
+      │                            │  saveConfig() → NVS         │  token marked used
+ 5.   │◄─ notify CHAR_STATUS ──────┤  {"ev":"state","state":"registered","device_id":…}
+      │                            │                            │
+ 6.   │      (app disconnects)     ├─ CONN_WIFI_ONLINE ─────────►│  heartbeat every 12 s
+```
+
+**Step 1 — mint a claim token** (user JWT, from the app/web):
+
+```http
+POST /functions/v1/device-api/devices/claim-token
+Authorization: Bearer <user JWT>
+→ 200 { "token": "claim-1a2b3c4d" }
+```
+
+Stored in `sate_claim_tokens` with the caller's `user_id` + display name. **Single use** —
+register flips `used=true`, and a second attempt gets `401 Invalid or used claim token`
+(the recorder surfaces this as *"Setup link expired — sign out and back in, then retry"*).
+
+**Step 2 — push credentials over BLE** (see §7.10 for the GATT map). The app writes the
+`provision` op; the firmware saves nothing yet, sets `esp_coex_preference_set(ESP_COEX_PREFER_WIFI)`
+(BLE stays connected so the app can watch, and under the default BALANCE coex a *correct*
+password can fail the 4-way handshake), disables modem sleep, and associates.
+
+**Step 3 — Wi-Fi window.** `WIFI_PROV_TIMEOUT_MS` = 28 s total, re-`begin()` every
+`WIFI_PROV_RETRY_MS` = 8 s (~3 tries). On timeout it reports a *reason-coded* hint:
+`0` → "no response from router — is it 2.4 GHz?", auth-ish reasons → "wrong password",
+otherwise "weak signal or out of range". **The ESP32-S3 has no 5 GHz radio** — a 5 GHz-only
+SSID is the single most common setup failure.
+
+**Step 4 — register** (the only unauthenticated device route):
+
+```http
+POST /functions/v1/device-api/api/devices/register
+Content-Type: application/json
+apikey: <anon key>
+{ "serial": "SATE-D19EB8", "claim_token": "claim-1a2b3c4d", "fw": "1.5.32" }
+
+→ 200 { "device_id": "dev-sate-d19eb8",
+        "device_key": "key-dev-sate-d19eb8",
+        "slp": "Jane Doe", "slp_id": "<user uuid>" }
+```
+
+Server-side it upserts `sate_devices` (`id`, `user_id`, `name`=serial, `serial`, `fw`,
+`online:true`, `ip` from `x-forwarded-for`, `last_seen`, `pending_sessions:0`,
+`state:'idle'`, `slp`, `slp_id`) keyed on `id`, so re-registering the same physical unit
+updates rather than duplicates.
+
+Firmware behavior worth knowing:
+- connect timeout **6 s**, read **8 s**, TLS handshake timeout **5 s**;
+  **5 attempts** with a 600 ms backoff.
+- **A parseable 2xx is not success.** If `device_id`/`device_key` are empty the firmware
+  treats it as failure — persisting blanks once made the device report "registered" while
+  every later call hit `/api/devices//…` unauthenticated, and the next boot silently
+  dropped back to setup with the day's takes unsynced.
+- **4xx = fail fast** (bad/used token; retrying can't help). 5xx/timeout = retry.
+- On success: `saveConfig()` writes NVS, `ownerTrackId()` records the claim, and the device
+  stays in BLE until the app disconnects, then goes online.
+
+**Re-pairing / handing a unit over — two paths, and only two:**
+
+1. **Server-driven (normal).** The SLP removes the recorder in the web app → the
+   `sate_devices` row disappears → the next heartbeat returns `{ "unclaimed": true }` → the
+   firmware calls `connFactoryReset()` (wipes Wi-Fi + account, reboots into first-time
+   setup). The device needs no user at the bench.
+2. **Hold BOOT for 5 s** (`serviceFactoryResetButton()`, `.ino`) — the deliberate full wipe,
+   claimed or not, with a red countdown banner; releasing early cancels.
+
+Changing Wi-Fi **without** losing the account is a separate, app-driven flow (§7.9) — not a
+button. `--erase` on a USB flash is a third, accidental path to the same place: it wipes NVS.
+
+### 7.5 Heartbeat + command poll — one endpoint does both
+
+```http
+GET /api/devices/<device_id>/commands?pending=2&state=recording&fw=1.5.32&ota=&bat=87
+    &recs=412&mv=3980&rst=1&up=53211&heapmin=41232
+Authorization: Bearer key-dev-sate-d19eb8
+apikey: <anon key>
+```
+
+| Param | Meaning |
+|---|---|
+| `pending` | unsynced sessions across all patient dirs → `sate_devices.pending_sessions` |
+| `state` | `idle` \| `recording` \| `uploading` → `sate_devices.state` (a state change forces an immediate heartbeat) |
+| `fw` | running `FIRMWARE_VERSION` → drives the update banner |
+| `ota` | OTA phase: `dl`, `deferred-rec`, `err-begin`, `err-get-<code>`, … → `sate_devices.ota_state` |
+| `bat` | battery % (255 = unknown) |
+| `recs` | lifetime recording count |
+| `mv` | raw cell mV (−1 unknown) — for admin-side battery calibration |
+| `rst` | `esp_reset_reason()` of the last boot |
+| `up` | uptime in seconds |
+| `heapmin` | minimum free **internal** heap since boot — the early warning for TLS/OTA failures |
+
+Response:
+
+```json
+{ "commands": ["record"],
+  "active_patient": { "patient_id": "...", "name": "...", "age": "",
+                      "session_type": "", "clinician": "" },
+  "record_seconds": 300,
+  "ota": { "url": "https://…/firmware/sate_1.5.32.bin", "version": "1.5.32" } }
+```
+
+- ⚠️ **Delivery is at-most-once.** The handler marks *every* unconsumed command
+  `consumed=true` as it reads them, before the device has acted. A reply lost in flight
+  loses those commands — re-issue from the app rather than expecting a retry. (The OTA path
+  compensates by latching the payload when it defers.)
+- `unclaimed:true` (device row gone) → factory reset, described above.
+- `active_patient` is staged **before** the command list runs, so a queued `record` tags the
+  take to that patient.
+- `record_seconds` (device-api ≥ v17, fw ≥ 1.5.19) makes the device stop the take **itself**
+  at exactly N seconds of PCM — sample-exact, instead of racing a `stop` through the poll
+  channel (+3–12 s of slop).
+
+| Command | Effect on the recorder |
+|---|---|
+| `record` / `record`+`seconds` | `sateHookRecord()` / `sateHookRecordTimed(n)` — capture runs on the UI core |
+| `stop` | ends the take; **latched only while a take is armed** (`recTakeArmed`) so a stop issued during the take's own start sequence is not swallowed |
+| `sync_now` | re-arm the upload sweep |
+| `resync_all` | drop every `.synced` marker and re-upload what the card still holds (deferred into the SD bracket) |
+| `reload_patients` | re-fetch `/api/patients` and rewrite `patients.json` |
+| `wifi_change` | drop to BLE Change-Wi-Fi mode without unclaiming |
+| `reboot` | reboot in ~300 ms |
+| `ota` | flash the `.bin` in the sibling `ota` payload (§7.9) |
+
+The server flips a device to `online:false` when `last_seen` is older than **45 s**
+(`listDevices`), so the 12 s poll gives ~3 misses of slack.
+
+### 7.6 Uploading a take — chunked, resumable, idempotent
+
+The uploader is **cooperative**: one ~1 MiB slice per pass, then back to `connLoop()` so
+polling and the GUI keep running. Slices stream straight from the SD file (`File` is a
+`Stream`) — memory stays flat regardless of take length.
+
+```http
+POST <prefix>/api/sessions/chunk
+     ?device_serial=SATE-D19EB8&patient_id=Standalone&session_number=7
+     &sample_rate=16000&peak=18422&flags=12000,45000
+     &offset=<bytes so far>&final=<0|1>&total=<full byte length>
+Authorization: Bearer key-dev-sate-d19eb8
+apikey: <anon key>
+Content-Type: audio/wav
+<~1 MiB of the WAV>
+
+→ 200 { "ok": true, "received": 1048576, "offset": 0 }      (non-final)
+→ 200 { "id": "s-1a2b3c4d" }                                 (final, stored)
+→ 200 { "id": "s-…", "idempotent": true }                    (final, already stored)
+→ 409 offset gap / size mismatch / missing part
+```
+
+**Server side** (`handleSessionUpload`): each slice lands as its **own object** at
+`<device_id>/_tmp/<patient_id>/s<n>/<offset padded to 12>.part` in the `device-sessions`
+bucket (upsert, so re-sending a slice is free). On `final=1` it lists the parts, checks
+they form a **gap-free** stream and that the total matches `&total=`, downloads them 8 at a
+time straight into one pre-allocated buffer, patches the RIFF/`data` sizes, stores
+`<user_id>/<serial>/s-<id>.wav`, inserts `sate_device_sessions`, deletes the parts, and
+fires the processor. Then the async AI pipeline takes over (`queued → processing → done`).
+
+Why each rule exists — do not "simplify" these away:
+
+| Rule | Reason |
+|---|---|
+| Parts are separate objects | the old one-blob version re-uploaded the whole temp file per slice: quadratic, and late slices blew the 12 s timeout → a backlog that could never drain |
+| `offset=0` clears the part dir | leftover higher-offset parts from an abandoned attempt would otherwise be stitched onto the new upload |
+| Part dir scoped by `patient_id` | session numbers restart per patient; a shared dir could stitch a WAV out of **two patients' audio** |
+| Final probes for an existing row **and** the object | a lost ACK must be a no-op, not a 9-minute re-upload; a row alone is not proof (the 413 bug left ghost rows, which are deleted and re-stored) |
+| `&total=` (fw ≥ 1.5.9) | without it a mis-mapped resume could assemble a short or padded WAV and still return 2xx |
+| Upload failure **throws** | it used to log and insert the row anyway → device marked the take synced and freed its only copy while the server held a row pointing at nothing |
+
+**Timeouts and retries (firmware):** connect 6 s; **12 s** per ordinary slice, **60 s** on
+the final (the server assembles the whole session there). Any failure keeps the offset and
+retries the same slice — **except HTTP 409**, the one case where the device restarts the
+session from byte 0. A session that keeps failing is parked for `UPLOAD_PARK_RETRY_MS`
+(5 min) so it can't starve the others; going online or `sync_now` clears all parks.
+
+**Legacy endpoints, still live** — useful for testing, not used by current firmware:
+`POST /api/sessions/raw` (whole WAV as the body, metadata in the query) and
+`POST /api/sessions` (JSON with `wav_base64`). Both funnel into the same
+`storeSessionRecord()` with the same idempotency probe.
+
+### 7.7 Verify before the audio is freed
+
+The device is the **only** copy of a take until it is provably on the server.
+
+```http
+GET /api/sessions/verify?patient_id=Standalone&session_number=7&bytes=113246444
+Authorization: Bearer key-dev-sate-d19eb8
+→ 200 { "stored": true }
+```
+
+`device_serial` is deliberately **omitted** so the server defaults it to this device's own
+serial — the same identity the take was uploaded under. The server answers `stored:true`
+only when the row exists **and** its storage object really exists; it never mutates
+anything. `sessionAssembledBytes()` computes `bytes` exactly as the server stored it
+(part00 keeps its 44-byte header, later parts contribute PCM only).
+
+Firmware treats the answers asymmetrically: only a clean 2xx carrying `stored:false` is a
+*definitive no*. Offline, non-2xx, or an unparseable body → **keep the audio**. See §8.10.
+
+### 7.8 Patient roster
+
+```http
+GET /api/patients
+Authorization: Bearer key-dev-sate-d19eb8
+```
+
+Device-key auth: the function resolves the device's owner and returns *that user's*
+roster (`listPatients`), written to `/sate/patients.json`. In practice the recorder records
+standalone and this is mostly cosmetic — patients are assigned later on the web report.
+
+### 7.9 OTA, and Change-Wi-Fi
+
+**OTA.** An `ota` command carries `{ url, version }` in the sibling payload. `runOtaUpdate()`
+skips if `version` equals the running build; **defers** (latching the payload, phase
+`deferred-rec`) if a take is armed — flashing stalls both cores' cache and the success path
+reboots, which would cut a live patient recording. It then closes the pooled TLS socket
+(the poller's ~40 KB mbedTLS arena is exactly why a busy heap gives `err-get-1`), downloads
+with its own client (redirects followed, insecure TLS, 20 s read), writes the spare app
+slot, and reboots. The new image boots **PENDING_VERIFY** and is committed only after it
+proves healthy, so a bad *or* wedged build rolls back on the next power cycle.
+
+⚠️ **On a device with an upload backlog, queue `reboot` first, wait for it to come back,
+then `ota`** — the first poll after boot flashes with a clean heap. Details in §8.28 and
+`doc/07-runbook.md`.
+
+**Change-Wi-Fi** — app-driven only: the `change_wifi` BLE op (the recorder is already in BLE
+range) or the `wifi_change` remote command (drops an online recorder to BLE so the phone can
+push new creds). It re-associates and persists new creds **without** re-registering — the
+account, server, and device key are kept. Requires `provisioned` (else `"device not set up
+yet"`); auto-cancels after `WIFI_CHANGE_TIMEOUT_MS` = 3 min; `cancel_wifi` leaves
+immediately. **The BOOT button is not part of this flow** — holding it is a full factory
+reset (§7.4).
+
+### 7.10 BLE — the provisioning + bridge channel
+
+Advertised manufacturer data is `[0x5A, flags, pending, 0]`, service UUID in the ADV packet.
+Full protocol (framing, JSON ops, chunked session bridge) mirrors `src/protocol.ts` in the
+companion app — see **`doc/04-ble-protocol.md`**.
+
+| Characteristic | UUID | Props |
+|---|---|---|
+| Service | `53415445-0001-4a7e-8c5e-000000000001` | — |
+| `CHAR_INFO` | `…-000000000010` | READ → `{"model":"SATE Recorder","fw":…,"serial":…,"provisioned":bool}` |
+| `CHAR_CONTROL` | `…-000000000020` | WRITE — JSON ops, `[flag][payload]` framed (`FRAME_PARTIAL`/`FRAME_FINAL`), reassembled into `CTRL_BUF_MAX` |
+| `CHAR_STATUS` | `…-000000000030` | NOTIFY — `{"ev":…}` events |
+| `CHAR_DATA` | `…-000000000040` | NOTIFY — session audio bridge, 4 KB blocks, same framing |
+
+MTU is set to 247 and notifications are framed in `BLE_CHUNK` = 180-byte packets
+(`notifyFramed()`, which **fails the whole message** rather than let a dropped packet look
+like a fully-sent WAV).
+
+Ops on `CHAR_CONTROL`: `scan_wifi`, `provision`, `change_wifi`, `cancel_wifi`,
+`list_sessions`, `send_session`, `mark_synced`, `set_patients`, `reboot`, `factory_reset`.
+
+⚠️ `list_sessions` / `send_session` refuse with *"recorder busy — try again"* while the UI
+core owns the SD card (recording / saving / deleting) — a list taken mid-take would report
+the in-progress session as pending and the bridge would stream a partial file and tombstone
+a take that is still recording.
+
+### 7.11 Timing constants (all in `connectivity.cpp`)
+
+| Constant | Value | What it paces |
+|---|---|---|
+| `CMD_POLL_PERIOD_MS` | 12 s | command poll / heartbeat |
+| `HEARTBEAT_PERIOD_MS` | 15 s | pending-session rescan cadence |
+| `WIFI_BOOT_TIMEOUT_MS` | 18 s | associate at boot before falling back to BLE |
+| `WIFI_PROV_TIMEOUT_MS` / `_RETRY_MS` | 28 s / 8 s | provisioning window / re-`begin()` |
+| `WIFI_RETRY_PERIOD_MS` | 90 s | reconnect attempts once offline |
+| `WIFI_SCAN_ATTEMPT_MS` | 11 s | one `scan_wifi` attempt (≤2) |
+| `WIFI_CHANGE_TIMEOUT_MS` | 3 min | auto-exit Change-Wi-Fi |
+| `ADV_REFRESH_PERIOD_MS` | 30 s | refresh BLE advertising payload |
+| `TRIM_SWEEP_PERIOD_MS` | 5 min | verify-gated audio reclaim sweep |
+| `UPLOAD_PARK_RETRY_MS` | 5 min | retry a repeatedly-failing session |
+| `VERIFY_PARK_RETRY_MS` | 6 h | retry a take the server says it does not hold |
+| `UPLOAD_CHUNK_BYTES` | 1 MiB | slice size |
+| HTTP timeouts | 2 s connect / 2.5 s read (JSON), 6 s / 12 s (slice), 6 s / 60 s (final), 6 s / 8 s (register), 8 s / 20 s (OTA) | |
+
+### 7.12 When it goes wrong — symptom → cause
+
+| Symptom | Cause / fix |
+|---|---|
+| *"Setup link expired"* on register | claim token already used or from another account — mint a fresh one |
+| *"Server registration failed (code N)"* | 5 attempts exhausted. `code=-1` historically = no contiguous internal RAM for the TLS handshake (§8.8/§8.23); `code=0` = never reached the server |
+| Wi-Fi "wrong password" that is right | 5 GHz-only SSID, or the BLE-coexistence handshake failure the `ESP_COEX_PREFER_WIFI` window fixes |
+| Registers, then every call 401s | empty `device_id`/`device_key` persisted — fixed in fw ≥1.5.x, which refuses a credential-less 2xx |
+| Device drops to first-time setup on its own | the account removed it → heartbeat `{unclaimed:true}` → factory reset. Expected |
+| Uploads "in progress" forever | pre-v12 quadratic chunk path, or repeated 12 s timeouts. Check `heapmin` and `sate infra` |
+| Session row exists, audio 404s | ghost row (Storage rejected the object — check the **project-wide** file size limit, not just the bucket's). Verify now deletes and re-stores these |
+| OTA `err-get-1` | fragmented heap → `reboot` first, then `ota` |
+| Device online but no commands land | commands are marked consumed on read — a lost reply drops them; re-issue |
+
+**Auto-sync is hands-off.** On a new recording (or on going online at boot) the device flags
+an upload sweep; `connLoop()` uploads each pending session one ~1 MiB slice at a time, writes
+`.synced`, and later reclaims the audio once verify says it is durably stored. Validated
+end-to-end at scale (a 64 MB / ~33-min session auto-uploads cleanly; the device stays online
+throughout).
+
+### 7.13 Read/monitoring API — watching the traffic live
+
+Everything above is what the **recorder** calls with its `device_key`. This section is the
+other half of the contract: the **operator-facing read API** used to watch that traffic —
+what the live pipeline map, the Debugger and `sate pipeline` all run on.
+
+**→ Live map: <https://status-sate.long-cao.dev/pipeline>** — sign in with your SATE account.
+Nothing to install; it is the `sate pipeline` view rebuilt in the browser (§ below).
+
+Different auth from the device path — these take a **user JWT**, not a device key:
+
+| Header | Value |
+|---|---|
+| `Authorization` | `Bearer <supabase user JWT>` (from `/auth/v1/token?grant_type=password`) |
+| `apikey` | the Supabase **anon** key (public client key, ships in the firmware and both apps) |
+
+| Endpoint | Returns | Used for |
+|---|---|---|
+| `GET {device-api}/api/devices` | the account's claimed devices: `serial`, `fw`, `online`, `state`, `battery_pct`, `battery_mv`, `pending_sessions`, `ota_state`, `last_seen` | recorder tier dot, device header, device picker |
+| `GET {device-api}/api/sessions/upload-progress?device_serial=…` | `{uploading, uploads:[{patient_id, session_number, parts, bytes}]}` | **the only** server-side truth for a take mid-upload — the session row does not exist yet, so this sums the `_tmp` part objects (device-api ≥ v16) |
+| `GET {SUPABASE}/rest/v1/sate_device_sessions?select=…&device_serial=eq.…` | session rows: `session_number`, `patient_id`, `bytes`, `status`, `processing_started_at`, `process_error`, `attempts` | the session table + queue/processing state |
+
+⚠️ **Field names are `battery_pct` / `battery_mv`**, not `battery` / `cell_mv`. Guessing them
+yields a header that silently renders `—` forever — the values are simply absent, not zero.
+
+All three upstreams (Supabase auth, REST, device-api) send `access-control-allow-origin: *`,
+so a browser can call them directly with the viewer's own JWT. That is what lets the live map
+be **static HTML with no server-side credential**: RLS scopes every read to whoever signed in.
+
+:::warning[Do not put a service key or an account password behind a monitoring page]
+The first cut of the live map gated itself with a URL key and logged the Worker in with a
+stored `SATE_EMAIL`/`SATE_PASSWORD`. That put the account that can publish **fleet-wide OTA**
+into a Worker secret, and made the link itself the credential — anyone with the URL saw that
+one account's patient data. Both are gone. Authenticate the **viewer**, and let RLS decide.
+:::
+
+**Two honesty rules the map follows** — worth keeping in anything else that reads this API:
+
+- **A failed fetch is not a red light.** Offline/DNS/CORS means *we could not ask*, which is
+  reported as grey "no data". Only an explicit bad HTTP status is "down". A false red on a
+  monitoring page is worse than an admitted gap.
+- **Idle never fakes green.** A stage lights up only when a row or an in-flight upload proves
+  it. The cf-processor and AI dots are *inferred from the queue* (a job past the 45-min
+  watchdog turns them red) because a Cloudflare Worker cannot probe its own account — that
+  returns **error 1042** — and the map says so on the page rather than implying a real probe.
 
 ---
 
@@ -711,30 +1221,60 @@ Fixes (fw 1.5.1):
   to avoid a cross-core `File` race). The sweep re-begins the session from the
   server's known offset once the UI releases the bus, same as an upload stall.
 
-### 8.30 Charging indicator — voltage-trend, no charge-status pin (fw 1.5.2)
-The board (and the external charge module) exposes **no CHRG status line** to the
-ESP, so the firmware cannot read the charger directly. 1.5.0/1.5.1 guessed with
-`if (Serial)` — which is true whenever USB is **enumerated for power**, so the unit
-showed **"charging" even when it wasn't** — plus a fixed `>= 4250 mV` check.
+### 8.30 Charging indicator — layered detection, no charge-status pin (fw 1.5.33)
+**Behaviour: USB-C plugged in ⇒ charging ⇒ the Home battery chip animates** (a bolt
+plus the battery glyph sweeping EMPTY→FULL on a ~1.3 s loop, in green, with the live
+% beside it). Once the charger has terminated the sweep **stops on a full glyph at
+100%** — an animation that never ends reads as stuck.
 
-**Fix (1.5.2):** `isUsbCharging()` now infers charge state from the **cell-voltage
-trend**. An external charger pushes the voltage **up**; the device's own load pulls
-an unplugged cell **down**. Sampled every ~5 s with **±15 mV hysteresis** (the ADC
-is an 8-read average, so noise is small):
-- rise ≥ 15 mV per sample → charging; drop ≥ 15 mV → unplugged; flat → hold last
-  state.
-- `mv ≥ 4300` → charging regardless (a resting 1S LiPo never reaches that).
-- no sensing (`mv < 0`) → not charging (unknown).
+**Why this is inference and not a pin read.** The charge circuit is **on-board** (the
+USB-C feeds both the S3's native USB and the charger) and exposes **no CHRG/STAT
+line** to a GPIO. Two hardware facts bound what firmware can do:
+- `usb_serial_jtag_is_connected()` (`HWCDC::isPlugged()`) counts **SOF packets**, so
+  it only sees a real USB **host**. IDF's own docs: *"Having the USB port connected
+  to a power bank will never be considered as connected."* **True is trustworthy,
+  false is not.**
+- The ESP32-S3 has **no VBUS-sense register** — with the internal PHY, the OTG
+  `vbus_valid` is tied high, so it can't be read either.
 
-Reliable for **unplug** (load sags the voltage at once) and **bulk charge** (voltage
-climbs). Weak spot: at a **full cell on the charger** the voltage is flat and high,
-so it holds the last state — acceptable since the unit really is still plugged.
+**The layers** (`batteryService()` in `SATE_Recorder.ino`, one ADC sample per 3 s,
+32 reads averaged):
 
-> **⭐ Upgrade to true detection (one wire):** TP4056/TP4057-class charge boards
-> have a **CHRG (STAT)** pad — open-drain, pulled **LOW while charging**, floating
-> when done. Solder CHRG → a spare ESP32 GPIO, enable the internal pull-up, and read
-> it (`LOW` = charging). That replaces the heuristic with a real hardware signal.
-> IP5306/power-bank ICs instead report status over **I²C** (no simple pin).
+| # | Signal | Effect |
+|---|--------|--------|
+| a | USB **host** attached — or **lost** after being attached (1-sample debounce) | plugged / unplugged, certain. The only **bidirectional** signal here. |
+| b | sensed node ≥ **4250 mV** | plugged (no 1S cell rests there) |
+| c | **step** ≥ **25 mV** between consecutive raw samples | the fast path: plugging in moves the ~120 mA load off the cell *and* pushes ~1 A through its internal resistance, so the node jumps **60–90 mV** within one sample. Unplug mid-charge is the same in reverse. |
+| d | **4-minute trend**, ±**8 mV** on the smoothed value | catches a **boot/OTA reboot that happened while already on the charger** (no step to see). CC charge climbs ~3 mV/min ≈ 12 mV/window; an idle pack drains ~0.5 mV/min — the two never overlap. |
+
+Anything none of the layers can see **holds the previous state** — the chip never
+flickers.
+
+> **Two design rules that are load-bearing, both found by simulation, not the bench:**
+> 1. **Slow tests run on the smoothed (EMA) value, only the step test on the raw
+>    read.** The slow tests compare against single-digit mV thresholds — the same
+>    size as the ADC's own noise — so run raw they misfire constantly.
+> 2. **The trend and the charge-terminated test are windowed *slopes* (compare the
+>    two ends of a fixed window, decide once, reopen), never "has it moved since the
+>    reference".** A threshold retested every sample against a fixed reference is
+>    eventually crossed by noise alone, and the *sign* of that crossing is a coin
+>    flip; the ratchet variant has the mirror bug — noise keeps restarting the clock
+>    so the window never completes and the state is never reached.
+
+**Known limit (accepted).** Unplugging a **full** pack from a **dumb charger** is
+nearly invisible — the charger already stopped pushing current, so there is no step —
+and takes a trend window or two (**~4–8 min**) to notice. Off a USB **host**, layer
+(a) catches it immediately.
+
+> **⭐ Upgrade to true detection (one wire):** a TP4056/TP4057-class **CHRG (STAT)**
+> pad is open-drain, **LOW while charging**, floating when done. Solder CHRG → a
+> spare GPIO, enable the internal pull-up, read `LOW` = charging, and every caveat
+> above disappears. IP5306/power-bank ICs report status over **I²C** instead.
+
+**History:** 1.5.0/1.5.1 used `if (Serial)` (true whenever USB was enumerated for
+power → "charging" when it wasn't). 1.5.2 replaced it with a ±15 mV-per-5 s trend,
+which mis-called the state often enough that **1.5.6 hid the animation entirely**
+(`SHOW_CHARGE_EFFECT 0`). 1.5.33 is the rewrite above and turns it back on.
 
 ### 8.31 ⭐ Battery protection: low-voltage cutoff + charging heat (fw 1.5.3)
 Two separate problems on a 1S LiPo (**3000 mAh** cell as shipped).
@@ -747,9 +1287,36 @@ Two separate problems on a 1S LiPo (**3000 mAh** cell as shipped).
 
 **Battery-% calibration (fw 1.5.8).** The raw read under-reads ~1.4% (divider
 tolerance + ESP32 ADC): a full cell measured **~4142 mV raw**, so `readBatteryMv()`
-applies a 1-point **gain `4200/4142 ≈ 1.014`** to put full at 4200 mV = 100%. Refine
-with a second low-end point (multimeter vs the /admin **Cell mV** column) and adjust
-`BAT_CAL_GAIN` (or the `batteryPercent()` LUT) if the low range drifts.
+applies a 1-point **gain `4200/4142 ≈ 1.014`**. Refine with a second low-end point
+(multimeter vs the /admin **Cell mV** column) and adjust `BAT_CAL_GAIN` (or the
+`batteryPercentFromMv()` LUT) if the low range drifts.
+
+**⚠️ Why the battery never reached 100% — and the fix (fw 1.5.33).** The old curve
+put 100% at **4200 mV**, the charger's CV setpoint, which the *sensed node* never
+actually shows in service. Three effects stack:
+1. a TP4056-class charger **terminates** when the taper current falls to ~1/10 of
+   `Iset`; the cell then **relaxes to ~4.15–4.18 V** while still plugged in,
+2. the device's own **~120 mA draw sags** the node another ~10 mV below the resting
+   voltage the LUT was written against,
+3. the divider + S3 ADC under-read is corrected by a **1-point gain tuned on one
+   unit**, so any other board lands a few mV low.
+
+So a genuinely, completely full pack read ~4150 mV and displayed **95% forever**.
+Two changes make 100% reachable and honest:
+- the LUT now tops out at **`BAT_FULL_LUT_MV` = 4150 mV = 100%** (top of the curve
+  respaced: 4150/4120/4090/4050/4000…),
+- a **charge-terminated latch**: on USB power, above `BAT_FULL_MV` (4120 mV), if the
+  smoothed reading climbs **< 6 mV across a 4-minute window** the charger has
+  finished → report a real **100%**, held until the pack actually starts draining
+  (< `BAT_FULL_CLEAR_MV`, 4050 mV) so the chip doesn't fall back to 96% the instant
+  the cell relaxes off 4.20 V.
+
+Two related quality fixes in the same version: `readBatteryMv()` averages **32**
+reads (was 8) since the charge detector's whole error budget is ADC noise, and the
+displayed % is smoothed (EMA ~12 s) then **ratcheted one-way** — counts up only
+while charging, down only while discharging — so it never jitters 89/90/89.
+`connSetTelemetry()` now reports the **same smoothed sample** the % came from, so
+the admin **Cell mV** column and the % beside it are always a consistent pair.
 
 **A) Over-discharge (firmware — fixed in 1.5.3).** A LiPo dragged below ~3.0 V is
 permanently damaged. The board has no low-voltage cutoff wired to the ESP, so the

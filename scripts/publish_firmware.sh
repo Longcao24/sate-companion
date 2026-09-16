@@ -19,7 +19,7 @@ set -euo pipefail
 SUPABASE_URL="https://zlgdpivcbmaodgokkdvz.supabase.co"
 ANON_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpsZ2RwaXZjYm1hb2Rnb2trZHZ6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDk3NTY5NTgsImV4cCI6MjA2NTMzMjk1OH0.x58hiBi5EeRwbedrsrBzRkw7y2tFBw5ztIdmujZoPMQ"
 DEVICE_API="${SUPABASE_URL}/functions/v1/device-api"
-# OTA REQUIRES the dual-app-slot partition. Do NOT change to huge_app (see Hardware.md).
+# OTA REQUIRES the dual-app-slot partition. Do NOT change to huge_app (see doc/12-hardware.md).
 FQBN="esp32:esp32:esp32s3:FlashSize=8M,PartitionScheme=default_8MB,PSRAM=opi"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

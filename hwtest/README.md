@@ -165,6 +165,14 @@ them from the Debugger when a release touches delete/renumber code.
 - **`sate pipeline`** / Debugger "Live pipeline view" — animated realtime map of
   the pipeline: green behind the audio, the current hop pulsing with a moving dot,
   live elapsed, and past-run timings with averages.
+  **Press `Q` to simulate a full run** — record → chunked upload (growing byte
+  count) → the gap before the row lands → queued → cf-processor claims it → AI →
+  done, with real stage timings and a real byte-derived audio length, all in pure
+  Python (`hwtest/pipeline_sim.py`). No device, no server, no network: it feeds the
+  view the same event stream the poll thread does, so the map's own state machine
+  animates it and the window is labelled `SIMULATION` throughout. `Esc` aborts.
+  The record phase runs for exactly the duration in the box, so `4` demos in ~35 s.
+  `sate pipeline --sim` opens the window with no config/login and starts it.
 
 **Regression rule:** every new feature or fix re-runs `sate ci` before it lands;
 backend-touching changes add `sate e2e`.

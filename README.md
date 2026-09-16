@@ -7,7 +7,7 @@ an **Expo phone app**, a **Vite/React web app**, and a **Supabase + Cloudflare**
 
 | I want to work on… | Start here |
 |---|---|
-| **Recorder / Pendant firmware** — build, flash, **edit code** | **[`SETUP.md`](SETUP.md)** → `git clone` then `./toolchain/setup-arduino.sh` (zero-to-flash), edit `SATE_Recorder/` · `SATE_Pendant/`. Deep ref: [`hardware.md`](hardware.md) |
+| **Recorder / Pendant firmware** — build, flash, **edit code** | **[`SETUP.md`](SETUP.md)** → `git clone` then `./toolchain/setup-arduino.sh` (zero-to-flash), edit `SATE_Recorder/` · `SATE_Pendant/`. Deep ref: [`doc/12-hardware.md`](doc/12-hardware.md) |
 | **Just flash a board** (no toolchain) | [GitHub Release `fw-1.5.12`](https://github.com/Longcao24/sate-companion/releases/tag/fw-1.5.12) → `merged.bin` via [web flasher](https://espressif.github.io/esptool-js/) |
 | **Phone app** (React Native / Expo) | `src/` — see the phone-app section below |
 | **Web app** (Vite / React) | `react_app_sate-ui_update/` (`npm i && npm run dev`) |

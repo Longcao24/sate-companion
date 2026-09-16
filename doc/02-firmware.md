@@ -8,7 +8,7 @@ Current version: **fw 1.5.32** (`FIRMWARE_VERSION` string, `SATE_Recorder.ino:11
 (`react_app_sate-ui_update/supabase/functions/device-api/index.ts`, version in the header comment).
 The prebuilt flash assets on GitHub Releases may lag the source tag — bump the release per firmware.
 Deep hardware reference (pin map, board + build/flash, audio pipeline, optimization playbook,
-LVGL/PSRAM memory budget): root `hardware.md`.
+LVGL/PSRAM memory budget): `12-hardware.md`.
 
 ## File map
 
@@ -37,7 +37,7 @@ by `connNetStackHighWater()` in the serial `DIAG` dump.
 > **The net task is NOT started in `setup()`.** During provisioning `connLoop()` runs on the **main
 > loop** (see `loop()`), so the register TLS handshake has the heap it needs while BLE is up. `loop()`
 > calls `connStartNetTask()` only once the device goes online. This ordering is load-bearing for the
-> boot-resume fallback (below) and for register `code -1` heap headroom — see `hardware.md` §8.15
+> boot-resume fallback (below) and for register `code -1` heap headroom — see `12-hardware.md` §8.15
 > (dual-core) and §8.23 / §8.8 (register heap).
 
 Earlier firmware (≤1.2.4) was single-core (GUI + networking interleaved on one core); the move to
@@ -396,7 +396,7 @@ never discard the minutes already recorded.
 
 ## Optimization summary
 
-The recorder runs in tight RAM. Key techniques (full detail in `hardware.md`):
+The recorder runs in tight RAM. Key techniques (full detail in `12-hardware.md`):
 
 - Stream everything — no length-proportional `malloc` (response streamed into fixed buffers; JSON
   parsed into a PSRAM arena `s_jsonPsram`).
