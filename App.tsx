@@ -51,17 +51,60 @@ function Root() {
   // stay identity-stable (no churn of `api` / dependent effects every render).
   const storeRef = useRef({ update, signOut, refreshToken: settings.refreshToken });
   storeRef.current = { update, signOut, refreshToken: settings.refreshToken };
+
+  // THE NEWEST refresh token, written the instant a refresh returns one.
+  //
+  // Supabase ROTATES refresh tokens: the moment one is used it is dead, and
+  // re-using it comes back `invalid_grant` / `already_used` — which this app
+  // classifies as authInvalid and signs the user out.
+  //
+  // React state lands a render LATER than the network call returns, and this app
+  // polls `listDevices` every 2 s with auto-sync alongside, so there is always
+  // traffic in that gap. A request that 401'd on the OLD access token would read
+  // the OLD refresh token out of `storeRef` and spend it a second time — and the
+  // user gets thrown back to the login screen seconds after signing in, with
+  // nothing logged to say why. A ref is written synchronously and closes the gap.
+  const liveRefreshToken = useRef<string | null>(settings.refreshToken);
+  const seenFromStore = useRef<string | null>(settings.refreshToken);
+  // The freshest ACCESS token, for the same reason as liveRefreshToken.
+  const tokenRef = useRef<string | null>(settings.token);
+  // When the last refresh SUCCEEDED. A burst of requests that all 401'd on the
+  // pre-refresh access token must not each trigger another refresh; they simply
+  // need the token we already have.
+  const lastRefreshOk = useRef(0);
+  if (settings.refreshToken !== seenFromStore.current) {
+    // The store changed underneath us — a fresh sign-in, or the refresh we just
+    // did committing. Either way the store is now authoritative.
+    seenFromStore.current = settings.refreshToken;
+    liveRefreshToken.current = settings.refreshToken;
+    tokenRef.current = settings.token;
+    // A brand-new sign-in must not inherit the previous session's cooldown.
+    lastRefreshOk.current = 0;
+  }
+
   // Single in-flight refresh, shared by the proactive timer and any 401 retry,
   // so parallel callers don't race (Supabase rotates refresh tokens).
   const refreshing = useRef<Promise<string | null> | null>(null);
 
   const doRefresh = useCallback<RefreshHandler>(() => {
     if (refreshing.current) return refreshing.current;
-    const rt = storeRef.current.refreshToken;
+    // Refreshed a moment ago? Then this 401 came from a request that was already
+    // in flight with the previous access token. Hand back the current one rather
+    // than spending the rotated refresh token again.
+    if (Date.now() - lastRefreshOk.current < 15000) {
+      return Promise.resolve(storeRef.current.refreshToken ? tokenRef.current : null);
+    }
+    const rt = liveRefreshToken.current ?? storeRef.current.refreshToken;
     if (!rt) return Promise.resolve(null);
     refreshing.current = (async () => {
       try {
         const r = await refreshSession(rt);
+        // Synchronously, BEFORE React re-renders: anything that 401s in the gap
+        // must see the rotated token, not the one we just spent.
+        liveRefreshToken.current = r.refreshToken;
+        seenFromStore.current = r.refreshToken;
+        tokenRef.current = r.token;
+        lastRefreshOk.current = Date.now();
         storeRef.current.update({
           token: r.token,
           refreshToken: r.refreshToken,
@@ -71,7 +114,14 @@ function Root() {
       } catch (e) {
         // Only sign out when the refresh token is genuinely dead. A network blip
         // must NOT log the user out — the session is kept and retried later.
-        if (e instanceof RefreshError && e.authInvalid) storeRef.current.signOut();
+        const authInvalid = e instanceof RefreshError && e.authInvalid;
+        // Being signed out is the most disruptive thing this app can do to
+        // someone, and it used to happen with NOTHING written anywhere. Say so.
+        console.log(
+          `[auth] refresh failed: ${(e as Error).message} — ` +
+            (authInvalid ? "signing out (refresh token is dead)" : "keeping the session")
+        );
+        if (authInvalid) storeRef.current.signOut();
         return null;
       } finally {
         refreshing.current = null;
