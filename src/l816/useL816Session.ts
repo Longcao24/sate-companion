@@ -160,6 +160,10 @@ const RETRY_MS = 20000;
 // pair calls boostDiscovery() and gets a continuous scan while it is open.
 const DISCOVERY_SCAN_MS = 8000;
 const DISCOVERY_REST_MS = 22000;
+// A recorder is forgotten only after it has been silent for more than two full
+// cycles. Anything shorter and a device sitting on the desk flickers in and out
+// of the offer as each burst ends.
+const DISCOVERY_STALE_MS = 75000;
 
 export function useL816Session(
   api: SateApi,
@@ -604,10 +608,28 @@ export function useL816Session(
   // scans on one BleManager is the thing RULE #2 forbids, and a screen that
   // scans independently of a session that also scans is exactly how you get
   // there. See ble/radio.ts.
+  // What the radio has heard, and WHEN. Kept in refs, not state, on purpose.
+  //
+  // The scan runs with `allowDuplicates: true`, so every advertisement from
+  // every device in the room arrives as a callback — many per second. Writing
+  // that straight into React state re-rendered the whole screen on each packet,
+  // which is a jank and battery cost paid by someone who is only reading a
+  // report. State is now updated only when the ANSWER changes: a recorder
+  // appears, or one goes away.
+  const foundRef = useRef<Record<string, { d: L816FoundDevice; at: number }>>({});
+  const seenRef = useRef<Record<string, L816SeenDevice>>({});
   const [foundMap, setFoundMap] = useState<Record<string, L816FoundDevice>>({});
   const [seenMap, setSeenMap] = useState<Record<string, L816SeenDevice>>({});
   const [bleState, setBleState] = useState("starting…");
   const [boost, setBoost] = useState(0);
+  const boostRef = useRef(0);
+  boostRef.current = boost;
+
+  const publishFound = useCallback(() => {
+    const out: Record<string, L816FoundDevice> = {};
+    for (const [id, v] of Object.entries(foundRef.current)) out[id] = v.d;
+    setFoundMap(out);
+  }, []);
 
   // 🛑 Discovery is only allowed to scan when NOTHING ELSE owns the radio.
   //
@@ -636,15 +658,17 @@ export function useL816Session(
 
   useEffect(() => {
     // Nothing to discover once we are on a device, and the radio is needed for
-    // the link. Also: never scan while backgrounded — the session's job in the
-    // background is the CONNECTION, not looking for new hardware.
+    // the link.
     if (!enabled || connectedId || !mayScan) {
       l816.stopScan();
+      foundRef.current = {};
+      seenRef.current = {};
       setFoundMap({});
       return;
     }
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let seenPublish = 0;
 
     const begin = async () => {
       if (stopped) return;
@@ -658,18 +682,47 @@ export function useL816Session(
         return;
       }
       l816.startScan(
-        (d) => setFoundMap((prev) => (prev[d.id] ? prev : { ...prev, [d.id]: d })),
-        (sd) => setSeenMap((prev) => ({ ...prev, [sd.id]: sd })),
+        (d) => {
+          const fresh = !foundRef.current[d.id];
+          foundRef.current[d.id] = { d, at: Date.now() };
+          // Only a NEW recorder is news. Re-rendering on every advertisement
+          // from one we are already showing changes nothing on screen.
+          if (fresh) publishFound();
+        },
+        (sd) => {
+          seenRef.current[sd.id] = sd;
+          // The raw list is only rendered behind "Can't find your recorder?",
+          // so it is published at most once a second and only while a screen is
+          // actually asking for it.
+          if (boostRef.current > 0 && Date.now() - seenPublish > 1000) {
+            seenPublish = Date.now();
+            setSeenMap({ ...seenRef.current });
+          }
+        },
         (st) => setBleState(st)
       );
-      if (boost > 0) return; // a pairing screen is open: keep scanning
+      if (boostRef.current > 0) return; // a pairing screen is open: keep scanning
       timer = setTimeout(() => {
         if (stopped) return;
         l816.stopScan();
-        // Forget what we heard: a recorder that has been carried out of the room
-        // must stop being offered, and a stale "found" row that fails to connect
-        // is worse than no row at all.
-        setFoundMap({});
+        // Drop only what has been SILENT for more than a couple of cycles.
+        //
+        // This used to clear everything at the end of each burst, which meant a
+        // recorder sitting on the desk was offered for 8 seconds and withdrawn
+        // for 22, over and over — a banner that blinks is one people learn to
+        // distrust, and it is unclickable half the time. A device carried out of
+        // the room still stops being offered; it just takes a cycle to be sure,
+        // which is the right way round: a stale row costs one failed tap, a
+        // blinking one costs the feature.
+        const cut = Date.now() - DISCOVERY_STALE_MS;
+        let dropped = false;
+        for (const [id, v] of Object.entries(foundRef.current)) {
+          if (v.at < cut) {
+            delete foundRef.current[id];
+            dropped = true;
+          }
+        }
+        if (dropped) publishFound();
         timer = setTimeout(begin, DISCOVERY_REST_MS);
       }, DISCOVERY_SCAN_MS);
     };
@@ -680,7 +733,7 @@ export function useL816Session(
       if (timer) clearTimeout(timer);
       l816.stopScan();
     };
-  }, [enabled, connectedId, l816, boost, mayScan]);
+  }, [enabled, connectedId, l816, boost, mayScan, publishFound]);
 
   // Download one take off the device, decode it, and upload it to SATE.
   const uploadTake = useCallback(
