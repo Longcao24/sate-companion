@@ -265,6 +265,24 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   on the device, still unmarked, and goes up by itself on the next connect. That is why a
   server-side fix reaches recordings that already failed, with no app update.
 
+**⚠️ THE WATCHDOG MUST OUTLAST THE LONGEST LEGITIMATE JOB (2026-09-16)**
+- `STUCK_MINUTES` was **45** while `AI_READ_TIMEOUT_S` is **3600 (60 min)**, so any take needing
+  45–60 min of transcription was requeued MID-TRANSCRIPTION: the GPU work thrown away, an
+  attempt burned, and after `MAX_ATTEMPTS` it landed in `error` — a take that was being
+  processed correctly. Nothing hit it while uploads died at ~10 minutes; **lifting the upload
+  ceiling is what made it reachable**, which is the general lesson: raising a limit in one tier
+  moves load into tiers that were never sized for it. Now **90** (60-min AI ceiling + 15-min
+  download read ceiling + finalize, with room).
+- 🛑 **THREE copies of that number exist and they must agree**: `cf-processor/wrangler.toml`
+  `STUCK_MINUTES`, and TWO `STUCK_MS` constants in `device-api` — `adminStatus` (the admin
+  page) and `healthAlerts` (the operator's EMAIL alerts). If either device-api copy is the
+  smaller, you get paged about jobs that are simply still running, and an alert that cries wolf
+  is one nobody reads when it is real.
+- **`MAX_AUDIO_SEC` (default 4 h) refuses a take the AI cannot finish**, raised as `Permanent`
+  so it fails once with a clear message instead of three times at an hour each. The audio is
+  not lost — it is in Storage, and for a handheld still on the device. There is a MIN guard
+  (`MIN_AUDIO_SEC`) and there was no MAX until uploads could carry one.
+
 **⚠️ Device AI processing is ASYNC — never call the AI from an edge function**
 - **The bug:** the old `process-device-session` edge ran `fetch(AI_PROCESS_URL)` (ngrok, self-hosted
   CUDA) and *awaited* the whole transcription. Supabase edge has a hard ~150s wall-clock limit

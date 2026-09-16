@@ -37,6 +37,16 @@ MAX_ATTEMPTS = int(os.environ.get("MAX_ATTEMPTS", "3"))
 # permanently stuck 'error'. Finalize these as no_text WITHOUT ever calling the AI.
 # 0.4 s is far below any real clinical utterance. See _has_text for the post-AI case.
 MIN_AUDIO_SEC = float(os.environ.get("MIN_AUDIO_SEC", "0.4"))
+# Upper bound, and it exists because the UPLOAD ceiling was lifted far past it.
+#
+# The phone can now hand over a take of any length Storage accepts (~5 GB, tens of
+# hours) — but nothing downstream grew to match: the AI call has a one-hour read
+# ceiling, and a take that cannot finish inside it does not fail cleanly, it fails
+# THREE TIMES and burns an hour of GPU each time before landing in 'error' anyway.
+# So refuse it up front, with a message that says what happened, rather than
+# discovering it slowly. 4 h is far beyond any clinical session and still well
+# inside what the AI can actually chew through.
+MAX_AUDIO_SEC = float(os.environ.get("MAX_AUDIO_SEC", "14400"))
 # A take whose audio is AUDIBLE but which the AI returns with zero words is far more likely
 # to be a flaky AI response than a genuinely silent recording: byte-identical speech audio
 # was measured coming back empty on roughly one upload in three, and transcribing normally
@@ -239,6 +249,15 @@ def process(s):
         finalize({"session_id": sid, "no_text": True})
         _log(f"{sid}: audio {dur:.3f}s < {MIN_AUDIO_SEC}s — finalized no_text, skipped AI")
         return
+
+    # Too long to be transcribable. Permanent on purpose: retrying cannot make the
+    # recording shorter, and the audio is NOT lost — it is in Storage and, for a
+    # handheld, still on the device.
+    if dur is not None and dur > MAX_AUDIO_SEC:
+        raise Permanent(
+            f"audio is {dur / 3600:.1f} h, longer than the {MAX_AUDIO_SEC / 3600:.1f} h "
+            f"this pipeline will transcribe. The recording is stored and can be split "
+            f"or processed manually; raise MAX_AUDIO_SEC if the AI service can take it.")
 
     transcript = call_ai(file_name, wav)
     if not transcript or not isinstance(transcript.get("segments"), list):

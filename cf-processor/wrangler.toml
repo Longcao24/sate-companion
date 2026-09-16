@@ -33,8 +33,19 @@ new_sqlite_classes = ["ProcessorContainer"]
 [vars]
 SUPABASE_URL = "https://zlgdpivcbmaodgokkdvz.supabase.co"
 FINALIZE_URL = "https://zlgdpivcbmaodgokkdvz.supabase.co/functions/v1/finalize-session"
-STUCK_MINUTES = "45"   # a 32-min take + transfer fits well under this; watchdog reclaims beyond it
+# 🛑 THE WATCHDOG MUST OUTLAST THE LONGEST LEGITIMATE JOB, or it reclaims work that is
+# still running. It was 45 while AI_READ_TIMEOUT_S is 3600 (60 min), so any take needing
+# 45-60 min of transcription was requeued MID-TRANSCRIPTION: the GPU work was thrown away,
+# an attempt was burned, and after MAX_ATTEMPTS it landed in 'error' — a take that was
+# being processed correctly. Nothing hit it while uploads died at ~10 minutes; lifting the
+# upload ceiling made it reachable. 90 = the 60-min AI ceiling + the 15-min download read
+# ceiling + finalize, with room to spare.
+# ⚠️ device-api's adminStatus has its own copy of this number. Change both.
+STUCK_MINUTES = "90"
 MAX_ATTEMPTS = "3"
+# Refuse a take the AI cannot finish inside its read ceiling, instead of failing it three
+# times at an hour each. 4 h; see MAX_AUDIO_SEC in app/processor.py.
+MAX_AUDIO_SEC = "14400"
 POLL_INTERVAL = "10"   # seconds between empty-queue polls
 WORKER_ID = "cf-container-1"
 
