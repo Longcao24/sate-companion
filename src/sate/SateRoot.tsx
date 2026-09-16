@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { makeApi, refreshSession, RefreshError, RefreshHandler } from "../api/sateApi";
 import { LoginScreen } from "../screens/LoginScreen";
@@ -237,7 +237,23 @@ export function SateRoot() {
             onOpenDevice={openL816}
             onOpenSettings={() => setScreen({ name: "tab", tab: "settings" })}
             onOpenPreview={() => setScreen({ name: "tab", tab: "dashboard" })}
-            onAddSate={() => setScreen({ name: "tab", tab: "dashboard" })}
+            // Pairing a SATE L816 is something THIS app can do — it holds the
+            // link and uploads the takes (see useL816Session). Leaving it out of
+            // the sheet meant the only hardware the app actually drives was the
+            // one device you could not add.
+            onAddL816={L816_ENABLED ? () => setScreen({ name: "l816" }) : undefined}
+            // A Wi-Fi recorder is NOT something this app can set up: provisioning
+            // is a BLE handshake plus Wi-Fi credentials, and that flow lives in
+            // Companion. Say so, rather than bouncing the user back to the
+            // dashboard as if the tap had worked.
+            onAddSate={() =>
+              Alert.alert(
+                "Set up a recorder in SATE Companion",
+                "A SATE recorder joins your account over Bluetooth and needs Wi-Fi " +
+                  "details, which is done in the SATE Companion app. Once it is set up, " +
+                  "its recordings appear here automatically."
+              )
+            }
           />
           <View style={s.devBack} pointerEvents="box-none">
             <Pressable
