@@ -230,6 +230,21 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   1 / 5 / 10 / 20 / 40 / **62 min (119 MB WAV, 159 MB body) all 200**, in 9 s at 62 min;
   90 min (230 MB body) is a **502 at the gateway**, above the edge function entirely. The
   recorder's own ceiling is ~62 min, so this covers every take the hardware can make.
+- **`POST /api/sessions/upload-url` + `POST /api/sessions/register` (v27) are the ONLY routes
+  with no size ceiling.** Every byte-carrying route puts the audio through the function, so
+  every one of them has a limit that no amount of tuning moves — the streaming fix gets ~62 min
+  through and 90 min is a 502 at the GATEWAY, before the function is reached. So the bytes stop
+  coming through at all: the client asks for a signed upload URL, PUTs the WAV straight into
+  Storage, then registers it; the function only ever sees metadata. 🛑 `storage_path` is
+  confined to the caller's own `<user id>/` prefix (a caller naming any path could otherwise
+  register another account's audio as their own session), and the byte count is read from
+  **Storage**, never from the client. Verified live: 90 min / 172.8 MB — the exact size that
+  was a 502 — uploads and registers; out-of-prefix paths get 403; an unuploaded path gets 409
+  rather than a ghost row.
+- ⚠️ **Storage's real object limit measured 2026-09-16 is ~208–211 MB, NOT the 500 MB this file
+  used to claim** (`413 EntityTooLarge`, "The object exceeded the maximum allowed size"). That
+  is ~108–110 minutes of 16 kHz mono. It is a PROJECT setting (Storage settings → global file
+  size limit), not a code limit, so raising it is a dashboard change.
 - **`POST /api/sessions/chunk` now accepts a USER JWT too (v26)**, not only a device key.
   Same handler, same part objects, same contiguity and idempotency checks; parts are rooted
   at `u_<user id>` and NEVER at a caller-supplied serial (that would let one account write
