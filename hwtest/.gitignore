@@ -1,5 +1,8 @@
 # credentials — NEVER commit (copy config.example.toml → config.toml and fill it in)
-config.toml
+# The GLOB matters: `config.toml` alone left `config.toml.bak` tracked, and a stray backup
+# holds the same live access_token / device_key / anon_key as the original. An editor or a
+# `cp` is all it takes to create one, and a credential pushed to GitHub cannot be unpushed.
+config.toml*
 
 # python
 .venv/
