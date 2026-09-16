@@ -32,7 +32,7 @@ routes, columns, and constants. They describe what is actually built and running
 | [12-hardware.md](12-hardware.md) | **Deep hardware reference:** board + chips, pin map, build/flash, audio + SD layout, session metadata, **the full device↔server contract (claim/register, heartbeat, chunked upload, verify, OTA, BLE GATT)**, and the memory / RAM / core optimization playbook |
 | [13-system-test.md](13-system-test.md) | **Full system test, user-side.** All 88 cases (65 P0) from `SATE_Complete_English_Test_Cases.xlsx`, rewritten as steps a person can run with a recorder, a phone and a browser — each with a **server-side note** naming the actual table, route and constant to check, plus the known defects that will make specific cases fail |
 | [14-l816.md](14-l816.md) | **SATE L816 handheld recorder** (Android-only): the `55 AA` BLE protocol, the three-notify setup, the legacy length quirk, the four rules that make a transfer trustworthy, and why the ASC-VI codec pins this family to Android |
-| [15-sate-app.md](15-sate-app.md) | **The SATE app** — the second Android app (reports-first, installed alongside Companion): how one codebase builds two apps, why nothing is computed on the phone, the one permitted edit (renaming a speaker), and why it still runs the L816 session |
+| [15-sate-app.md](15-sate-app.md) | **The SATE app** — the second Android app (reports-first, installed alongside Companion): how one codebase builds two apps, why nothing is computed on the phone, the one permitted edit (renaming a speaker), why it still runs the L816 session, and what an iOS build can and cannot be |
 
 ## System in one paragraph
 

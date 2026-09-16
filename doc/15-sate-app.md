@@ -109,6 +109,51 @@ on. See [14-l816.md](14-l816.md) §11a.
 ⚠️ **Two apps, one recorder.** The L816 talks to one phone — and one app — at a time. With
 both installed they will compete for it; the loser retries every 20 s and logs why.
 
+## 6a. iOS — what it can and cannot be
+
+An iOS build of this app is feasible and prepared (`SATE_VARIANT=sate expo prebuild -p ios`, bundle
+id `agency.sate.app`). **It cannot talk to an L816 or L815, and never will.**
+
+That is not a matter of effort. The two ASC-VI decoder binaries are:
+
+```
+libASCDecoder.so: ELF 64-bit LSB shared object, ARM aarch64
+libasc_dec.so   : ELF 64-bit LSB shared object, ARM aarch64
+entry points    : Java_com_actions_asc_jni_ASCDecoder_{init,readHead,decode,destroy}
+```
+
+Two independent walls, either one sufficient: **ELF** is the Linux/Android binary format and an iOS
+process cannot load it (iOS needs Mach-O), and the only entry points are **JNI**, a bridge that
+needs a JVM. BLE itself is portable — the phone would download a take and then have no way to turn
+it into a WAV, which is worse than not offering it. Hence
+`L816_ENABLED = Platform.OS === 'android' && isAscAvailable()`.
+
+So an iOS SATE app is **reports, transcripts, playback, speaker renaming** — no pairing. Making it
+more would need an ASC-VI decoder for iOS: the vendor's arm64 Mach-O build, or the algorithm
+reverse-engineered and rewritten. A separate project, not a build flag.
+
+**What is already set up:** `sate-asc` and `sate-fgservice` declare `platforms: ['android']`, so they
+are not autolinked into iOS, and both use `requireOptionalNativeModule` — importing them on iOS
+returns `null` rather than throwing. `expo export --platform ios` bundles clean.
+
+**iOS permission strings are the variant's, not Companion's.** Inherited, they read *"SATE Companion
+uses Bluetooth to set up your SATE Recorder"* in a system dialog over an app called SATE, which sets
+up nothing — and three of the five were for capabilities this app does not have. The variant drops
+the `plaud-sate` plugin (Local Network + Location, for Plaud WiFi), sets expo-audio's
+`microphonePermission: false` (SATE only *plays* audio), rewrites the Bluetooth and camera strings,
+and turns `NSAllowsArbitraryLoads` **off** — filtering the inherited key is not enough, Expo's
+template sets it on by default. Two accurate purpose strings, where there were five.
+
+⚠️ `plugins` is shared with Android, so re-check the merged Android manifest after touching it. The
+foreground-service permissions live in the **module's own** manifest and merge at build time —
+reading `android/app/src/main/AndroidManifest.xml` alone says they are missing, which is a false
+alarm.
+
+**Blocked on:** `sudo xcodebuild -license accept` (it stops even `clang --version`, so CocoaPods
+cannot install pods), and then signing, which needs an Apple Developer account and Xcode.
+
+---
+
 ## 7. Navigation
 
 Bottom bar: **Dashboard · Reports · Settings**. Three destinations because the app has three;

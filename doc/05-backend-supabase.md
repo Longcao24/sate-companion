@@ -344,23 +344,77 @@ minute to keep the container warm.
 | `firmware` | public | OTA `.bin` releases (`sate_<version>.bin`) |
 | `mobile` | public | Mobile uploads |
 
-### ⚠️ The project-wide file size limit overrides the bucket's
+### ⚠️ Two file-size limits, and the BUCKET's is the one that bit us
 
-**A bucket's `file_size_limit` is not the real ceiling.** The project's *global* file size limit
-(Dashboard → Storage → Settings) takes precedence and is **50 MB by default**. A full-length take is
-~118 MB (`RECORD_MAX_SECONDS` ≈ 3700 s × 32 KB/s), so the global limit must stay well above that —
-it is currently **500 MB**. On the Free plan 50 MB is a hard cap; raising it needs Pro or above.
+There are two, and **whichever is smaller wins** — so checking only one is how the wrong one gets
+blamed:
 
-This cost a real 62-minute recording: a 413 ("The object exceeded the maximum allowed size") was
-*swallowed* by `storeSessionRecord`, the row was inserted anyway, the device got a 2xx and marked
-the session synced. Two independent bugs — a silent limit and a swallowed error — lined up. Both are
-fixed (the upload now **throws**), but check this limit first if large sessions land as rows with
-`process_error: "download failed: Object not found"`. Probe the real ceiling empirically:
+| Where | Read it with | Value (2026-09-16) |
+|---|---|---|
+| Project-wide | Management API `GET /v1/projects/<ref>/config/storage` → `fileSizeLimit` | **5 GB** |
+| Per bucket | Storage API `GET /storage/v1/bucket/device-sessions` → `file_size_limit` | **5 GB** |
 
-```bash
-dd if=/dev/zero of=/tmp/p.bin bs=1m count=120
-npx supabase storage cp /tmp/p.bin ss:///device-sessions/_probe/p.bin --linked --experimental
-```
+This document used to say the project limit *overrides* the bucket's. **That is backwards.**
+Measured empirically: with the project already at 500 MB, uploads failed at exactly **200 MiB**
+(`413 EntityTooLarge`, "The object exceeded the maximum allowed size") — the bucket's own limit.
+Both were raised to 5 GB (~43 h of 16 kHz mono) and an 8 h / 922 MB take then uploaded and
+registered. 5 GB is a **bound, not "off"**: far past anything the hardware can produce, still small
+enough that a bug cannot write a 50 GB object.
+
+Probe the real ceiling by bisecting actual PUTs rather than trusting either number.
+
+**The older, worse failure this section was written for** is still the reason to check here first:
+a 413 was once *swallowed* by `storeSessionRecord`, the row was inserted anyway, the device got a
+2xx and marked the session synced — a 62-minute recording lost to a silent limit plus a swallowed
+error. The upload now **throws**. If large sessions land as rows with
+`process_error: "download failed: Object not found"`, this limit is still the first thing to check.
+
+## Uploading a take from the PHONE — three routes, one of them with no ceiling
+
+The recorder has its own device key and uses `/sessions/chunk` (see above). Hardware that has **no
+`sate_devices` row and no device key** — the L816/L815 handhelds, the pendant, Plaud — uploads
+through the phone as a signed-in *user*, and that path has its own history worth knowing.
+
+| Route | Auth | Ceiling | Use |
+|---|---|---|---|
+| `POST /sessions` (`wav_base64` in JSON) | user JWT | ~62 min | short takes |
+| `POST /sessions/chunk` `[v26]` | user JWT **or** device key | assembly holds one copy | firmware; available to the phone |
+| `POST /sessions/upload-url` + `/sessions/register` `[v27]` | user JWT | **none in this tier** | anything long |
+
+**`[v26]` The single-shot route was killing the function on long takes.** Three innocent lines —
+`await req.json()`, destructure, `Uint8Array.from(atob(...))` — hold **four copies at once**: the
+raw request text, the parsed object's copy of the base64 string, the binary string `atob` returns,
+and the byte array. Ten minutes of 16 kHz mono is ~19 MB of PCM and ~26 MB base64'd, so that is
+upwards of 100 MB for 19 MB of audio, and the worker is killed **part-way through** with
+**HTTP 546 `WORKER_RESOURCE_LIMIT` — "Function failed due to not having enough compute resources"**.
+
+🛑 **That message says *compute*, so it reads as an AI/model problem.** It is not: it is this
+function running out of **memory**. Worth recognising on sight — it sent a whole investigation at
+Workers AI, which this project calls in exactly one place (`sate-notes`), where nothing had failed.
+
+`readSessionBody` now **streams** the body: metadata is collected as text (it is tiny) and the
+base64 value is decoded four characters at a time straight into one pre-sized buffer, so peak
+memory is the audio once. Measured against the deployed function: 1 / 5 / 10 / 20 / 40 min and
+**62 min (119 MB WAV, 159 MB body) all 200**, 9 s at 62 min. **90 min is a 502 at the gateway** —
+above the function entirely, so no server code moves it.
+
+**`[v27]` Which is why the bytes stop coming through at all.** `POST /sessions/upload-url` returns a
+signed Storage URL **at the take's final path** (the session id is issued then, so nothing is copied
+or moved afterwards); the client PUTs the WAV straight into Storage; `POST /sessions/register`
+writes the row. The function only ever handles metadata.
+
+Two guards, both easy to leave out and both verified:
+
+- **`storage_path` is confined to the caller's own `<user id>/` prefix.** The caller names the path,
+  so the caller could name *any* path — without this a signed-in user could register another
+  account's audio as their own session. The signed URL only permits writes there, but this route
+  must not depend on that having been the way in. (Three out-of-prefix paths → three 403s.)
+- **The byte count comes from Storage, never from the client**, and a path with no object gets a
+  **409 instead of a row**. A row whose object is not really there is the ghost the old 413 bug left
+  behind, and it strands the recording on the device for ever.
+
+Parts on the chunk path are rooted at `u_<user id>` for the same reason, never at a caller-supplied
+serial.
 
 ## Migrations (no `migrations/` dir in the repo — DB-owned)
 

@@ -287,7 +287,7 @@ Handling of a claimed job (`attempt` from the row):
 - The raw WAV stays in the `device-sessions` bucket until a run succeeds — a failure **never loses
   audio**. `fail_session` only writes status/error text; it never touches storage.
 
-### Constants (verified against the code, 2026-07)
+### Constants (verified against the code, 2026-09-16)
 
 | Constant | Value | Source | Meaning |
 |---|---|---|---|
@@ -297,12 +297,43 @@ Handling of a claimed job (`attempt` from the row):
 | `upload_recording` read | **∞** (`None`) | `processor.py` | `(30, None)` — the only uncapped read |
 | `finalize` total | **120 s** | `processor.py` | `timeout=120` |
 | `_rpc` total | **30 s** | `processor.py` | all RPCs |
-| `STUCK_MINUTES` | **45** | `processor.py` / `wrangler.toml` | watchdog reclaim threshold; matches device-api `healthAlerts`/`adminStatus` `STUCK_MS` |
+| `STUCK_MINUTES` | **90** | `processor.py` / `wrangler.toml` | watchdog reclaim threshold — see the invariant below |
+| `MAX_AUDIO_SEC` | **14400** (4 h) | `processor.py` (env) | longer than this is refused up front as `Permanent` |
 | `MAX_ATTEMPTS` | **3** | `processor.py` / `wrangler.toml` | after this many tries a stuck/transient job → `error` |
 | `POLL_INTERVAL` | **10 s** | `processor.py` / `wrangler.toml` | empty-queue poll + backoff base |
 | `WORKER_ID` | **`cf-container-1`** | both | claim owner |
 | `sleepAfter` | **20 m** | `src/index.ts` | container idle window before sleep |
 | `sate-processor` | **1 instance**, `standard-1` | `wrangler.toml` | serial queue drain (GPU concurrency 1) |
+
+### 🛑 The watchdog must outlast the longest legitimate job
+
+`STUCK_MINUTES` was **45** while `AI_READ_TIMEOUT_S` is **3600 (60 min)**. A take needing 45–60
+minutes of transcription was therefore requeued **mid-transcription**: the GPU work thrown away, an
+attempt burned, and after `MAX_ATTEMPTS` it landed in `error` — a recording that was being processed
+*correctly*, reported to the clinician as failed.
+
+Nothing hit it while uploads died at ~10 minutes. **Lifting the upload ceiling is what made it
+reachable**, and that is the general shape worth remembering: raising a limit in one tier moves load
+into tiers nobody sized for it. 90 = the 60-min AI ceiling + the 15-min download read ceiling +
+finalize, with room.
+
+⚠️ **THREE copies of that number exist and they must agree:**
+
+| Where | Symbol | Effect if it is the smaller one |
+|---|---|---|
+| `cf-processor/wrangler.toml` | `STUCK_MINUTES` | requeues jobs that are still running |
+| `device-api` → `adminStatus` | `STUCK_MS` | the admin page calls live jobs "stuck" |
+| `device-api` → `healthAlerts` | `STUCK_MS` | the operator is **emailed** about live jobs |
+
+Both device-api copies were hardcoded at 45 with a comment claiming they matched. Fixing only the
+container would have stopped the bad requeue and kept paging about jobs that are simply still
+running — and an alert that cries wolf is one nobody reads when it is real.
+
+**`MAX_AUDIO_SEC` refuses what the AI cannot finish.** There was a MIN guard (`MIN_AUDIO_SEC`) and
+no MAX, because until the upload ceiling moved nothing could deliver one. Raised as `Permanent`, not
+`Transient`: retrying cannot make a recording shorter, so it fails **once**, clearly, instead of
+three times at an hour each. The audio is not lost — it is in Storage, and for a handheld still on
+the device.
 
 ## Monitoring & alerting
 

@@ -265,6 +265,30 @@ present, `Authorization: Bearer <token>`.
    network/server failure (→ keep the session, retry later). **A network blip must never log the
    user out.**
 
+### 🛑 The phone was being logged out by the WEB app (2026-09-16)
+
+Reported as "logged out after a while for no reason". Nothing on the phone had done anything wrong.
+
+**`supabase.auth.signOut()` defaults to `scope: 'global'`** — it revokes the user's refresh tokens
+on *every* device. The web app called it bare in `AuthProvider.signOut`, so logging out of the
+browser ended the session in the SATE apps on the phone too.
+
+**The error code is the evidence, and it points away from the client.** A refresh came back
+`refresh_token_not_found` — the row is **gone**, i.e. the session was deleted server-side — not
+`invalid_grant` / "already used", which is what rotation or a re-spent token looks like. Those two
+are worth telling apart on sight: one sends you to the client's token handling, the other to
+whatever deleted the session.
+
+- **Web:** the normal logout is now `signOut({ scope: 'local' })` — log out of *this browser*. The
+  one place global is right is a password change (`ResetPasswordPage`), which *should* end other
+  sessions; that one is deliberately left bare.
+- **Phone:** mobile `signOut()` only clears AsyncStorage and never revokes anything server-side.
+  Keep it that way — it cannot cascade.
+- **An unasked-for sign-out now says why.** `Settings.signedOutReason` is set when a refresh fails
+  with a dead token and rendered on the login screen, cleared on the next successful sign-in. A
+  session can be ended by something the phone never sees; landing on a login form with no
+  explanation is what makes a perfectly normal revocation read as the app losing sessions at random.
+
 **REST surface** (device-api unless noted, prefix `/api`):
 
 | Method | Path | Client method |
