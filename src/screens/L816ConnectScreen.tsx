@@ -1,9 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, FlatList, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Alert,
+  FlatList,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { SateApi } from "../api/sateApi";
 import { Button, Card, GlassBackground, Muted, ProgressBar, Title } from "../components/ui";
 import { Patient } from "../protocol";
-import { L816FoundDevice, L816Link, L816SeenDevice } from "../l816/L816Link";
+import { L816FoundDevice, L816Link, L816SeenDevice, L816_DISPLAY_NAME } from "../l816/L816Link";
 import { KnownL816 } from "../l816/L816Store";
 import { L816Session, fmtDur, fmtTakeName } from "../l816/useL816Session";
 import { D } from "../theme";
@@ -198,6 +207,51 @@ export function L816ConnectScreen({
   const seenList = useMemo(() => Object.values(seen).sort((a, b) => b.rssi - a.rssi), [seen]);
   const scanningNow = !connected && state !== "connecting" && scanPhase === "scan";
 
+  // How long we have been looking, in seconds. Drives the two things a scan
+  // needs and had neither: an honest "still looking" instead of a frozen
+  // "Scanning…", and a point at which to admit it is not working.
+  const [waited, setWaited] = useState(0);
+  useEffect(() => {
+    if (!scanningNow) {
+      setWaited(0);
+      return;
+    }
+    const t = setInterval(() => setWaited((n) => n + 1), 1000);
+    return () => clearInterval(t);
+  }, [scanningNow]);
+
+  // PAIR THE ONE RECORDER YOU FOUND, without making the user tap it.
+  //
+  // The screen used to present a scan as a menu: a list of results, and a second
+  // list of every Bluetooth device in the room to pick from by MAC address if
+  // the first one was empty. For a user with one recorder in their hand that is
+  // a menu of one, plus a wall of hex — a choice where there is no decision.
+  //
+  // The 1.5 s settle is the part that matters. Picking on the FIRST sighting
+  // would race a second recorder that is about to advertise, and silently pair
+  // whichever one happened to be heard first. So: wait a moment, and auto-pair
+  // ONLY when exactly one candidate is still the only candidate. Two or more and
+  // the list is a real choice, so it is shown.
+  const autoPicked = useRef(false);
+  useEffect(() => {
+    if (!scanningNow || autoPicked.current || foundList.length === 0) return;
+    const t = setTimeout(() => {
+      if (autoPicked.current || foundList.length !== 1) return;
+      autoPicked.current = true;
+      onPickDevice(foundList[0]);
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [scanningNow, foundList, onPickDevice]);
+
+  // The raw list of everything the radio hears is a DIAGNOSTIC, not a device
+  // picker, and it was the loudest thing on the screen. It stays — the L816 does
+  // not reliably advertise its service UUID and its name can be a stale cached
+  // one, so a manual pick really is the difference between "not supported" and
+  // "tap the right row" — but it is now behind a question a stuck user would
+  // actually ask, and only after the automatic path has had time to work.
+  const [showDiag, setShowDiag] = useState(false);
+  const stuck = scanningNow && waited >= 10 && foundList.length === 0;
+
   return (
     <View style={{ flex: 1 }}>
       <GlassBackground />
@@ -230,20 +284,37 @@ export function L816ConnectScreen({
 
         {scanningNow && (
           <Card>
-            <Text style={s.sectionTitle}>Nearby SATE L816 recorders</Text>
+            <Text style={s.sectionTitle}>
+              {foundList.length === 0
+                ? "Looking for your SATE L816…"
+                : foundList.length === 1
+                  ? "Found it — connecting…"
+                  : "Which SATE L816 is yours?"}
+            </Text>
             <Muted>
-              Turn the SATE L816 on and keep it close. If its own app is connected, close
-              that first — the recorder only talks to one phone at a time.
+              {foundList.length > 1
+                ? "More than one is in range, so pick the one in your hand."
+                : "Turn the recorder on and keep it close. It pairs by itself — there is " +
+                  "nothing to tap. If its own app is connected, close that first: the " +
+                  "recorder only talks to one phone at a time."}
             </Muted>
+
             {foundList.length === 0 ? (
-              <Text style={s.dim}>Scanning…</Text>
+              <View style={s.searching}>
+                <ActivityIndicator color={D.sky} />
+                <Text style={s.dim}>
+                  {waited < 10
+                    ? "Searching…"
+                    : `Still searching — ${waited}s. Check the recorder is switched on.`}
+                </Text>
+              </View>
             ) : (
               foundList.map((d) => (
                 <Pressable key={d.id} onPress={() => onPickDevice(d)} style={s.row}>
                   <View style={{ flex: 1 }}>
-                    <Text style={s.rowName}>{d.name}</Text>
+                    <Text style={s.rowName}>{L816_DISPLAY_NAME}</Text>
                     <Text style={s.dim}>
-                      {d.id} · {d.rssi} dBm
+                      {d.name} · {d.rssi} dBm
                     </Text>
                   </View>
                   <Text style={s.chev}>›</Text>
@@ -253,37 +324,34 @@ export function L816ConnectScreen({
           </Card>
         )}
 
-        {/* On-screen BLE diagnostics — the L816 does not always advertise its
-            service UUID, and its name can be a stale cached one, so a manual pick
-            is the difference between "not supported" and "tap the right row". */}
-        {scanningNow && (
+        {/* Only once the automatic path has visibly failed. */}
+        {stuck && !showDiag && (
+          <Pressable onPress={() => setShowDiag(true)} hitSlop={8} accessibilityRole="button">
+            <Text style={s.diagLink}>Can't find your recorder?</Text>
+          </Pressable>
+        )}
+
+        {scanningNow && showDiag && (
           <Card>
-            <Text style={s.sectionTitle}>Bluetooth diagnostics</Text>
-            <Text style={s.dim}>Radio: {bleState}</Text>
+            <Text style={s.sectionTitle}>Everything this phone can hear</Text>
             <Muted>
-              {seenList.length} device{seenList.length === 1 ? "" : "s"} seen nearby.
+              The SATE L816 does not always broadcast its name, so it may be in this list
+              without being recognised above. Look for a name starting “L816” or a row marked
+              “L816 service”, and tap it.
             </Muted>
-            {seenList.length === 0 && (
+            <Text style={[s.dim, { marginTop: 6 }]}>Bluetooth radio: {bleState}</Text>
+            {seenList.length === 0 ? (
               <Text style={s.dim}>
-                Hearing NO Bluetooth at all — the radio is off or the Nearby devices
-                permission was denied. Check Android Settings → Apps → SATE Companion →
-                Permissions.
+                Hearing no Bluetooth at all — the radio is off, or the Nearby devices
+                permission was denied. Check Android Settings → Apps → SATE → Permissions.
               </Text>
-            )}
-            {seenList.length > 0 && foundList.length === 0 && (
-              <Text style={[s.dim, { marginTop: 4 }]}>
-                No SATE L816 auto-detected. Tap yours below — look for a name starting
-                “L816” (what the hardware advertises) or a row marked “L816 service ✓”.
-              </Text>
-            )}
-            {seenList.length > 0 &&
-              foundList.length === 0 &&
+            ) : (
               seenList.map((sd) => (
                 <Pressable key={sd.id} onPress={() => onPickSeen(sd)} style={s.row}>
                   <View style={{ flex: 1 }}>
                     <Text style={s.rowName}>
-                      {sd.name ?? "(no name)"}
-                      {sd.hasL816Service ? "  · L816 service ✓" : ""}
+                      {sd.name ?? "(unnamed device)"}
+                      {sd.hasL816Service ? "  · L816 service" : ""}
                     </Text>
                     <Text style={s.dim}>
                       {sd.id} · {sd.rssi} dBm
@@ -291,7 +359,8 @@ export function L816ConnectScreen({
                   </View>
                   <Text style={s.chev}>›</Text>
                 </Pressable>
-              ))}
+              ))
+            )}
           </Card>
         )}
 
@@ -536,6 +605,14 @@ const s = StyleSheet.create({
   rowName: { color: D.ink, fontSize: 15, fontWeight: "500" },
   dim: { color: D.sub, fontSize: 13, marginTop: 2 },
   link: { color: D.sky, fontSize: 14, fontWeight: "600" },
+  searching: { flexDirection: "row", alignItems: "center", gap: 12, paddingVertical: 18 },
+  diagLink: {
+    color: D.sub,
+    fontSize: 14,
+    fontWeight: "600",
+    textAlign: "center",
+    paddingVertical: 10,
+  },
   chev: { color: D.sub, fontSize: 22 },
   keep: { color: D.green, fontSize: 12, fontWeight: "600", marginTop: 8 },
   dur: { color: D.ink, fontSize: 34, fontWeight: "800", textAlign: "center", marginVertical: 10 },
