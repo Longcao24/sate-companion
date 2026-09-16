@@ -442,7 +442,7 @@ call → copies audio to the recordings bucket → calls `finalize-session`.
 Deploy: `cd cf-processor && wrangler deploy`. Knobs (`cf-processor/app/processor.py`):
 
 - `AI_READ_TIMEOUT_S = 3600` — **1-hour** read ceiling on the AI `/process` call (large takes).
-- `STUCK_MINUTES = 45` — the in-loop watchdog `requeue_stale_sessions()` reclaims a `processing`
+- `STUCK_MINUTES = 90` — the in-loop watchdog `requeue_stale_sessions()` reclaims a `processing`
   job a dead worker left stranded after 45 min. `pg_cron` pings the Worker `/tick` every minute to
   keep the container warm; the container's own loop drains the queue.
 - `MAX_ATTEMPTS = 3` — after 3 attempts a stalled job → `error`. Transient failures
@@ -579,7 +579,7 @@ app/web versions (bump per release); recorder fw is live from `sate_devices.fw`.
 | App can't see the device in onboarding | Scan started before BLE `PoweredOn`. Confirm it advertises `SATE-XXXXXX` + service UUID. |
 | Device uploaded but no `recordings` row | Check `sate_device_sessions.status` + `process_error`. The **cf-processor container** processes — ensure it's warm (pg_cron `/tick`) and the ngrok tunnel is up. User Retry re-queues an `error`. Do NOT re-invoke `process-device-session` (no-op). `sate infra` localizes the down tier. |
 | Card fills up despite "all synced" | Pre-1.5.24 reclaim only ran after an upload; check fw ≥1.5.24. Or a `stored:false` ghost is parked — `resync_all` re-uploads so it verifies for real. |
-| Big session lands as a row with `process_error: "download failed: Object not found"` | Storage project-wide file-size limit (default 50 MB) < a ~118 MB take. It's 500 MB now — check that first. |
+| Big session lands as a row with `process_error: "download failed: Object not found"` | A Storage file-size limit rejected it. **Check BOTH** — the project's (`GET /v1/projects/<ref>/config/storage`) and the BUCKET's (`GET /storage/v1/bucket/device-sessions`), because the smaller wins and the bucket's is the one that has actually bitten. Both are 5 GB now. It's 500 MB now — check that first. |
 | Device can't reach the Mac after a network change | Stale Mac LAN IP. `ipconfig getifaddr en0`, update the dev host. |
 | No alert emails despite an outage | `mail.long-cao.dev` sender not onboarded (fails at `send()`), or `HEALTH_ALERT_KEY`/`SUPA_ANON` unset on the status worker. `GET /check?key=…` to force a probe. |
 | Serial port enumerated but SILENT (`sate ci` aborts) | The USB-CDC wedge — unplug the cable, replug, re-run. The device usually still works over Wi-Fi; only the log view is dead. |

@@ -69,7 +69,7 @@ Cloudflare Container (cf-processor/, Python, sate-processor.<subdomain>.workers.
 - **`cf-processor/wrangler.toml`** — `name = "sate-processor"`, `compatibility_date = "2025-06-01"`,
   `compatibility_flags = ["nodejs_compat"]`. One container: `[[containers]] class_name =
   "ProcessorContainer", image = "./Dockerfile", max_instances = 1, instance_type = "standard-1"`.
-  Non-secret `[vars]`: `SUPABASE_URL`, `FINALIZE_URL`, `STUCK_MINUTES=45`, `MAX_ATTEMPTS=3`,
+  Non-secret `[vars]`: `SUPABASE_URL`, `FINALIZE_URL`, `STUCK_MINUTES=90`, `MAX_AUDIO_SEC=14400`, `MAX_ATTEMPTS=3`,
   `POLL_INTERVAL=10`, `WORKER_ID=cf-container-1`. `[observability] enabled = true`.
 
 ### Why a single container / single worker
@@ -113,7 +113,7 @@ Every iteration, in order:
 **cannot preempt the job this worker is currently running** — it only fires between jobs. Its real job
 is to reclaim rows left in `processing` by a **previous container incarnation that crashed or was
 recycled mid-job** (the DO can sleep/reboot). Those orphaned rows have a stale `processing_started_at`;
-once older than `STUCK_MINUTES` (45) and under `MAX_ATTEMPTS` (3) tries, `requeue_stale_sessions` flips
+once older than `STUCK_MINUTES` (90) and under `MAX_ATTEMPTS` (3) tries, `requeue_stale_sessions` flips
 them back to `queued` for the next `claim_next()`; past `MAX_ATTEMPTS` it drives them to `error`.
 
 > Tension worth knowing: `AI_READ_TIMEOUT_S` (3600 s = 60 min) is **longer** than `STUCK_MINUTES`
@@ -277,7 +277,7 @@ Handling of a claimed job (`attempt` from the row):
   `error` (hit real: `SATE-D0FDD4` session 35). The post-AI `no_text` path below only runs after a
   *successful* AI call, which this input never reaches. NB deploying a new container image doesn't
   instantly swap the running singleton — an in-flight claim is killed → orphaned in `processing`
-  until the 45-min watchdog; to re-run one now, owner-PATCH its row to `queued` via PostgREST.
+  until the 90-min watchdog; to re-run one now, owner-PATCH its row to `queued` via PostgREST.
 - **No usable speech** (AI returns 0 words) → `finalize({no_text:true})` → session `done`, **no
   `recordings` row** (device tab shows "No text in audio" + delete). Not an error.
 - **User Retry** button → `POST /sessions/:id/retry` (device-api, current in-comment version **v18**;
@@ -307,14 +307,24 @@ Handling of a claimed job (`attempt` from the row):
 
 ### 🛑 The watchdog must outlast the longest legitimate job
 
-`STUCK_MINUTES` was **45** while `AI_READ_TIMEOUT_S` is **3600 (60 min)**. A take needing 45–60
-minutes of transcription was therefore requeued **mid-transcription**: the GPU work thrown away, an
-attempt burned, and after `MAX_ATTEMPTS` it landed in `error` — a recording that was being processed
-*correctly*, reported to the clinician as failed.
+`STUCK_MINUTES` was **45** while `AI_READ_TIMEOUT_S` is **3600 (60 min)** — the watchdog cutoff was
+shorter than a single legitimate AI read.
 
-Nothing hit it while uploads died at ~10 minutes. **Lifting the upload ceiling is what made it
-reachable**, and that is the general shape worth remembering: raising a limit in one tier moves load
-into tiers nobody sized for it. 90 = the 60-min AI ceiling + the 15-min download read ceiling +
+⚠️ **Be precise about what that did and did not cause.** With the current deployment it was
+*latent*, not live: `loop()` is strictly sequential (`requeue_stale()` → `claim_next()` →
+`process()`), so while a worker is inside `process()` nothing calls the watchdog, and there is
+exactly one worker. A worker cannot requeue its own in-flight job. No recording is known to have
+been reclaimed mid-transcription.
+
+It is now **90** anyway, for two reasons. The invariant should hold **by construction**, not by an
+accident of single-threading — and this very document contemplates adding concurrency ("if you add
+concurrency/instances, wire heartbeats"), at which point 45 is a live bug that eats an hour of GPU
+per occurrence. And lifting the upload ceiling made 45–60-minute takes reachable at all, which is
+the general shape worth remembering: raising a limit in one tier moves load into tiers nobody sized
+for it.
+
+**The trade is real**: a genuinely dead job now sits in `processing` for 90 minutes instead of 45
+before the watchdog reclaims it. 90 = the 60-min AI ceiling + the 15-min download read ceiling +
 finalize, with room.
 
 ⚠️ **THREE copies of that number exist and they must agree:**
@@ -353,10 +363,12 @@ the device.
 - The container relies on `processing_started_at` + the 45-min cutoff, not live `heartbeat_at` — the
   `heartbeat_session` RPC exists but is unused by the current loop. If you add concurrency/instances,
   wire heartbeats and re-derive the stuck cutoff from them.
-- **Storage's project-wide file-size limit overrides the bucket's** (defaulted 50 MB; a full take is
-  ~118 MB → a silent 413 that once destroyed a 62-min recording). Set to **500 MB**. If big sessions
-  land as `error` with `download failed: Object not found`, check that first. See
-  [05-backend-supabase.md](05-backend-supabase.md).
+- **There are TWO file-size limits and the SMALLER wins — the bucket's is the one that bit us.**
+  This used to say the project-wide limit overrides the bucket's; it is backwards. Measured
+  2026-09-16: the project was already at 500 MB while uploads failed at exactly **200 MiB**, which
+  was `device-sessions`' own `file_size_limit`. Both are now **5 GB**. A silent 413 once destroyed a
+  62-min recording, so if big sessions land as `error` with `download failed: Object not found`,
+  check BOTH. See [05-backend-supabase.md](05-backend-supabase.md).
 - `setInsecure()` on the device skips TLS cert validation (fine for now; pin the Supabase CA for
   production hardening).
 - **Never move the AI call back into an edge/Worker fetch** — it must live in the container. See the

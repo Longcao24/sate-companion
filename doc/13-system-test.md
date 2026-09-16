@@ -1157,7 +1157,7 @@ cleanup.
 > **Server side.**
 >
 > Expect repeated `attempts` increments. `requeue_session` applies backoff for transient
-> failures; the watchdog `requeue_stale_sessions(p_stuck_minutes=45, p_max_attempts=3)`
+> failures; the watchdog `requeue_stale_sessions(p_stuck_minutes=90, p_max_attempts=3)`
 > reclaims anything abandoned. The session must not exceed `MAX_ATTEMPTS` (3) and must settle.
 
 | Result | | Evidence |
@@ -1558,9 +1558,10 @@ time, and PDF pagination.
 
 > **Server side.**
 >
-> ~86 MB. Watch the Storage limit: **the project-wide file size limit overrides the bucket's**
-> and defaults to 50 MB. It is set to 500 MB now, but if long sessions land as rows with
-> `process_error: "download failed: Object not found"`, check that setting first — a swallowed
+> ~86 MB. Watch the Storage limits — there are **two**, and the **smaller** wins: the project-wide
+> one and the bucket's own `file_size_limit`. The bucket's is the one that has actually bitten
+> (uploads died at 200 MiB while the project sat at 500 MB). Both are **5 GB** now. If long sessions
+> land as rows with `process_error: "download failed: Object not found"`, check both — a swallowed
 > 413 plus a `.synced` written on a false 2xx destroyed a 62-minute recording once.
 > `storeSessionRecord` now throws on upload failure rather than swallowing it.
 
@@ -1605,10 +1606,15 @@ session.
 > **Server side.**
 >
 > The firmware ceiling is ~62 minutes (~118 MB). Beyond the storage limit above, note the
-> timeout tension: `AI_READ_TIMEOUT_S` is 3600 s (60 min) while `STUCK_MINUTES` is 45 — a
-> single legitimate AI read can outlive the stale cutoff. The watchdog only fires *between*
-> jobs (the loop is blocked inside `process()`), so this is safe in practice, but a job that
-> does get reclaimed mid-run on a maximum-length take is the signature to watch for.
+> former timeout tension, now closed: `AI_READ_TIMEOUT_S` is 3600 s (60 min) and `STUCK_MINUTES`
+> used to be 45, so a single legitimate AI read could outlive the stale cutoff. **This analysis
+> was right that it was safe in practice** — `loop()` is strictly sequential
+> (`requeue_stale()` → `claim_next()` → `process()`), so while a worker is inside `process()`
+> nothing calls the watchdog, and there is only one worker. `STUCK_MINUTES` is now **90**
+> anyway: the invariant "the watchdog outlasts the longest legitimate job" should hold by
+> construction rather than by an accident of single-threading, and this file itself contemplates
+> adding concurrency — at which point 45 becomes a live bug. The cost is that a genuinely dead
+> job now takes 90 min to reclaim instead of 45.
 
 | Result | | Evidence |
 |---|---|---|
@@ -2867,7 +2873,7 @@ Verify final status, event order, attempt IDs, version numbers, and unchanged re
 >
 > Late/out-of-order updates. The container heartbeats during a long job so the watchdog cannot
 > steal work still running; `requeue_stale_sessions` only reclaims rows whose
-> `heartbeat_at`/`started_at` is older than `STUCK_MINUTES` (45). A late response arriving for
+> `heartbeat_at`/`started_at` is older than `STUCK_MINUTES` (90). A late response arriving for
 > an already-requeued session must not resurrect it.
 
 | Result | | Evidence |
@@ -3007,7 +3013,7 @@ version/audit, and no duplicate session.
 > **only** `error` — to re-run anything else (an orphaned `processing` row, say) an owner must
 > PATCH the row to `queued` via PostgREST. Note a new container image does not instantly swap
 > the running singleton: an in-flight claim is killed and orphaned in `processing` until the
-> 45-minute watchdog.
+> 90-minute watchdog.
 
 | Result | | Evidence |
 |---|---|---|
@@ -4068,7 +4074,7 @@ item — reference it rather than filing a duplicate.
 | `SATE-SEC-005` | `POST /firmware` (publishFirmware) is routed **above** the `/admin` gate, so any authenticated user can push fleet-wide OTA. Image validation exists (semver, `0xE9` magic, size cap) but no `isAdmin()` check. Same in the Cloudflare port. | Fix before GA |
 | `SATE-BE-008` | The `process-device-session` copy **in this repo** is not the no-op that production runs — it still downloads the WAV, awaits the AI and inserts `recordings`, so deploying it would duplicate every recording and re-introduce the 150 s edge-kill hang. | Do not deploy repo file |
 | `SATE-E2E-006`, `SATE-QUE-006` | Upload deduplication relies on a probe by (user, serial, patient, session_number, bytes) + `objectExists`, with **no database unique constraint** behind it. | Add constraint |
-| `SATE-LONG-002/003` | Storage's project-wide file size limit overrides the bucket's and defaults to 50 MB; a full-length take is ~118 MB. Currently set to 500 MB — verify before long-session runs. | Config check |
+| `SATE-LONG-002/003` | TWO Storage file-size limits, the smaller wins; the BUCKET's is the one that has bitten (200 MiB while the project sat at 500 MB). Both 5 GB now — verify before long-session runs. | Config check |
 
 ---
 
@@ -4089,7 +4095,7 @@ sate_device_sessions.status:  queued → processing → done | error
 | Constant | Value | Where |
 |---|---|---|
 | `MAX_ATTEMPTS` | 3 | cf-processor |
-| `STUCK_MINUTES` | 45 | watchdog reclaim cutoff |
+| `STUCK_MINUTES` | 90 | watchdog reclaim cutoff (must exceed `AI_READ_TIMEOUT_S`) |
 | `POLL_INTERVAL` | 10 s | empty-queue poll |
 | `AI_READ_TIMEOUT_S` | 3600 s | longer than the stale cutoff — see `SATE-LONG-003` |
 | `MIN_AUDIO_SEC` | 0.4 s | below this → `no_text`, AI never called |

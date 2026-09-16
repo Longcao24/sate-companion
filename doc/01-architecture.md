@@ -213,7 +213,7 @@ Container constants (`processor.py`, overridable via env in `src/index.ts`):
 | Const | Value | Meaning |
 |-------|-------|---------|
 | `AI_READ_TIMEOUT_S` | **3600 (1 h)** | ceiling on ONE AI read. Was unbounded — a dead-but-connected AI wedged the single worker forever; 1 h covers the longest take (~62 min) yet guarantees the worker returns. |
-| `STUCK_MINUTES` | **45** | watchdog requeues a `processing` job older than this (matches `device-api` `STUCK_MS` and `adminStatus`). |
+| `STUCK_MINUTES` | **90** | watchdog requeues a `processing` job older than this. MUST stay above `AI_READ_TIMEOUT_S` (60 min) or it reclaims work that is still running — see 06-ai-pipeline. Both `device-api` `STUCK_MS` copies must match. |
 | `MAX_ATTEMPTS` | **3** | after this many, a stalled/transient job → `error`. |
 | `POLL_INTERVAL` | 10 s | idle poll cadence; also the transient backoff base (`min(60, POLL*attempt)`). |
 | download read timeout | (30 s connect, 900 s read) | large WAVs, but never a wedged worker. |
@@ -349,7 +349,7 @@ Cloudflare cron (5 min) → runChecks() probe TARGETS (device-api, Supabase API,
    evaluateAndAlert():
      (a) any probed service DOWN → problem
      (b) fetch device-api GET /api/health/alerts?key=HEALTH_ALERT_KEY  ([v18], secret-gated)
-         → digest: recent_errors, stuck_list (processing >45 min), error_count,
+         → digest: recent_errors, stuck_list (processing >90 min), error_count,
            offline_devices, plus a stable `signature`
      build signature; compare to D1 alert_state:
        new / changed problem set                          → sendAlertEmail (env.EMAIL binding)

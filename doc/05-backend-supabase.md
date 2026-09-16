@@ -79,7 +79,8 @@ uploader's dedup probe in `storeSessionRecord` matches on (the chunk final-slice
 > LOCKED), holds the ngrok `/process` call, copies the audio into `recordings`, then POSTs
 > `finalize-session`. `pg_cron` pings the Worker `/tick` every minute to keep the container warm.
 > Constants (`app/processor.py`): `AI_READ_TIMEOUT_S=3600` (1 h read ceiling on one AI call),
-> `STUCK_MINUTES=45` (watchdog requeue threshold), `MAX_ATTEMPTS=3`, `POLL_INTERVAL=10`.
+> `STUCK_MINUTES=90` (watchdog requeue threshold — must exceed the 60-min AI read ceiling),
+> `MAX_AUDIO_SEC=14400`, `MAX_ATTEMPTS=3`, `POLL_INTERVAL=10`.
 > **Never move the AI call into an edge fn or a Worker `fetch`** — Supabase edge has a hard ~150 s
 > wall-clock (not a timeout we set; it kills the worker *before* the `try/catch`), and a plain CF
 > Worker has the ~100 s 524 origin timeout. Either kills a long transcription mid-call and leaves
@@ -198,7 +199,8 @@ users, so the gate is load-bearing.
 `GET /health/alerts?key=<secret>` (no user JWT; gated by a shared secret `HEALTH_ALERT_KEY` —
 missing or mismatched → `403`). Read-only, service role. `healthAlerts` returns a compact digest:
 `error_count` (sessions with `status='error'`), `stuck_count` + `stuck_list` (still `processing`
-past the 45-min `STUCK_MS` threshold), `recent_errors` (last 10 error rows), `offline_devices`
+past the 90-min `STUCK_MS` threshold — keep it equal to cf-processor's `STUCK_MINUTES`, or this
+emails the operator about jobs that are simply still running), `recent_errors` (last 10 error rows), `offline_devices`
 (flips stale rows offline first), plus a **`signature`** — a stable JSON of the current problem set
 so the caller only emails on a *change*.
 
@@ -304,7 +306,7 @@ long AI call lives in a process with no wall-clock:
 **Cloudflare container** (`cf-processor/app/processor.py`, long-lived) — per `queued` session:
 
 1. `requeue_stale()` watchdog first (`requeue_stale_sessions` RPC — reclaim jobs a dead worker left
-   in `processing` past `STUCK_MINUTES=45`, up to `MAX_ATTEMPTS=3`, else → `error`).
+   in `processing` past `STUCK_MINUTES=90`, up to `MAX_ATTEMPTS=3`, else → `error`).
 2. `claim_next()` (`claim_next_session` RPC, atomic, SKIP LOCKED) → `status=processing`.
 3. `download_wav` from `device-sessions` (15-min read ceiling).
 4. **HOLD** the AI `/process` POST (multipart `audio_file`, `device=cuda`, `pause_threshold=0.25`)

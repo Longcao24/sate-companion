@@ -83,7 +83,7 @@ device to the signed-in SLP account), bridges offline sessions, and sends remote
   and a plain Worker has the ~100 s 524 origin timeout — either kills a long transcription
   mid-call. The long call lives only in the container. See [06-ai-pipeline.md](06-ai-pipeline.md).
 - **Async retry:** the `requeue_stale_sessions` watchdog reclaims jobs stuck in `processing`
-  past `STUCK_MINUTES=45` up to `MAX_ATTEMPTS=3`; the AI read timeout is `AI_READ_TIMEOUT_S=3600`
+  past `STUCK_MINUTES=90` up to `MAX_ATTEMPTS=3`; the AI read timeout is `AI_READ_TIMEOUT_S=3600`
   (1 h). `pg_cron` pings the Worker `/tick` every minute to keep the container warm.
 - **`process-device-session` must be a 200 no-op in prod** — the container does the work.
   ⚠️ The copy checked into the repo is **NOT** the no-op (it still downloads the WAV, awaits

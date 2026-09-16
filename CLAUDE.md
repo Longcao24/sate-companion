@@ -266,13 +266,15 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   server-side fix reaches recordings that already failed, with no app update.
 
 **⚠️ THE WATCHDOG MUST OUTLAST THE LONGEST LEGITIMATE JOB (2026-09-16)**
-- `STUCK_MINUTES` was **45** while `AI_READ_TIMEOUT_S` is **3600 (60 min)**, so any take needing
-  45–60 min of transcription was requeued MID-TRANSCRIPTION: the GPU work thrown away, an
-  attempt burned, and after `MAX_ATTEMPTS` it landed in `error` — a take that was being
-  processed correctly. Nothing hit it while uploads died at ~10 minutes; **lifting the upload
-  ceiling is what made it reachable**, which is the general lesson: raising a limit in one tier
-  moves load into tiers that were never sized for it. Now **90** (60-min AI ceiling + 15-min
-  download read ceiling + finalize, with room).
+- `STUCK_MINUTES` was **45** while `AI_READ_TIMEOUT_S` is **3600 (60 min)** — the watchdog cutoff
+  was shorter than one legitimate AI read. ⚠️ **Latent, not live**: `loop()` is strictly sequential
+  (`requeue_stale()` → `claim_next()` → `process()`) and there is one worker, so a worker cannot
+  requeue its own in-flight job; no recording is known to have been reclaimed mid-transcription.
+  Raised to **90** anyway so the invariant holds BY CONSTRUCTION rather than by an accident of
+  single-threading — `doc/06` explicitly contemplates adding concurrency, at which point 45 is a
+  live bug that costs an hour of GPU per occurrence. Lifting the upload ceiling is what made
+  45–60-min takes reachable at all: raising a limit in one tier moves load into tiers nobody sized
+  for it. **The trade**: a genuinely dead job now waits 90 min to be reclaimed instead of 45.
 - 🛑 **THREE copies of that number exist and they must agree**: `cf-processor/wrangler.toml`
   `STUCK_MINUTES`, and TWO `STUCK_MS` constants in `device-api` — `adminStatus` (the admin
   page) and `healthAlerts` (the operator's EMAIL alerts). If either device-api copy is the
