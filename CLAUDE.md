@@ -759,6 +759,21 @@ setup + prebuilt flash assets: `SETUP.md` + the **GitHub Release** (`gh release 
   `FixedLengthStream`. `cloudflare/src/functions/deviceApi.ts` had this bug too (every chunked
   upload's final slice would have failed there); fixed 2026-09-01.
 
+**Mobile UI**
+- 🛑 **Android's "Bold text" accessibility setting silently CLIPS THE LAST GLYPH of any
+  short label (2026-09-16).** `settings get secure font_weight_adjustment` returns `300` on
+  the test Pixel. Android then draws every font that much heavier than the metrics React
+  Native measured it with, so a `Text` whose content box is sized to its own measured width
+  renders one character short — the L816 screen's "Close" button rendered as **"Clos"**.
+  Three things make this expensive to diagnose: it looks exactly like a flex overflow (it is
+  not — the button's box measured 188px around a word needing ~95), **`font_scale` was 1.0**
+  so font scaling is a red herring, and it is invisible on a phone without the setting.
+  Padding does not fix it (padding grows the box, not the content box); `flexShrink: 0`,
+  `gap` removal and `minWidth` on the PARENT all do nothing. The fix is **`minWidth` on the
+  `Text` itself** (plus `textAlign`), or an icon, which has an exact intrinsic size. Any
+  short hugging label is affected — the pendant and Plaud connect screens say "Close" the
+  same way.
+
 **Dev environment**
 - **A MAC-allowlist Wi-Fi looks exactly like a working connection.** A campus/device-registration
   SSID hands out a DHCP lease and then silently drops every packet until the MAC is registered:

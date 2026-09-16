@@ -9,7 +9,7 @@ import {
   l816Serial,
   takeTimestamp,
 } from "./L816Link";
-import { loadUploaded, markUploaded, KnownL816 } from "./L816Store";
+import { loadUploaded, markUploaded, forgetL816, KnownL816 } from "./L816Store";
 import { setL816Held } from "../ble/radio";
 import {
   isBackgroundLinkSupported,
@@ -75,8 +75,15 @@ export interface L816Session {
   /** Connect (or re-target) the session. Rejects on failure so the screen can
    *  fall back to a scan. */
   connect: (deviceId: string) => Promise<void>;
-  /** User-initiated: drop the link AND stop trying to get it back. */
+  /** User-initiated: drop the link AND stop trying to get it back. The pairing
+   *  survives, so the recorder reappears on the next explicit connect. */
   disconnect: () => void;
+  /**
+   * Forget the recorder entirely: drop the link, remove it from the paired list,
+   * and stop the reconnect loop from bringing it back. Resolves with the new
+   * paired list so the caller can update its own copy.
+   */
+  unpair: () => Promise<KnownL816[]>;
   uploadTake: (file: L816File) => Promise<void>;
   toggleRecord: () => Promise<void>;
   refreshFiles: () => Promise<void>;
@@ -173,6 +180,11 @@ export function useL816Session(
   // it had succeeded, never fell back to a scan, and sat on "Preparing
   // Bluetooth…" for ever.
   const inflight = useRef<{ id: string; p: Promise<void> } | null>(null);
+  // Unpaired in THIS session. The reconnect loop falls back to the first paired
+  // unit when `wantId` is null, and the parent's copy of that list updates a
+  // render later — long enough for a tick to reconnect the device the user just
+  // unpaired. Cleared by an explicit connect(), which is the only way back.
+  const unpaired = useRef(false);
 
   // Is the app currently out of sight? Only used to decide whether a finished
   // transfer deserves a notification: interrupting someone who is already
@@ -430,6 +442,7 @@ export function useL816Session(
         if (cur.id === deviceId) return cur.p;
         throw new Error("Already connecting to another SATE L816");
       }
+      unpaired.current = false;
       setState("connecting");
       setError(null);
       const p = (async () => {
@@ -468,6 +481,21 @@ export function useL816Session(
     l816.disconnect().catch(() => {});
   }, [l816]);
 
+  const unpair = useCallback(async () => {
+    const id = connectedIdRef.current ?? wantId.current ?? (known.length ? known[0].id : null);
+    unpaired.current = true;
+    disconnect();
+    setStatus(null);
+    setFiles([]);
+    setPendingCount(0);
+    // The uploaded ledger is deliberately KEPT. It is keyed by device id, so
+    // pairing the same unit again does not re-download and re-upload everything
+    // it is holding — and this hardware never deletes a take, so that could be
+    // thousands of them over BLE. Unpairing is about the pairing, not about
+    // making SATE forget what it already has.
+    return id ? forgetL816(id) : known;
+  }, [disconnect, known]);
+
   // The link went away on its own. Clear the connected state so nothing claims a
   // connection that is gone — and leave `wantId` alone, which is what tells the
   // retry loop below to bring it back.
@@ -496,6 +524,7 @@ export function useL816Session(
       if (stop || inflight.current || l816.isConnected()) return;
       // A user-initiated disconnect clears `wantId`; only fall back to a paired
       // unit when nothing has been let go of deliberately.
+      if (unpaired.current) return;
       const target = wantId.current ?? (known.length > 0 ? known[0].id : null);
       if (!target) {
         console.log(`[L816] autoconnect: nothing to connect to (known=${known.length})`);
@@ -742,6 +771,7 @@ export function useL816Session(
       setPatientId,
       connect,
       disconnect,
+      unpair,
       uploadTake,
       toggleRecord,
       refreshFiles,
@@ -762,6 +792,7 @@ export function useL816Session(
       patientId,
       connect,
       disconnect,
+      unpair,
       uploadTake,
       toggleRecord,
       refreshFiles,

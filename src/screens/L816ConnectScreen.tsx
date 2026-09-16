@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FlatList, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, FlatList, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SateApi } from "../api/sateApi";
 import { Button, Card, GlassBackground, Muted, ProgressBar, Title } from "../components/ui";
 import { Patient } from "../protocol";
 import { L816FoundDevice, L816Link, L816SeenDevice } from "../l816/L816Link";
+import { KnownL816 } from "../l816/L816Store";
 import { L816Session, fmtDur, fmtTakeName } from "../l816/useL816Session";
 import { D } from "../theme";
 
@@ -48,6 +49,7 @@ export function L816ConnectScreen({
   session,
   onClose,
   onConnected,
+  onUnpaired,
   targetId,
 }: {
   api: SateApi;
@@ -58,6 +60,8 @@ export function L816ConnectScreen({
   /** Called once connected, so Home can remember it and show it as a paired
    *  device on the next launch (no re-scanning). */
   onConnected?: (id: string, name: string) => void;
+  /** The recorder was unpaired — here is the paired list that is left. */
+  onUnpaired?: (list: KnownL816[]) => void;
   /** A known L816's BLE id — connect straight to it instead of scanning. Falls
    *  back to a scan if the direct connect fails (out of range / off). */
   targetId?: string;
@@ -161,6 +165,34 @@ export function L816ConnectScreen({
     if (connectedId) onConnected?.(connectedId, connectedName);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connectedId]);
+
+  // Unpairing is not undoable from here — the recorder has to be found and
+  // picked again — so it asks first. It is also not destructive to any
+  // RECORDING: nothing is ever deleted from an L816, and the takes SATE already
+  // has stay where they are. Say both, because "unpair" on a device that holds
+  // the only copy of a session reads like it might throw them away.
+  const confirmUnpair = useCallback(() => {
+    Alert.alert(
+      "Unpair this SATE L816?",
+      "SATE will forget this recorder and stop connecting to it. Nothing is " +
+        "deleted — the recordings on the device stay on the device, and the ones " +
+        "already uploaded stay in SATE. You can pair it again at any time.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Unpair",
+          style: "destructive",
+          onPress: () => {
+            session
+              .unpair()
+              .then((list) => onUnpaired?.(list))
+              .catch(() => {})
+              .finally(onClose);
+          },
+        },
+      ]
+    );
+  }, [session, onUnpaired, onClose]);
 
   const foundList = useMemo(() => Object.values(found), [found]);
   const seenList = useMemo(() => Object.values(seen).sort((a, b) => b.rssi - a.rssi), [seen]);
@@ -268,6 +300,15 @@ export function L816ConnectScreen({
             <Text style={s.sectionTitle}>Connecting…</Text>
             <Muted>Setting up the recorder and syncing its clock.</Muted>
           </Card>
+        )}
+
+        {/* Unpairing has to work when the recorder is NOT reachable — a unit that
+            is lost, broken or given away is exactly the one you want to unpair,
+            and it will never connect again to offer the button. */}
+        {!connected && targetId && (
+          <Pressable onPress={confirmUnpair} hitSlop={8} accessibilityRole="button">
+            <Text style={s.unpair}>Unpair this SATE L816</Text>
+          </Pressable>
         )}
 
         {connected && state !== "error" && (
@@ -418,8 +459,16 @@ export function L816ConnectScreen({
               accessibilityRole="button"
             >
               <Text style={[s.disconnect, busy && { opacity: 0.4 }]}>
-                Disconnect this recorder
+                Disconnect — keep it paired
               </Text>
+            </Pressable>
+            <Pressable
+              onPress={confirmUnpair}
+              disabled={busy}
+              hitSlop={8}
+              accessibilityRole="button"
+            >
+              <Text style={[s.unpair, busy && { opacity: 0.4 }]}>Unpair this SATE L816</Text>
             </Pressable>
           </>
         )}
@@ -441,10 +490,31 @@ export function L816ConnectScreen({
 
 const s = StyleSheet.create({
   container: { padding: 20, paddingTop: 64, gap: 16 },
-  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
-  headerTitle: { flex: 1, flexShrink: 1 },
-  closeBtn: { flexShrink: 0, flexGrow: 0 },
-  close: { color: D.sub, fontSize: 15 },
+  // No `gap` here. With `gap` + `justifyContent: space-between` + a flex:1
+  // child, Yoga hands the flex child the free space BEFORE the gap is taken out,
+  // and the last item overflows the row by exactly the gap — which rendered the
+  // Close button as "Clos". The title wrapper's flex:1 already keeps the two
+  // apart; the sibling screens have no gap either.
+  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  headerTitle: { flex: 1, flexShrink: 1, paddingRight: 12 },
+  closeBtn: { flexShrink: 0, flexGrow: 0, alignItems: "flex-end" },
+  // 🛑 `minWidth` on the TEXT, and it is load-bearing. This label rendered as
+  // "Clos" and no amount of flex fixing changed it, because the box was never
+  // the problem — it was measured at 188px around a word that needs ~95.
+  //
+  // The cause is Android's **Bold text** accessibility setting
+  // (`settings get secure font_weight_adjustment` → 300 on the test phone).
+  // Android draws every font that much heavier than the metrics React Native
+  // measured it with, so a Text whose content box is sized to its own measured
+  // width loses its last glyph. It is invisible on a phone without the setting,
+  // it is NOT a font-scale problem (font_scale was 1.0), and it will bite any
+  // short label that hugs its own width — the other connect screens say "Close"
+  // the same way and clip the same way on such a device.
+  //
+  // Giving the Text a minimum width wider than the word can ever need, and
+  // right-aligning inside it, is a fix that does not depend on the measurement
+  // being right.
+  close: { color: D.sub, fontSize: 15, minWidth: 120, textAlign: "right" },
   sectionTitle: { color: D.ink, fontSize: 16, fontWeight: "600", marginBottom: 6 },
   row: {
     flexDirection: "row",
@@ -479,5 +549,6 @@ const s = StyleSheet.create({
   recTxt: { color: "#FFFFFF", fontSize: 17, fontWeight: "700" },
   progressTxt: { color: D.sub, fontSize: 13, marginBottom: 6 },
   status: { color: D.sky, fontSize: 13, fontWeight: "600", marginTop: 12 },
-  disconnect: { color: D.red, fontSize: 14, fontWeight: "600", textAlign: "center", paddingVertical: 8 },
+  disconnect: { color: D.sub, fontSize: 14, fontWeight: "600", textAlign: "center", paddingVertical: 8 },
+  unpair: { color: D.red, fontSize: 14, fontWeight: "700", textAlign: "center", paddingVertical: 8 },
 });
