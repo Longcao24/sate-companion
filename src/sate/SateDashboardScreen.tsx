@@ -13,8 +13,10 @@ import { Feather } from "@expo/vector-icons";
 import { GlassBackground, Logo } from "../components/ui";
 import { ManagedDevice, Recording } from "../protocol";
 import { SateDeviceChip } from "./SateDeviceChip";
+import { SateNearbyBanner } from "./SateNearbyBanner";
 import { SateApi } from "../api/sateApi";
 import { recordingLabel } from "./label";
+import { L816Session } from "../l816/useL816Session";
 import { D } from "../theme";
 
 // Dashboard: what the account has right now, in two numbers and a list.
@@ -33,6 +35,7 @@ export function SateDashboardScreen({
   onAddDevice,
   onOpenDevice,
   liveL816,
+  l816,
 }: {
   api: SateApi;
   devices: ManagedDevice[];
@@ -41,6 +44,8 @@ export function SateDashboardScreen({
   onOpenReport: (r: Recording) => void;
   onAddDevice: () => void;
   onOpenDevice?: (d: ManagedDevice) => void;
+  /** The live L816 session, for the "a recorder is nearby" offer. */
+  l816?: L816Session;
   /** What the L816 session is doing RIGHT NOW. A paired row that only ever says
    *  "paired over Bluetooth" cannot answer the one question the dashboard is
    *  for — is the recorder connected, and is anything still waiting to upload? */
@@ -94,6 +99,8 @@ export function SateDashboardScreen({
         }
       >
         <Text style={s.title}>Dashboard</Text>
+
+        {l816 && <SateNearbyBanner session={l816} />}
 
         {error && (
           <View style={s.warn}>

@@ -3,14 +3,16 @@ import { AppState, PermissionsAndroid, Platform } from "react-native";
 import { SateApi } from "../api/sateApi";
 import {
   L816File,
+  L816FoundDevice,
   L816Link,
   L816Progress,
+  L816SeenDevice,
   L816_DISPLAY_NAME,
   l816Serial,
   takeTimestamp,
 } from "./L816Link";
 import { loadUploaded, markUploaded, forgetL816, KnownL816 } from "./L816Store";
-import { setL816Held } from "../ble/radio";
+import { radioOwner, setL816Held, subscribeRadio } from "../ble/radio";
 import {
   isBackgroundLinkSupported,
   notifyOnce,
@@ -84,6 +86,27 @@ export interface L816Session {
    * paired list so the caller can update its own copy.
    */
   unpair: () => Promise<KnownL816[]>;
+  /**
+   * SATE L816s the phone can hear RIGHT NOW and has not paired.
+   *
+   * Published so the app's own screens can offer a recorder the moment it is in
+   * range, instead of making the user guess that one is there and go looking for
+   * it behind Add a device. Empty whenever something is connected.
+   */
+  nearby: L816FoundDevice[];
+  /** Everything the radio hears, matched or not — the diagnostic behind
+   *  "Can't find your recorder?". See the pairing screen for why it exists. */
+  seen: L816SeenDevice[];
+  bleState: string;
+  /**
+   * Scan CONTINUOUSLY while the returned function has not been called.
+   *
+   * Discovery is duty-cycled the rest of the time (see DISCOVERY_*): a
+   * continuous BLE scan is a real battery cost to pay for a recorder that is
+   * usually not there. A screen whose whole job is pairing calls this so it
+   * scans properly for as long as the user is looking at it.
+   */
+  boostDiscovery: () => () => void;
   uploadTake: (file: L816File) => Promise<void>;
   toggleRecord: () => Promise<void>;
   refreshFiles: () => Promise<void>;
@@ -126,6 +149,17 @@ async function requestNotificationPermission(): Promise<boolean> {
 /** How long to wait before trying a dropped link again. The device may simply be
  *  out of the room; retrying every second would drain the phone to no purpose. */
 const RETRY_MS = 20000;
+
+// Presence scanning, so a recorder in range can be offered on the main screen.
+//
+// Duty-cycled, not continuous. A BLE scan costs real battery and most of the
+// time there is no recorder to find, so scanning flat out to catch the rare
+// moment one is switched on nearby would be paid for by every user, all day. A
+// short burst every half minute finds it within one cycle of walking into the
+// room, which is as good as instant for this purpose. A screen that exists to
+// pair calls boostDiscovery() and gets a continuous scan while it is open.
+const DISCOVERY_SCAN_MS = 8000;
+const DISCOVERY_REST_MS = 22000;
 
 export function useL816Session(
   api: SateApi,
@@ -563,6 +597,91 @@ export function useL816Session(
     };
   }, [enabled, l816, known, connect]);
 
+  // ------------------------------------------------------------ discovery
+  //
+  // 🛑 ONE SCANNER. This is the only place the L816 scan is started, and the
+  // pairing screen renders what it publishes rather than running its own. Two
+  // scans on one BleManager is the thing RULE #2 forbids, and a screen that
+  // scans independently of a session that also scans is exactly how you get
+  // there. See ble/radio.ts.
+  const [foundMap, setFoundMap] = useState<Record<string, L816FoundDevice>>({});
+  const [seenMap, setSeenMap] = useState<Record<string, L816SeenDevice>>({});
+  const [bleState, setBleState] = useState("starting…");
+  const [boost, setBoost] = useState(0);
+
+  // 🛑 Discovery is only allowed to scan when NOTHING ELSE owns the radio.
+  //
+  // In the SATE app nothing ever calls acquireRadio, so the owner is null and
+  // discovery runs — which is the whole point, since that app has no other way
+  // to notice a recorder. In SATE COMPANION the owner is 'autosync' on the home
+  // screen, and auto-sync is the ONE background scanner there (RULE #2): a
+  // presence scan started here would call the shared manager's global
+  // stopDeviceScan() and silently stop SATE recorders being discovered. So in
+  // Companion discovery only runs on the L816 screen, which owns the radio as
+  // 'l816' — and Companion's home is the device list, which already offers Add
+  // a device, so nothing is lost there.
+  const [radio, setRadio] = useState(radioOwner);
+  useEffect(() => subscribeRadio(() => setRadio(radioOwner())), []);
+  const mayScan = radio === null || radio === "l816";
+
+  const boostDiscovery = useCallback(() => {
+    setBoost((n) => n + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      setBoost((n) => Math.max(0, n - 1));
+    };
+  }, []);
+
+  useEffect(() => {
+    // Nothing to discover once we are on a device, and the radio is needed for
+    // the link. Also: never scan while backgrounded — the session's job in the
+    // background is the CONNECTION, not looking for new hardware.
+    if (!enabled || connectedId || !mayScan) {
+      l816.stopScan();
+      setFoundMap({});
+      return;
+    }
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const begin = async () => {
+      if (stopped) return;
+      // Never PROMPT from here: discovery is something the app does on its own.
+      if (!(await l816.hasPermissions()) || stopped) {
+        timer = setTimeout(begin, DISCOVERY_REST_MS);
+        return;
+      }
+      if (inflight.current || l816.isConnected()) {
+        timer = setTimeout(begin, DISCOVERY_REST_MS);
+        return;
+      }
+      l816.startScan(
+        (d) => setFoundMap((prev) => (prev[d.id] ? prev : { ...prev, [d.id]: d })),
+        (sd) => setSeenMap((prev) => ({ ...prev, [sd.id]: sd })),
+        (st) => setBleState(st)
+      );
+      if (boost > 0) return; // a pairing screen is open: keep scanning
+      timer = setTimeout(() => {
+        if (stopped) return;
+        l816.stopScan();
+        // Forget what we heard: a recorder that has been carried out of the room
+        // must stop being offered, and a stale "found" row that fails to connect
+        // is worse than no row at all.
+        setFoundMap({});
+        timer = setTimeout(begin, DISCOVERY_REST_MS);
+      }, DISCOVERY_SCAN_MS);
+    };
+    begin();
+
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      l816.stopScan();
+    };
+  }, [enabled, connectedId, l816, boost, mayScan]);
+
   // Download one take off the device, decode it, and upload it to SATE.
   const uploadTake = useCallback(
     async (file: L816File) => {
@@ -769,6 +888,10 @@ export function useL816Session(
       uploaded: new Set(uploadedNames),
       patientId,
       setPatientId,
+      nearby: Object.values(foundMap),
+      seen: Object.values(seenMap).sort((a, b) => b.rssi - a.rssi),
+      bleState,
+      boostDiscovery,
       connect,
       disconnect,
       unpair,
@@ -790,6 +913,10 @@ export function useL816Session(
       pendingCount,
       uploadedNames,
       patientId,
+      foundMap,
+      seenMap,
+      bleState,
+      boostDiscovery,
       connect,
       disconnect,
       unpair,

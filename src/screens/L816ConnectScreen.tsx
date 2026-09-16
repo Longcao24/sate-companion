@@ -77,32 +77,20 @@ export function L816ConnectScreen({
 }) {
   const [scanPhase, setScanPhase] = useState<ScanPhase>("init");
   const [scanError, setScanError] = useState<string | null>(null);
-  const [found, setFound] = useState<Record<string, L816FoundDevice>>({});
-  const [seen, setSeen] = useState<Record<string, L816SeenDevice>>({});
-  const [bleState, setBleState] = useState<string>("starting…");
   const [patients, setPatients] = useState<Patient[]>([]);
-  const scanning = useRef(false);
+  const { nearby: foundList, seen: seenList, bleState } = session;
 
   const { state, connectedId, connectedName, recording, resumed } = session;
   const busy = state === "busy";
   const connected = !!connectedId;
 
-  const startScan = useCallback(() => {
-    if (scanning.current) return;
-    setScanPhase("scan");
-    scanning.current = true;
-    l816.startScan(
-      (d) => setFound((prev) => ({ ...prev, [d.id]: d })),
-      (sd) => setSeen((prev) => ({ ...prev, [sd.id]: sd })),
-      (st) => setBleState(st)
-    );
-  }, [l816]);
+  // This screen does NOT scan. The session is the one scanner (see its
+  // discovery section) and it is already running; all this screen does is ask
+  // for a continuous scan while it is open instead of the duty-cycled one, and
+  // render what comes back.
+  useEffect(() => session.boostDiscovery(), [session.boostDiscovery]);
 
-  const stopScan = useCallback(() => {
-    if (!scanning.current) return;
-    l816.stopScan();
-    scanning.current = false;
-  }, [l816]);
+  const startScan = useCallback(() => setScanPhase("scan"), []);
 
   // Permissions -> connect to a known unit, or scan. The session may ALREADY be
   // connected (it survives navigation now), in which case there is nothing to do
@@ -137,21 +125,15 @@ export function L816ConnectScreen({
     })();
     return () => {
       cancelled = true;
-      // Stop SCANNING only. Leaving this screen must NOT drop the link any more —
-      // that is the whole point of the session living above it.
-      stopScan();
+      // Nothing to tear down: the scan belongs to the session, and leaving this
+      // screen must NOT drop the link — that is the whole point of the session
+      // living above it.
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, l816, targetId]);
 
-  // Once connected there is nothing left to find.
-  useEffect(() => {
-    if (connected) stopScan();
-  }, [connected, stopScan]);
-
   const onPickDevice = useCallback(
     async (d: L816FoundDevice) => {
-      stopScan();
       try {
         await session.connect(d.id);
         onConnected?.(d.id, connectedName);
@@ -160,7 +142,7 @@ export function L816ConnectScreen({
         startScan();
       }
     },
-    [session, stopScan, startScan, onConnected, connectedName]
+    [session, startScan, onConnected, connectedName]
   );
 
   const onPickSeen = useCallback(
@@ -203,8 +185,6 @@ export function L816ConnectScreen({
     );
   }, [session, onUnpaired, onClose]);
 
-  const foundList = useMemo(() => Object.values(found), [found]);
-  const seenList = useMemo(() => Object.values(seen).sort((a, b) => b.rssi - a.rssi), [seen]);
   const scanningNow = !connected && state !== "connecting" && scanPhase === "scan";
 
   // How long we have been looking, in seconds. Drives the two things a scan

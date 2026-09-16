@@ -207,6 +207,7 @@ export function SateRoot() {
           onAddDevice={() => setScreen({ name: "devices" })}
           onOpenDevice={openL816}
           liveL816={liveL816}
+          l816={l816Session}
         />
       )}
       {screen.name === "tab" && screen.tab === "reports" && (
@@ -215,6 +216,7 @@ export function SateRoot() {
           devices={devices}
           onOpenReport={(recording) => setScreen({ name: "report", recording })}
           onOpenDevices={() => setScreen({ name: "devices" })}
+          l816={l816Session}
         />
       )}
       {screen.name === "tab" && screen.tab === "settings" && <SettingsScreen onClose={() => {}} />}

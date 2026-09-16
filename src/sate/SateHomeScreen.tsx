@@ -12,9 +12,11 @@ import { StatusBar } from "expo-status-bar";
 import { Feather } from "@expo/vector-icons";
 import { GlassBackground, Logo } from "../components/ui";
 import { SateDeviceChip } from "./SateDeviceChip";
+import { SateNearbyBanner } from "./SateNearbyBanner";
 import { SateApi } from "../api/sateApi";
 import { ManagedDevice, Recording } from "../protocol";
 import { recordingLabel } from "./label";
+import { L816Session } from "../l816/useL816Session";
 import { D } from "../theme";
 
 // The SATE app's home: the reports that ALREADY EXIST on the server.
@@ -48,12 +50,15 @@ export function SateHomeScreen({
   devices,
   onOpenReport,
   onOpenDevices,
+  l816,
 }: {
   api: SateApi;
   /** Paired devices, for the top-left chip (device + battery, or "Add device"). */
   devices: ManagedDevice[];
   onOpenReport: (r: Recording) => void;
   onOpenDevices: () => void;
+  /** The live L816 session, for the "a recorder is nearby" offer. */
+  l816?: L816Session;
 }) {
   const [rows, setRows] = useState<Recording[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -100,6 +105,8 @@ export function SateHomeScreen({
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={D.sub} />
         }
       >
+        {l816 && <SateNearbyBanner session={l816} />}
+
         <Text style={s.title}>Reports</Text>
         <Text style={s.sub}>
           {rows === null
