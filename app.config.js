@@ -21,12 +21,17 @@ module.exports = () => {
       ...cfg,
       name: 'SATE',
       slug: 'sate',
-      // Its own version line: this variant moves independently of Companion.
-      version: '0.1.0',
+      // 🛑 The version and versionCode are INHERITED from app.json, deliberately.
+      // They used to be pinned here as '0.1.0' / 1 with the comment "this variant
+      // moves independently" — but nothing ever moved them, so every SATE build
+      // ever made reported 0.1.0 and versionCode 1. A build you cannot identify
+      // is a build you cannot debug a report against, and a versionCode that
+      // never increases is one Android will not treat as an update.
+      // The two apps are built from ONE tree at ONE commit, so one version line
+      // is the truth about both. Bump app.json.
       android: {
         ...cfg.android,
         package: 'com.auspexmedix.sate',
-        versionCode: 1,
       },
       ios: {
         ...cfg.ios,
