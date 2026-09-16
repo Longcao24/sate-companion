@@ -7,7 +7,10 @@ import {
   L816Link,
   L816Progress,
   L816SeenDevice,
-  L816_DISPLAY_NAME,
+  L816Model,
+  L816_DEFAULT_MODEL,
+  l816DisplayName,
+  l816ModelOf,
   l816Serial,
   takeTimestamp,
 } from "./L816Link";
@@ -74,9 +77,12 @@ export interface L816Session {
   uploaded: Set<string>;
   patientId: string | null;
   setPatientId: (id: string | null) => void;
-  /** Connect (or re-target) the session. Rejects on failure so the screen can
-   *  fall back to a scan. */
-  connect: (deviceId: string) => Promise<void>;
+  /** Which model the connected (or last paired) unit is. */
+  model: L816Model;
+  /** Connect (or re-target) the session. `model` comes from what the peripheral
+   *  advertised; omitted, the family default is used — see l816Serial for why
+   *  that matters permanently. */
+  connect: (deviceId: string, model?: L816Model) => Promise<void>;
   /** User-initiated: drop the link AND stop trying to get it back. The pairing
    *  survives, so the recorder reappears on the next explicit connect. */
   disconnect: () => void;
@@ -184,6 +190,11 @@ export function useL816Session(
   const [pendingCount, setPendingCount] = useState(0);
   const [uploadedNames, setUploadedNames] = useState<string[]>([]);
   const [patientId, setPatientId] = useState<string | null>(null);
+  // The connected unit's model. A ref as well as state because pushTake reads it
+  // to build the SERIAL, and that must never be a render behind — a take filed
+  // under the wrong model's serial cannot be moved afterwards.
+  const [model, setModel] = useState<L816Model>(L816_DEFAULT_MODEL);
+  const modelRef = useRef<L816Model>(L816_DEFAULT_MODEL);
 
   // Names already sent to SATE from this device, so a reconnect does not
   // re-upload the whole card. Loaded per device on connect.
@@ -245,7 +256,7 @@ export function useL816Session(
     const now = Date.now();
     if (!force && now - lastNotif.current < 1000) return;
     lastNotif.current = now;
-    startBackgroundLink(L816_DISPLAY_NAME, text, percent);
+    startBackgroundLink(l816DisplayName(modelRef.current), text, percent);
   }, []);
 
   // Tick the on-screen duration while a take runs.
@@ -266,7 +277,7 @@ export function useL816Session(
       const id = connectedIdRef.current;
       if (!id) throw new Error("Not connected");
       await api.uploadSession({
-        device_serial: l816Serial(id),
+        device_serial: l816Serial(id, modelRef.current),
         patient_id: patientRef.current || "Unassigned",
         // The take's own timestamp, not the upload time: it is stable across a
         // retry, so re-uploading the same take dedups instead of duplicating.
@@ -472,7 +483,11 @@ export function useL816Session(
   );
 
   const connect = useCallback(
-    async (deviceId: string) => {
+    async (deviceId: string, m?: L816Model) => {
+      if (m) {
+        modelRef.current = m;
+        setModel(m);
+      }
       // Already going for this device: wait for THAT attempt and inherit its
       // result, rather than starting a second one or silently doing nothing.
       const cur = inflight.current;
@@ -563,7 +578,8 @@ export function useL816Session(
       // A user-initiated disconnect clears `wantId`; only fall back to a paired
       // unit when nothing has been let go of deliberately.
       if (unpaired.current) return;
-      const target = wantId.current ?? (known.length > 0 ? known[0].id : null);
+      const paired = known.find((k) => k.id === wantId.current) ?? known[0];
+      const target = wantId.current ?? paired?.id ?? null;
       if (!target) {
         console.log(`[L816] autoconnect: nothing to connect to (known=${known.length})`);
         return;
@@ -575,7 +591,7 @@ export function useL816Session(
           return;
         }
         console.log(`[L816] autoconnect: connecting to ${target}`);
-        await connect(target);
+        await connect(target, paired?.model ? l816ModelOf(paired.model) : undefined);
         console.log("[L816] autoconnect: connected — checking for new recordings");
       } catch (e: any) {
         // Out of range, off, or its own app holds the link. Say which, once per
@@ -929,7 +945,8 @@ export function useL816Session(
     () => ({
       state,
       connectedId,
-      connectedName: L816_DISPLAY_NAME,
+      connectedName: l816DisplayName(model),
+      model,
       recording,
       resumed,
       elapsedMs,
@@ -956,6 +973,7 @@ export function useL816Session(
     [
       state,
       connectedId,
+      model,
       recording,
       resumed,
       elapsedMs,

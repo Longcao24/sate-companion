@@ -360,7 +360,9 @@ function Root() {
           // from its uploaded sessions client-side (DeviceProvider), so
           // POST /devices/external is not needed — and calling an endpoint that
           // is not deployed just 404s on every pair and buries real errors.
-          onConnected={(id, name) => rememberL816(id, name).then(setKnownL816s)}
+          onConnected={(id, name, model) =>
+            rememberL816(id, name, model).then(setKnownL816s)
+          }
           onUnpaired={setKnownL816s}
           // goHome acquires 'autosync'. With a live L816 session that now stops
           // the L816's SCAN and KEEPS its connection — leaving this screen is

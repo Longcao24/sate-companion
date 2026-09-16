@@ -281,7 +281,9 @@ export function SateRoot() {
           l816={l816}
           session={l816Session}
           targetId={screen.targetId}
-          onConnected={(id, name) => rememberL816(id, name).then(setKnownL816s)}
+          onConnected={(id, name, model) =>
+            rememberL816(id, name, model).then(setKnownL816s)
+          }
           onUnpaired={setKnownL816s}
           // Closing goes back to the device list, and — unlike Companion's old
           // behaviour — leaves the recorder CONNECTED.

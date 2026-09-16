@@ -14,6 +14,11 @@ const KEY = "l816.known";
 export interface KnownL816 {
   id: string; // BLE peripheral id (the MAC on Android)
   name: string;
+  /** Which model this unit is. OPTIONAL because pairings remembered by a build
+   *  before L815 support have none — and `l816Serial` treats a missing model as
+   *  the family default, which is what those units already are. Never guess it
+   *  from anything but the device itself: the serial is permanent. */
+  model?: string;
 }
 
 export async function loadKnownL816s(): Promise<KnownL816[]> {
@@ -25,8 +30,18 @@ export async function loadKnownL816s(): Promise<KnownL816[]> {
   }
 }
 
-export async function rememberL816(id: string, name: string): Promise<KnownL816[]> {
-  const list = [{ id, name }, ...(await loadKnownL816s()).filter((d) => d.id !== id)];
+export async function rememberL816(
+  id: string,
+  name: string,
+  model?: string
+): Promise<KnownL816[]> {
+  const prev = (await loadKnownL816s()).find((d) => d.id === id);
+  // Never let a re-pair DOWNGRADE a known model to undefined: the unit would
+  // silently start uploading under the family-default serial instead of its own.
+  const list = [
+    { id, name, model: model ?? prev?.model },
+    ...(await loadKnownL816s()).filter((d) => d.id !== id),
+  ];
   try {
     await AsyncStorage.setItem(KEY, JSON.stringify(list));
   } catch {

@@ -497,6 +497,23 @@ setup + prebuilt flash assets: `SETUP.md` + the **GitHub Release** (`gh release 
   and can be done later on the web report. Don't force patient assignment at capture.
 
 **SATE L816 handheld recorder (Android-only) — `src/l816/` + `modules/sate-asc/`**
+- **THE FAMILY IS MULTI-MODEL (L816, L815, …) — `L816_MODELS` is the one list (2026-09-16).**
+  They speak the same protocol, carry the same ASC-VI audio and share one `kind`, so a new
+  model is an entry in that array plus a label, NOT a new device kind — adding a kind would
+  mean auditing every branch that switches on it, to no purpose. 🛑 **The serial prefix is the
+  MODEL and it is permanent**: `l816Serial(id, model)` writes it into the storage path of every
+  recording that unit ever makes, so calling an L815 `l816-…` is a false statement about the
+  hardware that cannot be corrected later without moving objects. The MAC already makes the
+  serial unique — the prefix's only job is to say what the thing is. The model is only knowable
+  while the peripheral is ADVERTISING (`l816ModelOf`), so it is captured at pair time and stored
+  with the pairing; `rememberL816` refuses to downgrade a known model back to undefined, and a
+  missing model (older pairing, or a unit that advertises only `2837`) falls back to the family
+  default `l816`, which is what every existing unit already is. ⚠️ **Two WEB tables split on that
+  prefix and must stay in step** or a unit uploads takes that look fine while its hardware never
+  appears in Connected Recorders: `services/recordingName.ts` (matches the family as `l81\d`,
+  and `label()` collapses the captured MODEL back to the family key — looking a model up
+  directly returns undefined and silently relabels every L816 take as a numbered recorder
+  session) and `contexts/DeviceProvider.tsx` `FAMILIES`.
 - **Called a SATE L816 in the product; the hardware advertises `L816`.** Those are
   deliberately different strings: `L816_DISPLAY_NAME` (`src/l816/L816Link.ts`) is the ONE
   place the product name is written and is what a paired unit is remembered as, while the

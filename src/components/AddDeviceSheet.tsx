@@ -99,7 +99,10 @@ export function AddDeviceSheet({
               <L816DeviceCard width={40} />
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={s.rowTitle}>SATE L816</Text>
+              {/* The FAMILY, not one model. This row pairs an L816 or an L815,
+                  and naming only one of them makes the other look unsupported
+                  to the person holding it. */}
+              <Text style={s.rowTitle}>SATE L816 / L815</Text>
               <Text style={s.rowSub}>Handheld recorder · records and sends over Bluetooth</Text>
             </View>
             <Feather name="chevron-right" size={20} color={D.sub} />

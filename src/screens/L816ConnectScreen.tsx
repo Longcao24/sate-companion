@@ -12,7 +12,13 @@ import {
 import { SateApi } from "../api/sateApi";
 import { Button, Card, GlassBackground, Muted, ProgressBar, Title } from "../components/ui";
 import { Patient } from "../protocol";
-import { L816FoundDevice, L816Link, L816SeenDevice, L816_DISPLAY_NAME } from "../l816/L816Link";
+import {
+  L816FoundDevice,
+  L816Link,
+  L816SeenDevice,
+  l816DisplayName,
+  l816ModelOf,
+} from "../l816/L816Link";
 import { KnownL816 } from "../l816/L816Store";
 import { L816Session, fmtDur, fmtTakeName } from "../l816/useL816Session";
 import { D } from "../theme";
@@ -67,8 +73,10 @@ export function L816ConnectScreen({
   session: L816Session;
   onClose: () => void;
   /** Called once connected, so Home can remember it and show it as a paired
-   *  device on the next launch (no re-scanning). */
-  onConnected?: (id: string, name: string) => void;
+   *  device on the next launch (no re-scanning). The MODEL goes with it: it is
+   *  only knowable while the peripheral is advertising, and the serial derived
+   *  from it is permanent. */
+  onConnected?: (id: string, name: string, model: string) => void;
   /** The recorder was unpaired — here is the paired list that is left. */
   onUnpaired?: (list: KnownL816[]) => void;
   /** A known L816's BLE id — connect straight to it instead of scanning. Falls
@@ -135,8 +143,8 @@ export function L816ConnectScreen({
   const onPickDevice = useCallback(
     async (d: L816FoundDevice) => {
       try {
-        await session.connect(d.id);
-        onConnected?.(d.id, connectedName);
+        await session.connect(d.id, d.model);
+        onConnected?.(d.id, l816DisplayName(d.model), d.model);
       } catch {
         // The session already surfaced the reason; offer the list again.
         startScan();
@@ -146,14 +154,23 @@ export function L816ConnectScreen({
   );
 
   const onPickSeen = useCallback(
-    (sd: L816SeenDevice) => onPickDevice({ id: sd.id, name: sd.name ?? "L816", rssi: sd.rssi }),
+    (sd: L816SeenDevice) =>
+      onPickDevice({
+        id: sd.id,
+        name: sd.name ?? "L816",
+        rssi: sd.rssi,
+        // Picked by hand out of the raw list, so the only clue to the model is
+        // whatever it advertises — which may be nothing, and then it is the
+        // family default.
+        model: l816ModelOf(sd.name),
+      }),
     [onPickDevice]
   );
 
   // Tell Home about a connection the SESSION made on its own (the retry loop, or
   // a reconnect at launch) — not just one picked here.
   useEffect(() => {
-    if (connectedId) onConnected?.(connectedId, connectedName);
+    if (connectedId) onConnected?.(connectedId, connectedName, session.model);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connectedId]);
 
@@ -266,7 +283,7 @@ export function L816ConnectScreen({
           <Card>
             <Text style={s.sectionTitle}>
               {foundList.length === 0
-                ? "Looking for your SATE L816…"
+                ? "Looking for your recorder…"
                 : foundList.length === 1
                   ? "Found it — connecting…"
                   : "Which SATE L816 is yours?"}
@@ -274,9 +291,10 @@ export function L816ConnectScreen({
             <Muted>
               {foundList.length > 1
                 ? "More than one is in range, so pick the one in your hand."
-                : "Turn the recorder on and keep it close. It pairs by itself — there is " +
-                  "nothing to tap. If its own app is connected, close that first: the " +
-                  "recorder only talks to one phone at a time."}
+                : "Turn the SATE L816 or L815 on and keep it close. It pairs by itself — " +
+                  "there is nothing to tap. " +
+                  "If its own app is connected, close that first: the recorder only " +
+                  "talks to one phone at a time."}
             </Muted>
 
             {foundList.length === 0 ? (
@@ -292,7 +310,7 @@ export function L816ConnectScreen({
               foundList.map((d) => (
                 <Pressable key={d.id} onPress={() => onPickDevice(d)} style={s.row}>
                   <View style={{ flex: 1 }}>
-                    <Text style={s.rowName}>{L816_DISPLAY_NAME}</Text>
+                    <Text style={s.rowName}>{l816DisplayName(d.model)}</Text>
                     <Text style={s.dim}>
                       {d.name} · {d.rssi} dBm
                     </Text>

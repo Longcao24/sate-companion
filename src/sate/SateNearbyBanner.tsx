@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
 import { L816DeviceCard } from "../components/L816DeviceCard";
+import { l816DisplayName } from "../l816/L816Link";
 import { L816Session } from "../l816/useL816Session";
 import { D } from "../theme";
 
@@ -37,7 +38,7 @@ export function SateNearbyBanner({ session }: { session: L816Session }) {
     <Pressable
       onPress={() => {
         setBusy(true);
-        session.connect(d.id).catch(() => {}).finally(() => setBusy(false));
+        session.connect(d.id, d.model).catch(() => {}).finally(() => setBusy(false));
       }}
       disabled={busy}
       accessibilityRole="button"
@@ -48,7 +49,7 @@ export function SateNearbyBanner({ session }: { session: L816Session }) {
         <L816DeviceCard width={22} />
       </View>
       <View style={{ flex: 1 }}>
-        <Text style={s.title}>{session.connectedName} is nearby</Text>
+        <Text style={s.title}>{l816DisplayName(d.model)} is nearby</Text>
         <Text style={s.sub} numberOfLines={1}>
           {more > 0
             ? `${more + 1} in range · tap to connect to the closest`

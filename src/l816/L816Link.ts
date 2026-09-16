@@ -23,15 +23,46 @@ import { getSharedBleManager, hasSharedBleManager } from "../ble/bleManager";
 import { decodeAscToWavBase64 } from "../../modules/sate-asc";
 
 /**
+ * The models in this family, lowercase, and the ONE list that decides what the
+ * scan will match.
+ *
+ * They speak the same protocol and carry the same ASC-VI audio; the model only
+ * changes what the unit is CALLED and what its serial says it is. Adding one is
+ * this line plus its label below — and the two web tables named in
+ * `l816Serial`, which cannot be reached from here.
+ */
+export const L816_MODELS = ["l816", "l815"] as const;
+export type L816Model = (typeof L816_MODELS)[number];
+
+/** The family's default, for a unit whose model we never learned: a device that
+ *  advertises only `2837`, or a pairing remembered by a build older than L815
+ *  support. It is what every existing unit already is, so an unknown model
+ *  behaves exactly as it did before rather than becoming a new kind of thing. */
+export const L816_DEFAULT_MODEL: L816Model = "l816";
+
+/**
  * What the device is CALLED in the product, everywhere a user can read it.
  *
- * It is NOT what the hardware advertises — the radio says `L816`, and the scan
- * matcher below still looks for exactly that. Keeping the two apart is the point:
- * the advertised name is a fact about the peripheral, this is SATE's name for the
- * family, and a paired unit is remembered under this one so Home reads the same
+ * It is NOT what the hardware advertises — the radio says `L816` or `L815`, and
+ * the scan matcher below looks for exactly those. Keeping the two apart is the
+ * point: the advertised name is a fact about the peripheral, this is SATE's name
+ * for it, and a paired unit is remembered under this one so Home reads the same
  * word as the connect screen.
  */
-export const L816_DISPLAY_NAME = "SATE L816";
+export function l816DisplayName(model?: L816Model | string | null): string {
+  const m = (model ?? "").toLowerCase();
+  return `SATE ${(L816_MODELS as readonly string[]).includes(m) ? m.toUpperCase() : "L816"}`;
+}
+
+/** The family's name, for anywhere that has no particular unit in hand. */
+export const L816_DISPLAY_NAME = l816DisplayName(L816_DEFAULT_MODEL);
+
+/** Which model is this, from what the peripheral advertises? A device that only
+ *  says `2837` tells us nothing, and gets the family default. */
+export function l816ModelOf(advertisedName?: string | null): L816Model {
+  const n = (advertisedName ?? "").toLowerCase();
+  return (L816_MODELS.find((m) => n.includes(m)) as L816Model) ?? L816_DEFAULT_MODEL;
+}
 
 // ---- GATT profile ------------------------------------------------------
 // Lowercase to match react-native-ble-plx's normalized UUIDs.
@@ -99,6 +130,9 @@ export interface L816FoundDevice {
   id: string;
   name: string;
   rssi: number;
+  /** Which model the advertised name says this is. The family default when it
+   *  advertises only `2837` — see l816ModelOf. */
+  model: L816Model;
 }
 
 // Every peripheral heard during a scan (diagnostics + manual pick), mirroring
@@ -231,11 +265,27 @@ export function takeTimestamp(name: string): number {
   return secs < FLOOR || secs > CEILING ? now : secs;
 }
 
-/** `84:70:D0:0F:66:0E` -> `l816-8470D00F660E`. The serial ends up in a storage
- *  key (`<user>/<serial>/<id>.wav`), so the colons come out here rather than in
- *  an object path. */
-export function l816Serial(deviceId: string): string {
-  return `l816-${deviceId.replace(/[^0-9a-zA-Z]/g, "").toUpperCase()}`;
+/**
+ * `84:70:D0:0F:66:0E` -> `l816-8470D00F660E`. The serial ends up in a storage
+ * key (`<user>/<serial>/<id>.wav`), so the colons come out here rather than in
+ * an object path.
+ *
+ * 🛑 THE PREFIX IS THE MODEL, and it is permanent. It is written into the
+ * storage path of every recording that unit ever makes, so calling an L815
+ * `l816-…` is a false statement about the hardware that cannot be corrected
+ * afterwards without moving objects. The MAC already makes the serial unique —
+ * the prefix's only job is to say what the thing is, so it has to be right.
+ *
+ * The default is the family default, so every existing L816 keeps the exact
+ * serial it has always had and nothing re-uploads or re-labels.
+ *
+ * ⚠️ Two tables on the WEB split on this prefix and must be kept in step, or a
+ * unit uploads recordings that look fine while its hardware never appears in
+ * Connected Recorders: `services/recordingName.ts` (which labels the take) and
+ * `contexts/DeviceProvider.tsx` (`FAMILIES`, which synthesizes the device row).
+ */
+export function l816Serial(deviceId: string, model: L816Model = L816_DEFAULT_MODEL): string {
+  return `${model}-${deviceId.replace(/[^0-9a-zA-Z]/g, "").toUpperCase()}`;
 }
 
 // ------------------------------------------------------------------ real
@@ -363,7 +413,10 @@ class NativeL816Link implements L816Link {
         const services = (dev.serviceUUIDs ?? []).map((u) => u.toLowerCase());
         const hasService = services.includes(L816_SERVICE);
         const name = (dev.localName || dev.name || "").trim();
-        const nameMatches = /l816|2837/i.test(name);
+        const model = l816ModelOf(name);
+        const nameMatches =
+          (L816_MODELS as readonly string[]).some((m) => name.toLowerCase().includes(m)) ||
+          /2837/i.test(name);
         const matched = nameMatches || hasService;
 
         if (!this.seenLog.has(dev.id)) {
@@ -385,7 +438,8 @@ class NativeL816Link implements L816Link {
         // The RAW advertised name, not the display name: the scan list is
         // diagnostics, and "what my phone actually hears" is the thing that tells
         // a user whether they are looking at their recorder.
-        if (matched) onFound({ id: dev.id, name: name || "L816", rssi: dev.rssi ?? -100 });
+        if (matched)
+          onFound({ id: dev.id, name: name || "L816", rssi: dev.rssi ?? -100, model });
       });
     }, true);
   }

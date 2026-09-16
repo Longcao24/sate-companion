@@ -10,7 +10,7 @@ import { SateApi } from "../api/sateApi";
 import { PlaudLink } from "../plaud/PlaudLink";
 import { KnownPendant } from "../pendant/PendantStore";
 import { KnownL816 } from "../l816/L816Store";
-import { L816_DISPLAY_NAME } from "../l816/L816Link";
+import { L816_DISPLAY_NAME, l816DisplayName } from "../l816/L816Link";
 import { ManagedDevice } from "../protocol";
 
 // Synthesize a passive device row from a locally-remembered external device
@@ -26,13 +26,16 @@ const FAMILY_LABEL: Record<"plaud" | "pendant" | "l816", string> = {
 function synth(
   kind: "plaud" | "pendant" | "l816",
   serial: string,
-  name: string
+  name: string,
+  /** Overrides the family label — an L815 and an L816 are one family with one
+   *  `kind`, and only this string tells them apart on screen. */
+  label?: string
 ): ManagedDevice {
   return {
     id: `${kind}:${serial}`,
     name,
     serial,
-    fw: FAMILY_LABEL[kind],
+    fw: label ?? FAMILY_LABEL[kind],
     online: false,
     last_seen: "",
     pending_sessions: 0,
@@ -69,7 +72,9 @@ export function useManagedDevices(
     const pendantRows = knownPendants.map((p) =>
       synth("pendant", p.id, p.name)
     );
-    const l816Rows = knownL816s.map((d) => synth("l816", d.id, d.name));
+    const l816Rows = knownL816s.map((d) =>
+      synth("l816", d.id, d.name, l816DisplayName(d.model))
+    );
     return [...plaudRows, ...pendantRows, ...l816Rows];
   }, [plaud, knownPendants, knownL816s]);
 
