@@ -184,6 +184,9 @@ export interface Recording {
   file_name: string | null;
   created_at: string | null;
   transcript: { filename?: string; segments?: TranscriptSegment[] } | null;
+  /** Bumped on every transcript save. Sent back as the expected version so a
+   *  concurrent edit is refused (PT409) instead of silently overwritten. */
+  version?: number | null;
   analysis: RecordingAnalysis | null;
   error_counts: Record<string, number> | null;
 }

@@ -21,11 +21,12 @@ import {
   RemoteCommand,
   UploadedSession,
   User,
+  TranscriptSegment,
 } from "../protocol";
 
 // Columns the report viewer needs. Kept explicit so we don't pull big rows.
 const RECORDING_COLS =
-  "id,recording_name,protocol,notes,needs_review,patient_id,duration,file_name,created_at,transcript,analysis,error_counts";
+  "id,recording_name,protocol,notes,needs_review,patient_id,duration,file_name,created_at,transcript,analysis,error_counts,version";
 
 // SATE production backend (Supabase). The companion app talks to the `device-api`
 // Edge Function and authenticates with a real Supabase user session - the SAME
@@ -82,8 +83,34 @@ export interface SateApi {
   registerExternalDevice(serial: string, name: string): Promise<void>;
   /** The processed report row (transcript + analysis) — the SAME record the web app shows. */
   getRecording(id: string): Promise<Recording>;
+  /**
+   * Reports that already exist on the server, newest first.
+   *
+   * The app never derives or generates one: a report is produced by the clinical
+   * pipeline and this only reads it. The list is deliberately the LIGHT columns —
+   * a transcript is large and the list shows none of it.
+   */
+  listRecordings(limit?: number): Promise<Recording[]>;
   /** First-open review: rename + set protocol/notes and clear needs_review. */
   updateRecording(id: string, meta: RecordingMeta): Promise<void>;
+  /**
+   * Save an edited transcript — for naming speakers, today.
+   *
+   * Goes through the `save_transcript` RPC, never a direct table UPDATE, for the
+   * same reason the web app does: it keeps the previous transcript in
+   * `recording_versions` and compare-and-swaps on `version`, so two people
+   * editing one transcript cannot silently overwrite each other. Pass the
+   * version that was loaded; a `PT409` means the row moved on and the caller
+   * must reload before saving again.
+   *
+   * Throws `TranscriptConflict` on PT409 so the caller can tell "someone else
+   * saved" apart from "the network is down" — they need very different words.
+   */
+  saveTranscript(
+    id: string,
+    transcript: { segments?: TranscriptSegment[] } & Record<string, unknown>,
+    expectedVersion: number | null
+  ): Promise<void>;
   /**
    * Mint a short-lived (~24h) Plaud "User Access Token" for the Connect-with-
    * Plaud flow. Partner secrets stay server-side in the mint-plaud-token Edge
@@ -219,6 +246,32 @@ export class HttpApi implements SateApi {
       body: JSON.stringify({ serial, name }),
     });
   }
+  async saveTranscript(
+    id: string,
+    transcript: { segments?: TranscriptSegment[] } & Record<string, unknown>,
+    expectedVersion: number | null
+  ) {
+    const res = await this.restRaw("/rpc/save_transcript", {
+      method: "POST",
+      body: JSON.stringify({
+        p_recording_id: id,
+        p_expected_version: expectedVersion,
+        p_transcript: transcript,
+        // The mobile editor only ever renames a speaker: the words, the timings
+        // and the error marks are untouched, so it must NOT recompute analysis
+        // or error counts from a partial view and overwrite the real ones.
+        p_error_counts: null,
+        p_analysis: null,
+        p_segments_edited: true,
+      }),
+    });
+    if (res.status === 409 || (await res.clone().text()).includes("PT409")) {
+      throw new TranscriptConflict();
+    }
+    if (!res.ok) {
+      throw new Error(`${res.status} ${await res.text().catch(() => "")}`);
+    }
+  }
   async getPlaudToken() {
     // Lives on a different Edge Function than baseUrl (device-api), so call it
     // directly; mirror req()'s single 401-refresh-and-retry.
@@ -248,7 +301,14 @@ export class HttpApi implements SateApi {
   // ---- recordings: read the processed report straight from Supabase REST ----
   // The web app and the phone read the very same `recordings` rows; RLS scopes
   // them to the signed-in owner so no extra endpoint is needed.
-  private async rest<T>(path: string, init?: RequestInit, retried = false): Promise<T> {
+  /**
+   * PostgREST call that hands back the raw Response, with the SAME auth and
+   * single 401-refresh-and-replay as `rest`. Needed where the STATUS and BODY
+   * carry meaning the caller must act on — `save_transcript` answers PT409 for
+   * a lost compare-and-swap, and collapsing that into a generic Error would
+   * turn "someone else edited this" into "something went wrong".
+   */
+  private async restRaw(path: string, init?: RequestInit, retried = false): Promise<Response> {
     const res = await fetch(`${SUPABASE_URL}/rest/v1${path}`, {
       ...init,
       headers: {
@@ -262,14 +322,26 @@ export class HttpApi implements SateApi {
       const fresh = await this.onUnauthorized();
       if (fresh) {
         this.token = fresh;
-        return this.rest<T>(path, init, true);
+        return this.restRaw(path, init, true);
       }
     }
+    return res;
+  }
+
+  private async rest<T>(path: string, init?: RequestInit, retried = false): Promise<T> {
+    const res = await this.restRaw(path, init, retried);
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new Error(`${res.status} ${body || res.statusText}`);
     }
     return res.status === 204 ? (undefined as T) : res.json();
+  }
+
+  async listRecordings(limit = 100) {
+    return this.rest<Recording[]>(
+      `/recordings?select=id,recording_name,protocol,patient_id,duration,file_name,created_at,analysis,error_counts` +
+        `&order=created_at.desc&limit=${limit}`
+    );
   }
 
   async getRecording(id: string) {
@@ -307,6 +379,17 @@ export function makeApi(
 // refresh token (sign the user out) from a transient network/server failure
 // (keep the session and try again later) — so we never log someone out just
 // because their phone briefly lost signal.
+/** The recording moved on while this editor held it — reload before saving. */
+export class TranscriptConflict extends Error {
+  constructor() {
+    super(
+      "Someone else saved changes to this transcript while you were editing. " +
+        "Reload the recording before saving again."
+    );
+    this.name = "TranscriptConflict";
+  }
+}
+
 export class RefreshError extends Error {
   constructor(message: string, public status: number, public authInvalid: boolean) {
     super(message);

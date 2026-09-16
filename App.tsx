@@ -26,6 +26,8 @@ import { RecorderSettingsScreen } from "./src/screens/RecorderSettingsScreen";
 import { ReportScreen } from "./src/screens/ReportScreen";
 import { SettingsScreen } from "./src/screens/SettingsScreen";
 import { StoreProvider, useStore } from "./src/store";
+import { IS_SATE_APP } from "./src/sate/variant";
+import { SateRoot } from "./src/sate/SateRoot";
 import { useAutoSync } from "./src/sync/AutoSync";
 import { D } from "./src/theme";
 
@@ -363,9 +365,11 @@ function Root() {
 }
 
 export default function App() {
+  // Two apps, one codebase. IS_SATE_APP is a BUILD constant (app.config.js sets
+  // it only for the separate `com.auspexmedix.sate` package), so this branch is
+  // fixed for the life of the process and SATE Companion renders exactly what it
+  // always did — same component, same hooks, nothing behind a runtime toggle.
   return (
-    <StoreProvider>
-      <Root />
-    </StoreProvider>
+    <StoreProvider>{IS_SATE_APP ? <SateRoot /> : <Root />}</StoreProvider>
   );
 }

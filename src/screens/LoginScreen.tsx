@@ -10,6 +10,7 @@ import {
 } from "react-native";
 import { DEVICE_API_URL, consumeMobileLink, makeApi } from "../api/sateApi";
 import { Button, Card, Field, GlassBackground, Logo, Muted } from "../components/ui";
+import { IS_SATE_APP } from "../sate/variant";
 import { QrScannerModal } from "../components/QrScannerModal";
 import { useStore } from "../store";
 import { D } from "../theme";
@@ -100,15 +101,26 @@ export function LoginScreen() {
         contentContainerStyle={s.content}
         keyboardShouldPersistTaps="handled"
       >
+        {/* One login screen, two apps. The wording has to match what the user
+            is signing in to: SATE is for reading reports, Companion is for
+            setting hardware up, and telling a SATE user their "recorders are
+            saved to this account" describes a screen they will never open. */}
         <View style={s.brandRow}>
           <Logo size={48} />
-          <Text style={s.logo}>
-            SATE <Text style={{ color: D.sky }}>Companion</Text>
-          </Text>
+          {IS_SATE_APP ? (
+            <Text style={s.logo}>SATE</Text>
+          ) : (
+            <Text style={s.logo}>
+              SATE <Text style={{ color: D.sky }}>Companion</Text>
+            </Text>
+          )}
         </View>
         <Muted style={{ marginBottom: 20 }}>
-          Sign in with your SATE account - the same one you use on the web.
-          Recorders you set up are saved to this account.
+          {IS_SATE_APP
+            ? "Sign in with your SATE account - the same one you use on the web. " +
+              "Your reports appear here as soon as SATE has finished processing them."
+            : "Sign in with your SATE account - the same one you use on the web. " +
+              "Recorders you set up are saved to this account."}
         </Muted>
 
         {/* Method switch */}
