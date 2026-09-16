@@ -132,7 +132,7 @@ Notes on what actually lives where:
   and [07-runbook.md](07-runbook.md).
 - The **live** backend is Supabase, deployed from `react_app_sate-ui_update/supabase/`.
   `cloudflare/` is a **separate, self-contained** Workers+D1+R2 re-implementation
-  (`src/policy.ts` re-implements tenant isolation because D1 has no RLS) — it does not
+  (`cloudflare/src/policy.ts` re-implements tenant isolation because D1 has no RLS) — it does not
   touch the Supabase stack, the web `src/`, or the firmware.
 - **Error-email alerting**: the `status/` Worker (`status-sate.long-cao.dev`, cron
   every 5 min) plus `device-api`'s secret-gated `GET /api/health/alerts?key=…` (v18) email

@@ -161,7 +161,7 @@ radio handoff only; it never touches the Plaud binding.
 | `src/ble/radio.ts` | Radio arbiter; the ONLY destroy path is the Plaud handoff, and it releases Plaud with `disconnect()` not `depair()` |
 | `src/api/sateApi.ts` | `getPlaudToken()`; `uploadSession()` (shared SATE path); `SUPABASE_URL` = project `zlgdpivcbmaodgokkdvz` |
 | `cloudflare/src/functions/mintPlaudToken.ts` | Cloudflare Worker **port** of the token mint (mirror of the deployed Supabase edge fn); **disabled by default** (see Auth) |
-| `App.tsx`, `src/screens/HomeScreen.tsx`, `app.json` | Route (`plaud` / `plaudSettings`), `openPlaud()`, "＋ Connect with Plaud" + paired-device rows, plugin |
+| `App.tsx`, `src/screens/DeviceListScreen.tsx`, `src/components/AddDeviceSheet.tsx`, `app.json` | Route (`plaud` / `plaudSettings`), `openPlaud()`, the Plaud row in "Add a device" + paired-device rows, plugin. (There is no `HomeScreen.tsx` — the device list IS Companion's home.) |
 
 The live app targets **Supabase** (`SUPABASE_URL/functions/v1/mint-plaud-token` and
 `/functions/v1/device-api`). The Supabase edge source for `mint-plaud-token` is not checked into
