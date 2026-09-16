@@ -10,10 +10,13 @@ import {
   View,
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
+import { Feather } from "@expo/vector-icons";
+import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
 import { GlassBackground } from "../components/ui";
 import { SateApi, TranscriptConflict } from "../api/sateApi";
 import { Recording, TranscriptSegment } from "../protocol";
 import { checkName, renameSpeaker, SpeakerRow, speakersOf } from "./speakers";
+import { recordingLabel } from "./label";
 import { D } from "../theme";
 
 // One report, read from the server, laid out as the web app lays it out:
@@ -36,7 +39,11 @@ const TABS: Array<{ id: Tab; label: string }> = [
 
 const stamp = (sec: number) => {
   const s = Math.max(0, Math.floor(sec || 0));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  // `(100 + n).slice(1)` rather than padStart: on the device this rendered "0:2"
+  // where Node gives "0:02" from the identical expression. Rather than ship a
+  // clock that drops a digit, use the arithmetic form, which cannot.
+  const ss = String(100 + (s % 60)).slice(1);
+  return `${Math.floor(s / 60)}:${ss}`;
 };
 
 const num = (v: unknown, digits = 2): string =>
@@ -70,6 +77,9 @@ export function SateReportScreen({
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  // A signed URL for the audio. `recordings` is a PRIVATE bucket — patient
+  // audio must never have a public URL — so one is minted per open and expires.
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -83,6 +93,24 @@ export function SateReportScreen({
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(() => {
+    const path = rec?.file_path;
+    if (!path) return;
+    let cancelled = false;
+    api
+      .getRecordingAudioUrl(path)
+      // Playback is a bonus, not the point of the screen: a failure here must
+      // leave the transcript and the figures perfectly usable.
+      .then((u: string | null) => !cancelled && setAudioUrl(u))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [api, rec?.file_path]);
+
+  const player = useAudioPlayer(audioUrl ? { uri: audioUrl } : null);
+  const status = useAudioPlayerStatus(player);
 
   const segments: TranscriptSegment[] = useMemo(
     () => rec?.transcript?.segments ?? [],
@@ -144,7 +172,7 @@ export function SateReportScreen({
           <Text style={s.back}>‹ Reports</Text>
         </Pressable>
         <Text style={s.headTitle} numberOfLines={1}>
-          {rec?.recording_name || recording.recording_name || "Report"}
+          {recordingLabel(rec ?? recording)}
         </Text>
       </View>
 
@@ -161,6 +189,38 @@ export function SateReportScreen({
           </Pressable>
         ))}
       </ScrollView>
+
+      {/* The same audio the web player uses. Listening is how a clinician checks
+          a transcript, so it belongs on every tab, not buried in one. */}
+      {rec && audioUrl && (
+        <View style={s.player}>
+          <Pressable
+            onPress={() => (status?.playing ? player.pause() : player.play())}
+            accessibilityRole="button"
+            accessibilityLabel={status?.playing ? "Pause" : "Play"}
+            style={s.playBtn}
+          >
+            <Feather name={status?.playing ? "pause" : "play"} size={18} color="#fff" />
+          </Pressable>
+          <View style={s.barTrack}>
+            <View
+              style={[
+                s.barFill,
+                {
+                  width: `${
+                    status?.duration
+                      ? Math.min(100, ((status.currentTime ?? 0) / status.duration) * 100)
+                      : 0
+                  }%`,
+                },
+              ]}
+            />
+          </View>
+          <Text style={s.playTime}>
+            {stamp(status?.currentTime ?? 0)} / {stamp(status?.duration ?? rec.duration ?? 0)}
+          </Text>
+        </View>
+      )}
 
       {!rec ? (
         <View style={s.center}>
@@ -397,6 +457,39 @@ const s = StyleSheet.create({
   },
   issueName: { color: D.ink, fontSize: 14 },
   issueCount: { color: D.amber, fontSize: 14, fontWeight: "700" },
+  player: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    marginHorizontal: 16,
+    marginBottom: 8,
+    padding: 10,
+    backgroundColor: D.panel,
+    borderRadius: 14,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: D.line,
+  },
+  playBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: D.sky,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  barTrack: { flex: 1, height: 5, borderRadius: 3, backgroundColor: D.tile, overflow: "hidden" },
+  barFill: { height: 5, borderRadius: 3, backgroundColor: D.sky },
+  // Fixed width and no shrinking: the progress bar is flex:1 and was squeezing
+  // the total duration off the end, so the player read "0:04 /" — a clock with
+  // nothing to measure against.
+  playTime: {
+    color: D.sub,
+    fontSize: 12,
+    fontVariant: ["tabular-nums"],
+    minWidth: 86,
+    flexShrink: 0,
+    textAlign: "right",
+  },
   notice: { backgroundColor: D.skyBg, borderRadius: 10, padding: 11, marginBottom: 12 },
   noticeTxt: { color: D.sky, fontSize: 13 },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 28 },

@@ -12,3 +12,13 @@ import Constants from "expo-constants";
  */
 export const IS_SATE_APP: boolean =
   (Constants.expoConfig?.extra as Record<string, unknown> | undefined)?.sateVariant === true;
+
+// Logged once at startup. `Constants.expoConfig` is read from the config embedded
+// by `expo prebuild`, NOT from the JS bundle — so a build where the bundle has
+// the flag but prebuild did not can render the wrong app with nothing to show
+// for it. One line here turns that from a mystery into a fact.
+console.log(
+  `[variant] IS_SATE_APP=${IS_SATE_APP} expoConfig=${
+    Constants.expoConfig ? "present" : "NULL"
+  } extra=${JSON.stringify(Constants.expoConfig?.extra ?? null)}`
+);

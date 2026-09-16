@@ -104,6 +104,13 @@ export interface ManagedDevice {
   last_seen: string; // ISO timestamp
   pending_sessions: number;
   state?: DeviceLiveState; // live activity, reported in the recorder's heartbeat
+  /** Battery %, from the SATE recorder's heartbeat. ABSENT for Plaud / Pendant /
+   *  L816 — they have no Wi-Fi and send no heartbeat, so anything drawn from a
+   *  missing value here would be a guess about a device someone is deciding
+   *  whether to rely on. */
+  battery_pct?: number | null;
+  /** Raw cell voltage (mV) from the heartbeat; null = unknown. */
+  battery_mv?: number | null;
   slp?: string; // clinician the recorder is assigned to (set at registration)
   slp_id?: string;
   // Which device family this is. Defaults to 'sate' (a SATE recorder from the
@@ -182,6 +189,8 @@ export interface Recording {
   patient_id: string | null;
   duration: number | null;
   file_name: string | null;
+  /** Key in the private `recordings` bucket — signed on demand to play it. */
+  file_path?: string | null;
   created_at: string | null;
   transcript: { filename?: string; segments?: TranscriptSegment[] } | null;
   /** Bumped on every transcript save. Sent back as the expected version so a

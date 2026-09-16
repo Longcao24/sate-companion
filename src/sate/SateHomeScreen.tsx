@@ -11,8 +11,10 @@ import {
 import { StatusBar } from "expo-status-bar";
 import { Feather } from "@expo/vector-icons";
 import { GlassBackground, Logo } from "../components/ui";
+import { SateDeviceChip } from "./SateDeviceChip";
 import { SateApi } from "../api/sateApi";
-import { Recording } from "../protocol";
+import { ManagedDevice, Recording } from "../protocol";
+import { recordingLabel } from "./label";
 import { D } from "../theme";
 
 // The SATE app's home: the reports that ALREADY EXIST on the server.
@@ -26,23 +28,6 @@ import { D } from "../theme";
 // In SATE Companion the device list IS the app because the job is managing
 // hardware; here the job is reading what the hardware produced, and hardware
 // setup is the rare errand.
-
-/** `device_SATE-443EAC_s13.wav` is not a name a person would ever type. */
-function label(r: Recording): string {
-  const raw = (r.recording_name || "").trim();
-  const m = raw.match(/^device_(SATE|pendant|plaud|l816)[^_]*_s(\d+)/i);
-  if (!m) return raw || "Untitled recording";
-  const prefix = { sate: "R", pendant: "P", plaud: "PL", l816: "L" }[m[1].toLowerCase()] ?? "R";
-  const n = Number(m[2]);
-  // The recorder numbers takes 1..99; every other family puts a UNIX timestamp
-  // there, and thirteen digits is not a name.
-  return n >= 1_000_000_000
-    ? `${prefix}-${new Date(n * 1000).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      })}`
-    : `${prefix}-S${n}`;
-}
 
 function when(iso: string | null): string {
   if (!iso) return "";
@@ -60,10 +45,13 @@ function duration(sec: number | null): string {
 
 export function SateHomeScreen({
   api,
+  devices,
   onOpenReport,
   onOpenDevices,
 }: {
   api: SateApi;
+  /** Paired devices, for the top-left chip (device + battery, or "Add device"). */
+  devices: ManagedDevice[];
   onOpenReport: (r: Recording) => void;
   onOpenDevices: () => void;
 }) {
@@ -97,22 +85,12 @@ export function SateHomeScreen({
       <GlassBackground />
       <StatusBar style="light" />
 
+      {/* Top-left is "Add device", labelled. Hardware is the errand you do once;
+          the reports are the app. A bare icon here made the one action a new
+          user needs the least discoverable thing on the screen. */}
       <View style={s.top}>
-        {/* Devices: a corner button, not a destination. */}
-        <Pressable
-          onPress={onOpenDevices}
-          hitSlop={10}
-          accessibilityRole="button"
-          accessibilityLabel="Your devices"
-          style={({ pressed }) => [s.devBtn, { opacity: pressed ? 0.6 : 1 }]}
-        >
-          <Feather name="hard-drive" size={16} color={D.sub} />
-        </Pressable>
-        <View style={s.brandRow}>
-          <Logo size={26} />
-          <Text style={s.brand}>SATE</Text>
-        </View>
-        <View style={{ width: 34 }} />
+        <SateDeviceChip devices={devices} onPress={onOpenDevices} />
+        <Logo size={24} />
       </View>
 
       <ScrollView
@@ -163,7 +141,7 @@ export function SateHomeScreen({
             </View>
             <View style={{ flex: 1 }}>
               <Text style={s.rowTitle} numberOfLines={1}>
-                {label(r)}
+                {recordingLabel(r)}
               </Text>
               <Text style={s.rowSub} numberOfLines={1}>
                 {[when(r.created_at), duration(r.duration), r.patient_id || "Standalone"]
@@ -188,21 +166,11 @@ const s = StyleSheet.create({
     paddingHorizontal: 16,
     paddingTop: 56,
   },
-  devBtn: {
-    width: 34,
-    height: 34,
-    borderRadius: 10,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: D.tile,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: D.line,
-  },
-  brandRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  brand: { color: D.ink, fontSize: 18, fontWeight: "800", letterSpacing: 3 },
+  addBtn: { flexDirection: "row", alignItems: "center", gap: 8 },
+  addTxt: { color: D.ink, fontSize: 16, fontWeight: "700" },
   scroll: { flex: 1, backgroundColor: "transparent" },
   content: { padding: 16, paddingTop: 18, paddingBottom: 48 },
-  title: { color: D.ink, fontSize: 28, fontWeight: "800", letterSpacing: 0.3 },
+  title: { color: D.ink, fontSize: 40, fontWeight: "800", letterSpacing: -0.5 },
   sub: { color: D.sub, fontSize: 13, marginTop: 4, marginBottom: 16 },
   warn: {
     backgroundColor: D.amberBg,

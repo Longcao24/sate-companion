@@ -1,15 +1,20 @@
 import { useCallback, useMemo, useState } from "react";
-import { View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { makeApi, refreshSession, RefreshError, RefreshHandler } from "../api/sateApi";
 import { LoginScreen } from "../screens/LoginScreen";
 import { DeviceListScreen } from "../screens/DeviceListScreen";
 import { useManagedDevices } from "../devices/useManagedDevices";
 import { makePlaudLink } from "../plaud/PlaudLink";
+import { KnownL816, loadKnownL816s } from "../l816/L816Store";
+import { KnownPendant, loadKnownPendants } from "../pendant/PendantStore";
 import { Recording } from "../protocol";
 import { useStore } from "../store";
 import { SateHomeScreen } from "./SateHomeScreen";
 import { SateReportScreen } from "./SateReportScreen";
+import { SateDashboardScreen } from "./SateDashboardScreen";
+import { SateNavBar, SateTab } from "./SateNavBar";
+import { SettingsScreen } from "../screens/SettingsScreen";
 import { D } from "../theme";
 import { useEffect, useRef } from "react";
 
@@ -23,14 +28,17 @@ import { useEffect, useRef } from "react";
 // It shares the store, the API client and the login screen, so the two apps sign
 // in the same way against the same account.
 
+// A tab, or a screen pushed on top of one. The report and the device list are
+// NOT tabs: they are places you go from a tab and come back from, and putting
+// them in the bar would make "back" ambiguous.
 type Screen =
-  | { name: "home" }
+  | { name: "tab"; tab: SateTab }
   | { name: "report"; recording: Recording }
   | { name: "devices" };
 
 export function SateRoot() {
   const { settings, ready, update, signOut } = useStore();
-  const [screen, setScreen] = useState<Screen>({ name: "home" });
+  const [screen, setScreen] = useState<Screen>({ name: "tab", tab: "dashboard" });
 
   const storeRef = useRef({ update, signOut, refreshToken: settings.refreshToken });
   storeRef.current = { update, signOut, refreshToken: settings.refreshToken };
@@ -99,15 +107,28 @@ export function SateRoot() {
     return () => clearInterval(t);
   }, [settings.token, settings.refreshToken, settings.tokenExpiresAt, doRefresh]);
 
-  // The device list is reused as-is from Companion. This build pairs nothing, so
-  // it is shown read-only: no "Add a device" entry points are passed.
+  // Devices the account has already paired, read from the SAME local stores
+  // Companion writes. Passing empty arrays here was a real bug: a paired L816
+  // was forgotten every launch, so the devices screen only ever offered "connect
+  // your first device" no matter how many were set up.
   const plaud = useMemo(() => makePlaudLink(), []);
+  const [knownL816s, setKnownL816s] = useState<KnownL816[]>([]);
+  const [knownPendants, setKnownPendants] = useState<KnownPendant[]>([]);
+  useEffect(() => {
+    loadKnownL816s().then(setKnownL816s).catch(() => {});
+    loadKnownPendants().then(setKnownPendants).catch(() => {});
+  }, []);
+
+  // Polled only while the devices screen is open. Reports are the app; a device
+  // list refreshing behind them every two seconds is work nobody asked for.
   const { devices, loaded, fetchFailed, refresh } = useManagedDevices(
     api,
     plaud,
-    [],
-    [],
-    !!settings.token && screen.name === "devices"
+    knownPendants,
+    knownL816s,
+    // The chip in both headers shows a paired device and its battery, so the
+    // registry has to be live on the tabs too — not only on the device screen.
+    !!settings.token
   );
 
   if (!ready) return <View style={{ flex: 1, backgroundColor: D.bg }} />;
@@ -123,35 +144,84 @@ export function SateRoot() {
   return (
     <>
       <StatusBar style="light" />
-      {screen.name === "home" && (
+      {screen.name === "tab" && screen.tab === "dashboard" && (
+        <SateDashboardScreen
+          api={api}
+          devices={devices}
+          devicesLoaded={loaded}
+          onOpenReports={() => setScreen({ name: "tab", tab: "reports" })}
+          onOpenReport={(recording) => setScreen({ name: "report", recording })}
+          onAddDevice={() => setScreen({ name: "devices" })}
+        />
+      )}
+      {screen.name === "tab" && screen.tab === "reports" && (
         <SateHomeScreen
           api={api}
+          devices={devices}
           onOpenReport={(recording) => setScreen({ name: "report", recording })}
           onOpenDevices={() => setScreen({ name: "devices" })}
         />
       )}
+      {screen.name === "tab" && screen.tab === "settings" && <SettingsScreen onClose={() => {}} />}
       {screen.name === "report" && (
         <SateReportScreen
           api={api}
           recording={screen.recording}
-          onClose={() => setScreen({ name: "home" })}
+          onClose={() => setScreen({ name: "tab", tab: "reports" })}
         />
       )}
       {screen.name === "devices" && (
-        <DeviceListScreen
-          devices={devices}
-          loaded={loaded}
-          fetchFailed={fetchFailed}
-          nearby={new Set()}
-          onRefresh={refresh}
-          onOpenDevice={() => {}}
-          onOpenSettings={() => setScreen({ name: "home" })}
-          onOpenPreview={() => setScreen({ name: "home" })}
-          // No pairing here: this build has no BLE. Passing nothing hides every
-          // "add a device" route rather than offering one that cannot finish.
-          onAddSate={() => setScreen({ name: "home" })}
+        // A real back bar. Companion's device screen has no "back" — it IS that
+        // app's home — so its only exits are labelled Settings and Preview.
+        // Wiring "return to reports" onto a button that says Settings is a lie
+        // about where the tap goes, so the way back is drawn here instead.
+        <View style={s.devWrap}>
+          <DeviceListScreen
+            devices={devices}
+            loaded={loaded}
+            fetchFailed={fetchFailed}
+            nearby={new Set()}
+            onRefresh={refresh}
+            onOpenDevice={() => {}}
+            onOpenSettings={() => setScreen({ name: "tab", tab: "settings" })}
+            onOpenPreview={() => setScreen({ name: "tab", tab: "dashboard" })}
+            onAddSate={() => setScreen({ name: "tab", tab: "dashboard" })}
+          />
+          <View style={s.devBack} pointerEvents="box-none">
+            <Pressable
+              onPress={() => setScreen({ name: "tab", tab: "dashboard" })}
+              hitSlop={12}
+              accessibilityRole="button"
+              style={({ pressed }) => [s.backPill, { opacity: pressed ? 0.7 : 1 }]}
+            >
+              <Text style={s.backTxt}>‹ Reports</Text>
+            </Pressable>
+          </View>
+        </View>
+      )}
+      {/* Only on tabs. A bar under a report would offer to jump away mid-read
+          with no way back to where you were. */}
+      {screen.name === "tab" && (
+        <SateNavBar
+          active={screen.tab}
+          onSelect={(tab) => setScreen({ name: "tab", tab })}
         />
       )}
     </>
   );
 }
+
+const s = StyleSheet.create({
+  devWrap: { flex: 1 },
+  // Floated over the reused screen rather than inside it: SATE must not change
+  // how that screen behaves for Companion, which still ships it as its home.
+  devBack: { position: "absolute", top: 54, left: 12, right: 0 },
+  backPill: {
+    alignSelf: "flex-start",
+    backgroundColor: D.chip,
+    borderRadius: 999,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+  },
+  backTxt: { color: D.sky, fontSize: 15, fontWeight: "700" },
+});

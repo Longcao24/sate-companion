@@ -26,7 +26,7 @@ import {
 
 // Columns the report viewer needs. Kept explicit so we don't pull big rows.
 const RECORDING_COLS =
-  "id,recording_name,protocol,notes,needs_review,patient_id,duration,file_name,created_at,transcript,analysis,error_counts,version";
+  "id,recording_name,protocol,notes,needs_review,patient_id,duration,file_name,created_at,transcript,analysis,error_counts,version,file_path";
 
 // SATE production backend (Supabase). The companion app talks to the `device-api`
 // Edge Function and authenticates with a real Supabase user session - the SAME
@@ -91,6 +91,12 @@ export interface SateApi {
    * a transcript is large and the list shows none of it.
    */
   listRecordings(limit?: number): Promise<Recording[]>;
+  /**
+   * A short-lived signed URL for a recording's audio, so the phone can play the
+   * same file the web player uses. `recordings` is a PRIVATE bucket — there is
+   * no public URL, and there must not be: this is patient audio.
+   */
+  getRecordingAudioUrl(filePath: string): Promise<string | null>;
   /** First-open review: rename + set protocol/notes and clear needs_review. */
   updateRecording(id: string, meta: RecordingMeta): Promise<void>;
   /**
@@ -335,6 +341,31 @@ export class HttpApi implements SateApi {
       throw new Error(`${res.status} ${body || res.statusText}`);
     }
     return res.status === 204 ? (undefined as T) : res.json();
+  }
+
+  async getRecordingAudioUrl(filePath: string) {
+    if (!filePath) return null;
+    const res = await fetch(
+      `${SUPABASE_URL}/storage/v1/object/sign/recordings/${filePath
+        .split("/")
+        .map(encodeURIComponent)
+        .join("/")}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          apikey: SUPABASE_ANON_KEY,
+          ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+        },
+        // An hour is plenty to listen to a take and is short enough that a URL
+        // which leaks out of a log stops working on its own.
+        body: JSON.stringify({ expiresIn: 3600 }),
+      }
+    );
+    if (!res.ok) return null;
+    const j = await res.json().catch(() => null);
+    const rel = j?.signedURL ?? j?.signedUrl;
+    return rel ? `${SUPABASE_URL}/storage/v1${rel}` : null;
   }
 
   async listRecordings(limit = 100) {
