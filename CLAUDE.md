@@ -230,6 +230,10 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   1 / 5 / 10 / 20 / 40 / **62 min (119 MB WAV, 159 MB body) all 200**, in 9 s at 62 min;
   90 min (230 MB body) is a **502 at the gateway**, above the edge function entirely. The
   recorder's own ceiling is ~62 min, so this covers every take the hardware can make.
+- **THE PHONE USES DIRECT-TO-STORAGE FOR ANYTHING OVER 4 MB** (`uploadSession`). Short takes
+  keep the single POST — one round trip instead of three, and nothing left behind if the phone
+  dies mid-upload. The register call happens only AFTER the object is really in Storage, which
+  is what stops a failed upload leaving a row pointing at nothing.
 - **`POST /api/sessions/upload-url` + `POST /api/sessions/register` (v27) are the ONLY routes
   with no size ceiling.** Every byte-carrying route puts the audio through the function, so
   every one of them has a limit that no amount of tuning moves — the streaming fix gets ~62 min
@@ -241,10 +245,14 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   **Storage**, never from the client. Verified live: 90 min / 172.8 MB — the exact size that
   was a 502 — uploads and registers; out-of-prefix paths get 403; an unuploaded path gets 409
   rather than a ghost row.
-- ⚠️ **Storage's real object limit measured 2026-09-16 is ~208–211 MB, NOT the 500 MB this file
-  used to claim** (`413 EntityTooLarge`, "The object exceeded the maximum allowed size"). That
-  is ~108–110 minutes of 16 kHz mono. It is a PROJECT setting (Storage settings → global file
-  size limit), not a code limit, so raising it is a dashboard change.
+- ⚠️ **The BUCKET's own `file_size_limit` is what binds, not the project's** — the opposite of
+  what this file used to say. Measured 2026-09-16: the project was already at 500 MB while
+  uploads died at exactly 200 MiB (`413 EntityTooLarge`), which was `device-sessions`'
+  own limit. Both are now **5 GB** (~43 h of 16 kHz mono; a bound rather than "off", so a bug
+  cannot write a 50 GB object). Read them with the Management API
+  `GET /v1/projects/<ref>/config/storage` and the Storage API `GET /storage/v1/bucket/<name>`
+  — checking only one of the two is how the wrong one gets blamed. Verified after raising:
+  **8 h / 922 MB uploads and registers**.
 - **`POST /api/sessions/chunk` now accepts a USER JWT too (v26)**, not only a device key.
   Same handler, same part objects, same contiguity and idempotency checks; parts are rooted
   at `u_<user id>` and NEVER at a caller-supplied serial (that would let one account write

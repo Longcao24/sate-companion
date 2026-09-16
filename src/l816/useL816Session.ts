@@ -293,16 +293,18 @@ export function useL816Session(
     async (take: { name: string; wavBase64: string; sampleRate: number; durationMs: number }) => {
       const id = connectedIdRef.current;
       if (!id) throw new Error("Not connected");
+      // A big take goes straight into Storage in one PUT, which reports nothing
+      // until it finishes. So say the SIZE rather than invent a percentage: it is
+      // a fact, and it is the answer to "why is this taking so long" — a bar
+      // creeping forward on a guess would only turn that question into a promise.
+      const mb = (take.wavBase64.length * 0.75) / 1e6;
+      if (mb > 4) {
+        setProgress({
+          phase: "decoding",
+          message: `Uploading ${mb.toFixed(0)} MB to SATE…`,
+        });
+      }
       await api.uploadSession({
-        // A long take spends longer being handed to SATE than it did coming off
-        // the device, and "Uploading to SATE…" with no number for two minutes is
-        // indistinguishable from a stall — which is exactly what a failed upload
-        // used to look like.
-        onProgress: (f) =>
-          setProgress({
-            phase: "decoding",
-            message: `Uploading to SATE… ${Math.round(f * 100)}%`,
-          }),
         device_serial: l816Serial(id, modelRef.current),
         patient_id: patientRef.current || "Unassigned",
         // The take's own timestamp, not the upload time: it is stable across a

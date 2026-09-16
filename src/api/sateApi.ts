@@ -150,9 +150,6 @@ export type RefreshHandler = () => Promise<string | null>;
  */
 const SINGLE_SHOT_MAX = 4 * 1024 * 1024;
 
-/** Slice size for the chunked path. The same ~1 MB the recorder firmware uses,
- *  which is what the server's part-object layout was tuned against. */
-const UPLOAD_CHUNK = 1024 * 1024;
 
 export class HttpApi implements SateApi {
   // token is mutable: after a 401 + refresh we swap in the fresh one and retry.
@@ -257,18 +254,21 @@ export class HttpApi implements SateApi {
   /**
    * Hand a finished take to SATE.
    *
-   * 🛑 A LONG RECORDING MUST NOT GO THROUGH THE SINGLE-SHOT JSON POST. That path
-   * carries the whole WAV as base64 inside one body: ten minutes of 16 kHz mono
-   * is ~19 MB of PCM and ~26 MB once base64'd, and it dies PART-WAY THROUGH
-   * against the edge function's body and wall-clock limits. That is the worst
-   * possible place to fail — the take has already come off the hardware
-   * perfectly, so the audio exists and there is nothing to be done with it.
+   * 🛑 A LONG RECORDING MUST NOT GO THROUGH THE EDGE FUNCTION AT ALL.
    *
-   * Anything above the threshold is streamed in slices to `/api/sessions/chunk`,
-   * the same endpoint the recorder firmware has used for 118 MB sessions all
-   * along: each slice is stored as its own part object and the file is assembled
-   * exactly once, on the final slice. Short takes keep the single POST, which is
-   * one round trip instead of several.
+   * The single-shot POST carries the whole WAV as base64 inside one JSON body,
+   * and that is where long takes died: HTTP 546 `WORKER_RESOURCE_LIMIT`, part-way
+   * through, on a recording that had already come off the hardware perfectly.
+   * Streaming the body server-side raised that to about an hour — and then the
+   * wall moved somewhere no server code can reach, a 502 at the gateway.
+   *
+   * So above the threshold the bytes skip the function entirely: ask for a signed
+   * Storage URL, PUT the audio straight into Storage (which is built for this),
+   * then register the object. Measured end to end at 8 hours / 922 MB. The
+   * remaining limit is the bucket's, which is a setting rather than code.
+   *
+   * Short takes keep the single POST: one round trip instead of three, and no
+   * object left behind if the phone dies mid-upload.
    */
   async uploadSession(args: {
     device_serial: string;
@@ -277,8 +277,6 @@ export class HttpApi implements SateApi {
     sample_rate: number;
     wav_base64: string;
     flags?: number[];
-    /** Progress of the upload itself, 0..1. A long take spends longer being
-     *  handed to SATE than it did coming off the device. */
     onProgress?: (fraction: number) => void;
   }) {
     const { wav_base64, onProgress, ...meta } = args;
@@ -291,55 +289,42 @@ export class HttpApi implements SateApi {
       return;
     }
 
-    const q = (extra: Record<string, string>) =>
-      new URLSearchParams({
-        device_serial: meta.device_serial,
-        patient_id: meta.patient_id,
-        session_number: String(meta.session_number),
-        sample_rate: String(meta.sample_rate),
-        total: String(bytes.length),
-        ...(meta.flags?.length ? { flags: meta.flags.join(",") } : {}),
-        ...extra,
-      }).toString();
-
-    for (let off = 0; off < bytes.length; off += UPLOAD_CHUNK) {
-      // `slice`, never `subarray`: the Buffer polyfill React Native ships patches
-      // slice to return a Buffer and does NOT patch subarray, which comes back a
-      // plain Uint8Array under Hermes. See src/l816/L816Link.ts.
-      const end = Math.min(off + UPLOAD_CHUNK, bytes.length);
-      const slice = bytes.slice(off, end);
-      const final = end >= bytes.length;
-      await this.rawPost(
-        `/api/sessions/chunk?${q({ offset: String(off), final: final ? "1" : "0" })}`,
-        slice
-      );
-      onProgress?.(end / bytes.length);
-    }
-  }
-
-  /** POST raw bytes to device-api, with the same one-shot 401-refresh-and-retry
-   *  `req` does. Used by the chunked upload, whose body is not JSON. */
-  private async rawPost(path: string, body: Uint8Array, retried = false): Promise<void> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
+    const slot = await this.req<{
+      session_id: string;
+      storage_path: string;
+      signed_url: string;
+    }>("/api/sessions/upload-url", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/octet-stream",
-        apikey: SUPABASE_ANON_KEY,
-        ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
-      },
-      body: body as unknown as BodyInit,
+      body: JSON.stringify({ device_serial: meta.device_serial }),
     });
-    if (res.status === 401 && !retried && this.onUnauthorized) {
-      const fresh = await this.onUnauthorized();
-      if (fresh) {
-        this.token = fresh;
-        return this.rawPost(path, body, true);
-      }
+
+    const put = await fetch(slot.signed_url, {
+      method: "PUT",
+      headers: { "Content-Type": "audio/wav", "x-upsert": "true" },
+      body: bytes as unknown as BodyInit,
+    });
+    if (!put.ok) {
+      // The take is still on the device and still unmarked, so this is a retry,
+      // not a loss — say which half failed so the log is worth reading.
+      throw new Error(
+        `storage upload failed: ${put.status} ${await put.text().catch(() => "")}`
+      );
     }
-    if (!res.ok) {
-      throw new Error(`${res.status} ${await res.text().catch(() => "")}`);
-    }
+    onProgress?.(1);
+
+    // Only now does a row exist. Registering AFTER the object is what keeps a
+    // failed upload from leaving a session pointing at nothing — the ghost row
+    // that strands a recording on the device for ever.
+    await this.req("/api/sessions/register", {
+      method: "POST",
+      body: JSON.stringify({
+        session_id: slot.session_id,
+        storage_path: slot.storage_path,
+        ...meta,
+      }),
+    });
   }
+
   async registerExternalDevice(serial: string, name: string) {
     await this.req("/api/devices/external", {
       method: "POST",
