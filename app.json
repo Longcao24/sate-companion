@@ -3,7 +3,7 @@
     "name": "SATE Companion",
     "slug": "sate-companion",
     "scheme": "satecompanion",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "backgroundColor": "#0B0E13",
@@ -28,6 +28,7 @@
     },
     "android": {
       "package": "com.auspexmedix.satecompanion",
+      "versionCode": 2,
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0B0E13"
