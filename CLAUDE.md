@@ -213,6 +213,35 @@ Durable lessons — check the ones relevant to what you're touching. Version num
   by (user, serial, patient, session_number, bytes) + `objectExists` to dedup a re-uploaded take (a
   lost BLE `markSynced` ACK). There is NO DB unique constraint backstop yet — add one.
 
+**⚠️ A LONG TAKE MUST NOT BE BASE64'd INTO ONE JSON BODY (`device-api`, 2026-09-16)**
+- The phone uploads hardware with no device key (L816/L815, pendant, Plaud) through
+  `POST /api/sessions`, which carried the whole WAV as base64 in the body. Three innocent
+  lines — `await req.json()`, destructure, `Uint8Array.from(atob(...))` — hold **FOUR copies
+  at once**: the raw request text, the parsed object's copy of the base64 string, the binary
+  string `atob` returns, and the byte array. For ten minutes of 16 kHz mono (~19 MB PCM,
+  ~26 MB base64) that is upwards of 100 MB, and the function is killed part-way through with
+  **HTTP 546 `WORKER_RESOURCE_LIMIT` — "Function failed due to not having enough compute
+  resources"**. 🛑 **That message names compute, so it reads as an AI/model problem and sends
+  you to Workers AI. It is neither — it is this function running out of MEMORY**, and the
+  phrase is worth recognising on sight.
+- **Fixed by STREAMING the body (`readSessionBody`)**: metadata is collected as text (tiny)
+  and the base64 value is decoded four characters at a time straight into ONE pre-sized
+  buffer, so peak memory is the audio once. Measured against the live function afterwards:
+  1 / 5 / 10 / 20 / 40 / **62 min (119 MB WAV, 159 MB body) all 200**, in 9 s at 62 min;
+  90 min (230 MB body) is a **502 at the gateway**, above the edge function entirely. The
+  recorder's own ceiling is ~62 min, so this covers every take the hardware can make.
+- **`POST /api/sessions/chunk` now accepts a USER JWT too (v26)**, not only a device key.
+  Same handler, same part objects, same contiguity and idempotency checks; parts are rooted
+  at `u_<user id>` and NEVER at a caller-supplied serial (that would let one account write
+  parts under another's prefix). The phone should prefer it for large takes — the firmware
+  has used it for 118 MB sessions all along — but the streaming fix above is what rescues the
+  builds already installed.
+- **A failed upload is self-healing and must stay that way.** Nothing is ever deleted from an
+  L816, `markUploaded` runs ONLY after `uploadSession` resolves, and the sweep diffs the
+  device's file list against what has been marked — so a take that failed to upload is still
+  on the device, still unmarked, and goes up by itself on the next connect. That is why a
+  server-side fix reaches recordings that already failed, with no app update.
+
 **⚠️ Device AI processing is ASYNC — never call the AI from an edge function**
 - **The bug:** the old `process-device-session` edge ran `fetch(AI_PROCESS_URL)` (ngrok, self-hosted
   CUDA) and *awaited* the whole transcription. Supabase edge has a hard ~150s wall-clock limit

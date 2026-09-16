@@ -12,6 +12,9 @@
 //   POST  /api/sessions                  { device_serial, patient_id,
 //                                          session_number, sample_rate,
 //                                          wav_base64 } -> { id }
+//   POST  /api/sessions/chunk?offset&final&total&...   raw bytes -> { id } on final
+//         (device-api >=v26 accepts a user JWT here, not just a device key —
+//          a long take cannot go through the base64 JSON body above)
 
 import {
   ManagedDevice,
@@ -23,6 +26,7 @@ import {
   User,
   TranscriptSegment,
 } from "../protocol";
+import { Buffer } from "buffer";
 
 // Columns the report viewer needs. Kept explicit so we don't pull big rows.
 const RECORDING_COLS =
@@ -70,6 +74,10 @@ export interface SateApi {
     /** Ms offsets into the recording — same seek-bar-tick pipeline as the
      * SATE hardware's physical flag button. */
     flags?: number[];
+    /** Progress of the upload itself, 0..1. A long take spends longer being
+     *  handed to SATE than it did coming off the device, and a screen that says
+     *  only "Uploading…" for two minutes cannot be told apart from a stall. */
+    onProgress?: (fraction: number) => void;
   }): Promise<void>;
   /**
    * Register a device the phone paired over Bluetooth (Plaud / Pendant / L816) so
@@ -132,6 +140,19 @@ export interface SateApi {
 // then retries the request once with the new token — so an expired access token
 // is invisible to the user, exactly like the web app's auto-refresh.
 export type RefreshHandler = () => Promise<string | null>;
+
+/**
+ * Above this many bytes the upload is chunked instead of sent as one JSON body.
+ *
+ * 4 MB is comfortably under the edge function's limits with the ~33% base64
+ * overhead on top, and comfortably above every take the pendant or a short
+ * handheld recording produces — so the common case stays one round trip.
+ */
+const SINGLE_SHOT_MAX = 4 * 1024 * 1024;
+
+/** Slice size for the chunked path. The same ~1 MB the recorder firmware uses,
+ *  which is what the server's part-object layout was tuned against. */
+const UPLOAD_CHUNK = 1024 * 1024;
 
 export class HttpApi implements SateApi {
   // token is mutable: after a 401 + refresh we swap in the fresh one and retry.
@@ -233,6 +254,22 @@ export class HttpApi implements SateApi {
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
     return { uri: `${this.baseUrl}/api/sessions/${sessionId}/audio`, headers };
   }
+  /**
+   * Hand a finished take to SATE.
+   *
+   * 🛑 A LONG RECORDING MUST NOT GO THROUGH THE SINGLE-SHOT JSON POST. That path
+   * carries the whole WAV as base64 inside one body: ten minutes of 16 kHz mono
+   * is ~19 MB of PCM and ~26 MB once base64'd, and it dies PART-WAY THROUGH
+   * against the edge function's body and wall-clock limits. That is the worst
+   * possible place to fail — the take has already come off the hardware
+   * perfectly, so the audio exists and there is nothing to be done with it.
+   *
+   * Anything above the threshold is streamed in slices to `/api/sessions/chunk`,
+   * the same endpoint the recorder firmware has used for 118 MB sessions all
+   * along: each slice is stored as its own part object and the file is assembled
+   * exactly once, on the final slice. Short takes keep the single POST, which is
+   * one round trip instead of several.
+   */
   async uploadSession(args: {
     device_serial: string;
     patient_id: string;
@@ -240,11 +277,68 @@ export class HttpApi implements SateApi {
     sample_rate: number;
     wav_base64: string;
     flags?: number[];
+    /** Progress of the upload itself, 0..1. A long take spends longer being
+     *  handed to SATE than it did coming off the device. */
+    onProgress?: (fraction: number) => void;
   }) {
-    await this.req("/api/sessions", {
+    const { wav_base64, onProgress, ...meta } = args;
+    const bytes = Buffer.from(wav_base64, "base64");
+    if (bytes.length <= SINGLE_SHOT_MAX) {
+      await this.req("/api/sessions", {
+        method: "POST",
+        body: JSON.stringify({ ...meta, wav_base64 }),
+      });
+      return;
+    }
+
+    const q = (extra: Record<string, string>) =>
+      new URLSearchParams({
+        device_serial: meta.device_serial,
+        patient_id: meta.patient_id,
+        session_number: String(meta.session_number),
+        sample_rate: String(meta.sample_rate),
+        total: String(bytes.length),
+        ...(meta.flags?.length ? { flags: meta.flags.join(",") } : {}),
+        ...extra,
+      }).toString();
+
+    for (let off = 0; off < bytes.length; off += UPLOAD_CHUNK) {
+      // `slice`, never `subarray`: the Buffer polyfill React Native ships patches
+      // slice to return a Buffer and does NOT patch subarray, which comes back a
+      // plain Uint8Array under Hermes. See src/l816/L816Link.ts.
+      const end = Math.min(off + UPLOAD_CHUNK, bytes.length);
+      const slice = bytes.slice(off, end);
+      const final = end >= bytes.length;
+      await this.rawPost(
+        `/api/sessions/chunk?${q({ offset: String(off), final: final ? "1" : "0" })}`,
+        slice
+      );
+      onProgress?.(end / bytes.length);
+    }
+  }
+
+  /** POST raw bytes to device-api, with the same one-shot 401-refresh-and-retry
+   *  `req` does. Used by the chunked upload, whose body is not JSON. */
+  private async rawPost(path: string, body: Uint8Array, retried = false): Promise<void> {
+    const res = await fetch(`${this.baseUrl}${path}`, {
       method: "POST",
-      body: JSON.stringify(args),
+      headers: {
+        "Content-Type": "application/octet-stream",
+        apikey: SUPABASE_ANON_KEY,
+        ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+      },
+      body: body as unknown as BodyInit,
     });
+    if (res.status === 401 && !retried && this.onUnauthorized) {
+      const fresh = await this.onUnauthorized();
+      if (fresh) {
+        this.token = fresh;
+        return this.rawPost(path, body, true);
+      }
+    }
+    if (!res.ok) {
+      throw new Error(`${res.status} ${await res.text().catch(() => "")}`);
+    }
   }
   async registerExternalDevice(serial: string, name: string) {
     await this.req("/api/devices/external", {

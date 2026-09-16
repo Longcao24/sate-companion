@@ -294,6 +294,15 @@ export function useL816Session(
       const id = connectedIdRef.current;
       if (!id) throw new Error("Not connected");
       await api.uploadSession({
+        // A long take spends longer being handed to SATE than it did coming off
+        // the device, and "Uploading to SATE…" with no number for two minutes is
+        // indistinguishable from a stall — which is exactly what a failed upload
+        // used to look like.
+        onProgress: (f) =>
+          setProgress({
+            phase: "decoding",
+            message: `Uploading to SATE… ${Math.round(f * 100)}%`,
+          }),
         device_serial: l816Serial(id, modelRef.current),
         patient_id: patientRef.current || "Unassigned",
         // The take's own timestamp, not the upload time: it is stable across a
@@ -348,7 +357,8 @@ export function useL816Session(
         } catch (e: any) {
           setError(
             `${e?.message ?? "Transfer failed"}\n\n${pending.length - i} recording(s) are ` +
-              `still on the SATE L816 and were not uploaded. They stay in the list below — ` +
+              `still on the ${l816DisplayName(modelRef.current)} and were not uploaded. They ` +
+              `stay in the list below — ` +
               `reconnect or tap Upload to try again.`
           );
           setState("error");
@@ -357,7 +367,7 @@ export function useL816Session(
           if (backgrounded.current) {
             notifyOnce(
               0xfd,
-              "SATE L816 sync incomplete",
+              `${l816DisplayName(modelRef.current)} sync incomplete`,
               `${pending.length - i} recording(s) still on the device.`
             );
           }
@@ -368,7 +378,11 @@ export function useL816Session(
       setState("ready");
       bgStatus("Connected · waiting for a recording", undefined, true);
       if (backgrounded.current) {
-        notifyOnce(0xfc, "SATE L816 synced", `${pending.length} recording(s) uploaded to SATE.`);
+        notifyOnce(
+          0xfc,
+          `${l816DisplayName(modelRef.current)} synced`,
+          `${pending.length} recording(s) uploaded to SATE.`
+        );
       }
       return true;
     },
@@ -519,7 +533,7 @@ export function useL816Session(
       const cur = inflight.current;
       if (cur) {
         if (cur.id === deviceId) return cur.p;
-        throw new Error("Already connecting to another SATE L816");
+        throw new Error(`Already connecting to another ${l816DisplayName(modelRef.current)}`);
       }
       unpaired.current = false;
       setState("connecting");
@@ -587,7 +601,7 @@ export function useL816Session(
       setRecording(false);
       setProgress(null);
       setState("idle");
-      setStatus("The SATE L816 went out of range. Reconnecting…");
+      setStatus(`The ${l816DisplayName(modelRef.current)} went out of range. Reconnecting…`);
       stopBackgroundLink();
     });
     return () => sub.remove();
@@ -810,7 +824,8 @@ export function useL816Session(
         // list below is the way back to it. Say so; a bare error reads like the
         // take is gone.
         setError(
-          `${e?.message ?? "Transfer failed"}\n\nThe recording is still on the SATE L816 — ` +
+          `${e?.message ?? "Transfer failed"}\n\nThe recording is still on the ` +
+            `${l816DisplayName(modelRef.current)} — ` +
             `pick it from the list below to try again.`
         );
         setState("error");
@@ -889,7 +904,8 @@ export function useL816Session(
           }
         } catch (e: any) {
           setError(
-            `${e?.message ?? "Transfer failed"}\n\nYou recorded on the SATE L816 itself. ` +
+            `${e?.message ?? "Transfer failed"}\n\nYou recorded on the ` +
+              `${l816DisplayName(modelRef.current)} itself. ` +
               `The take is still on the device — pick it from the list below to upload it.`
           );
           setState("error");
@@ -899,7 +915,7 @@ export function useL816Session(
           if (backgrounded.current) {
             notifyOnce(
               0xfe,
-              "SATE L816 transfer failed",
+              `${l816DisplayName(modelRef.current)} transfer failed`,
               "The recording is still on the device. Open SATE to try again."
             );
           }
