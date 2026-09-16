@@ -181,7 +181,7 @@ export function L816ConnectScreen({
   // the only copy of a session reads like it might throw them away.
   const confirmUnpair = useCallback(() => {
     Alert.alert(
-      "Unpair this SATE L816?",
+      `Unpair this ${connectedName}?`,
       "SATE will forget this recorder and stop connecting to it. Nothing is " +
         "deleted — the recordings on the device stay on the device, and the ones " +
         "already uploaded stay in SATE. You can pair it again at any time.",
@@ -256,11 +256,14 @@ export function L816ConnectScreen({
         <View style={s.header}>
           {/* The title is long enough to push "Close" off the right edge, which
               rendered as "Clos". It shrinks; the exit does not. */}
-          {/* Short on purpose. "Connect with SATE L816" ran into the Close
-              button at the system font sizes people actually use, and the card
-              below already names the device — the header does not need to. */}
+          {/* The CONNECTED unit's name, not the family's. The header said
+              "SATE L816" over a card that said "SATE L815", which is the app
+              disagreeing with itself about what is in the user's hand — and
+              exactly what L816_DISPLAY_NAME exists to prevent. Short on purpose
+              too: "Connect with …" ran into the Close button at the system font
+              sizes people actually use. */}
           <View style={s.headerTitle}>
-            <Title>SATE L816</Title>
+            <Title>{connected ? connectedName : "SATE L816 / L815"}</Title>
           </View>
           {/* flexShrink on the PRESSABLE, not on its Text: the Pressable is the
               flex item, and with the default flexShrink:1 it squeezed its own
@@ -286,7 +289,7 @@ export function L816ConnectScreen({
                 ? "Looking for your recorder…"
                 : foundList.length === 1
                   ? "Found it — connecting…"
-                  : "Which SATE L816 is yours?"}
+                  : "Which recorder is yours?"}
             </Text>
             <Muted>
               {foundList.length > 1
@@ -333,9 +336,9 @@ export function L816ConnectScreen({
           <Card>
             <Text style={s.sectionTitle}>Everything this phone can hear</Text>
             <Muted>
-              The SATE L816 does not always broadcast its name, so it may be in this list
-              without being recognised above. Look for a name starting “L816” or a row marked
-              “L816 service”, and tap it.
+              These recorders do not always broadcast their name, so yours may be in this
+              list without being recognised above. Look for a name starting “L81” or a row
+              marked “L816 service”, and tap it.
             </Muted>
             <Text style={[s.dim, { marginTop: 6 }]}>Bluetooth radio: {bleState}</Text>
             {seenList.length === 0 ? (
@@ -374,7 +377,7 @@ export function L816ConnectScreen({
             and it will never connect again to offer the button. */}
         {!connected && targetId && (
           <Pressable onPress={confirmUnpair} hitSlop={8} accessibilityRole="button">
-            <Text style={s.unpair}>Unpair this SATE L816</Text>
+            <Text style={s.unpair}>Unpair this recorder</Text>
           </Pressable>
         )}
 
@@ -385,12 +388,13 @@ export function L816ConnectScreen({
               <Muted>
                 {recording
                   ? resumed
-                    ? "This SATE L816 was already recording when we connected — it keeps " +
-                      "going on its own. The timer below counts from now, not from the start."
-                    : "Recording on the SATE L816. Audio is stored on the device and " +
+                    ? `This ${connectedName} was already recording when we connected — it ` +
+                      "keeps going on its own. The timer below counts from now, not from " +
+                      "the start."
+                    : `Recording on the ${connectedName}. Audio is stored on the device and ` +
                       "transferred when you stop."
-                  : "Press record to start. The SATE L816 records on its own — the take is " +
-                    "downloaded and uploaded to SATE when you stop."}
+                  : `Press record to start. The ${connectedName} records on its own — the ` +
+                    "take is downloaded and uploaded to SATE when you stop."}
               </Muted>
 
               {/* The one thing a user cannot tell by looking at the phone: the
@@ -485,7 +489,7 @@ export function L816ConnectScreen({
                     "away upload themselves the next time it connects."}
               </Muted>
               {session.files.length === 0 ? (
-                <Text style={s.dim}>No recordings on this SATE L816.</Text>
+                <Text style={s.dim}>No recordings on this {connectedName}.</Text>
               ) : (
                 session.files.map((f) => {
                   const done = session.uploaded.has(f.name);
@@ -535,7 +539,7 @@ export function L816ConnectScreen({
               hitSlop={8}
               accessibilityRole="button"
             >
-              <Text style={[s.unpair, busy && { opacity: 0.4 }]}>Unpair this SATE L816</Text>
+              <Text style={[s.unpair, busy && { opacity: 0.4 }]}>Unpair this {connectedName}</Text>
             </Pressable>
           </>
         )}

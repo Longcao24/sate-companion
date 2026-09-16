@@ -26,6 +26,7 @@ import { D } from "../theme";
 
 export function SateNearbyBanner({ session }: { session: L816Session }) {
   const [busy, setBusy] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
   const d = session.nearby[0];
 
   if (!d || session.connectedId || session.state === "connecting" || session.state === "busy") {
@@ -38,7 +39,17 @@ export function SateNearbyBanner({ session }: { session: L816Session }) {
     <Pressable
       onPress={() => {
         setBusy(true);
-        session.connect(d.id, d.model).catch(() => {}).finally(() => setBusy(false));
+        setFailed(null);
+        session
+          .connect(d.id, d.model)
+          // 🛑 NEVER swallow this. It used to be `.catch(() => {})`, so a connect
+          // that failed — the recorder held by its own app, out of range by the
+          // time the tap landed, a handshake that timed out — left the banner
+          // exactly as it was. The button looked broken rather than the attempt
+          // looking failed, which is the difference between "try again" and
+          // "this app does not work".
+          .catch((e) => setFailed(e?.message ?? "Could not connect"))
+          .finally(() => setBusy(false));
       }}
       disabled={busy}
       accessibilityRole="button"
@@ -50,10 +61,12 @@ export function SateNearbyBanner({ session }: { session: L816Session }) {
       </View>
       <View style={{ flex: 1 }}>
         <Text style={s.title}>{l816DisplayName(d.model)} is nearby</Text>
-        <Text style={s.sub} numberOfLines={1}>
-          {more > 0
-            ? `${more + 1} in range · tap to connect to the closest`
-            : "Tap to connect — recordings upload themselves once it is"}
+        <Text style={[s.sub, failed && s.subFail]} numberOfLines={2}>
+          {failed
+            ? `${failed} — tap to try again`
+            : more > 0
+              ? `${more + 1} in range · tap to connect to the closest`
+              : "Tap to connect — recordings upload themselves once it is"}
         </Text>
       </View>
       {busy ? <ActivityIndicator color={D.sky} /> : <Text style={s.cta}>Connect</Text>}
@@ -84,6 +97,7 @@ const s = StyleSheet.create({
   },
   title: { color: D.ink, fontSize: 15, fontWeight: "700" },
   sub: { color: D.sub, fontSize: 12, marginTop: 3 },
+  subFail: { color: D.amber },
   // A generous box: Android's Bold text setting clips a label sized to its own
   // measured width (see the pairing screen's `close` style).
   cta: { color: D.sky, fontSize: 15, fontWeight: "700", minWidth: 86, textAlign: "right" },

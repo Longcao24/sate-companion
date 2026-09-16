@@ -14,7 +14,13 @@ import {
   l816Serial,
   takeTimestamp,
 } from "./L816Link";
-import { loadUploaded, markUploaded, forgetL816, KnownL816 } from "./L816Store";
+import {
+  loadUploaded,
+  markUploaded,
+  forgetL816,
+  rememberL816,
+  KnownL816,
+} from "./L816Store";
 import { radioOwner, setL816Held, subscribeRadio } from "../ble/radio";
 import {
   isBackgroundLinkSupported,
@@ -177,7 +183,9 @@ export function useL816Session(
   enabled: boolean,
   /** Paired units, so the session can come back by itself after a drop or a
    *  cold start without the user opening the L816 screen at all. */
-  known: KnownL816[]
+  known: KnownL816[],
+  /** Called with the new paired list whenever the session pairs or unpairs. */
+  onKnown?: (list: KnownL816[]) => void
 ): L816Session {
   const [state, setState] = useState<L816State>("idle");
   const [connectedId, setConnectedId] = useState<string | null>(null);
@@ -220,6 +228,8 @@ export function useL816Session(
   // reflects reality): after a drop these disagree, and that difference is
   // exactly what the retry loop acts on. Null means "the user let it go" — a
   // deliberate disconnect must not be undone by the reconnector.
+  const onKnownRef = useRef(onKnown);
+  onKnownRef.current = onKnown;
   const wantId = useRef<string | null>(null);
   const connectedIdRef = useRef<string | null>(null);
   // The connect currently in flight, so a second caller JOINS it instead of
@@ -260,8 +270,15 @@ export function useL816Session(
   }, []);
 
   // Tick the on-screen duration while a take runs.
+  //
+  // Zeroed when it stops, not left at the last take's length: a big "0:10" over
+  // a button that says "Start recording" reads as a take still going, and it is
+  // the first thing the eye lands on.
   useEffect(() => {
-    if (!recording) return;
+    if (!recording) {
+      setElapsedMs(0);
+      return;
+    }
     const t = setInterval(() => {
       setElapsedMs(startedAt.current ? Date.now() - startedAt.current : 0);
     }, 500);
@@ -441,6 +458,15 @@ export function useL816Session(
       // Tell the arbiter this link must survive a handoff — leaving the L816
       // screen acquires 'autosync', whose L816 release is teardown().
       setL816Held(true);
+      // 🛑 REMEMBER THE PAIRING HERE, in the session, because the session is what
+      // connects. It used to be done by the connect screen's `onConnected`, so a
+      // device paired any other way — the "nearby" offer on the dashboard, most
+      // obviously — connected fine and was never written down: nothing to
+      // reconnect to on the next launch, and the device chip stayed on "Add
+      // device" while a recorder sat connected.
+      rememberL816(id, l816DisplayName(modelRef.current), modelRef.current)
+        .then((list) => onKnownRef.current?.(list))
+        .catch(() => {});
       // Keep the process alive from here on. Without this the 3 s poll — and so
       // the whole detect-a-take-started-on-the-device feature — stops the moment
       // the user leaves the app.

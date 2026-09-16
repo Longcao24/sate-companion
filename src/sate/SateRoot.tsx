@@ -156,7 +156,7 @@ export function SateRoot() {
   // The L816 session. Mounted at the root so it outlives every screen: a take
   // started on the recorder has to reach SATE whether the user is reading a
   // report, on the dashboard, or not looking at the phone at all.
-  const l816Session = useL816Session(api, l816, L816_ENABLED && !!settings.token, knownL816s);
+  const l816Session = useL816Session(api, l816, L816_ENABLED && !!settings.token, knownL816s, setKnownL816s);
 
   // One sentence describing what the recorder is doing, for the dashboard row.
   // Ordered by what a user most needs to know first: a take in progress beats a

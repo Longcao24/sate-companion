@@ -233,7 +233,7 @@ function Root() {
   // engine, mounted HERE rather than in the connect screen so that a take
   // started on the device is noticed and uploaded from any screen — and after
   // the app is reopened. The screen below is just a view over it.
-  const l816Session = useL816Session(api, l816, L816_ENABLED && !!settings.token, knownL816s);
+  const l816Session = useL816Session(api, l816, L816_ENABLED && !!settings.token, knownL816s, setKnownL816s);
 
   // Kept mounted so the background BLE bridge keeps running across screens. It
   // gates itself on the arbiter — no screen-name allowlist. It is also the ONLY
