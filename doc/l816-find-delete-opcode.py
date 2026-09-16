@@ -137,7 +137,10 @@ def main() -> None:
         print(f"[handle 0x{handle:04X}]")
         print(decode(value))
         print()
-        if value[:2] == REQ and value[3] not in KNOWN:
+        # btsnooz (the variant bundled in a bugreport) can truncate ACL payloads,
+        # so a frame may be shorter than its own header claims. Guard rather than
+        # crash: a truncated frame is evidence about the capture, not a parse bug.
+        if value[:2] == REQ and len(value) >= 4 and value[3] not in KNOWN:
             unknown.append(value)
 
     print("=" * 62)

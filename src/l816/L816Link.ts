@@ -659,22 +659,28 @@ class NativeL816Link implements L816Link {
       console.log(`[L816] notify outside transfer (${chunk.length}B): ${chunk.toString("hex")}`);
       return;
     }
-    if (dl.expected < 0) {
-      this.failDownload(new Error("L816 sent audio before acknowledging the download"));
-      return;
-    }
-    if (dl.bytes + chunk.length > dl.expected) {
+    // Audio can arrive BEFORE the opcode-07 acknowledgment, and that is normal.
+    // The ack comes in on 1203a while the audio comes in on 1204a/1201a, and
+    // ble-plx gives each characteristic its own subscription — so JS sees no
+    // ordering guarantee BETWEEN them, even though the device sent the ack first.
+    // Treating early audio as an error (as the reference Android client does,
+    // where a single callback queue hides the race) failed real transfers with
+    // "sent audio before acknowledging the download". Keep the bytes; validate
+    // them the moment the ack lands.
+    dl.chunks.push(chunk);
+    dl.bytes += chunk.length;
+    if (dl.expected >= 0 && dl.bytes > dl.expected) {
       this.failDownload(new Error("L816 sent more audio than it said it would"));
       return;
     }
-    dl.chunks.push(chunk);
-    dl.bytes += chunk.length;
     this.armDownloadTimeout();
-    dl.onProgress?.({
-      phase: "downloading",
-      message: "Downloading from L816",
-      percent: Math.round((dl.bytes / dl.expected) * 100),
-    });
+    if (dl.expected > 0) {
+      dl.onProgress?.({
+        phase: "downloading",
+        message: "Downloading from L816",
+        percent: Math.round((dl.bytes / dl.expected) * 100),
+      });
+    }
     this.maybeFinishDownload();
   }
 
@@ -742,7 +748,13 @@ class NativeL816Link implements L816Link {
       return;
     }
     dl.expected = expected;
+    // Bytes that beat the ack are already buffered — validate them now.
+    if (dl.bytes > expected) {
+      this.failDownload(new Error("L816 sent more audio than it said it would"));
+      return;
+    }
     this.armDownloadTimeout();
+    this.maybeFinishDownload();
   }
 
   private maybeFinishDownload(): void {

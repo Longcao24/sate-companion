@@ -9,7 +9,7 @@ import { PlaudSettingsScreen } from "./src/screens/PlaudSettingsScreen";
 import { makePendantLink } from "./src/pendant/PendantLink";
 import { KnownPendant, loadKnownPendants, rememberPendant } from "./src/pendant/PendantStore";
 import { PendantConnectScreen } from "./src/screens/PendantConnectScreen";
-import { makeL816Link, l816Serial } from "./src/l816/L816Link";
+import { makeL816Link } from "./src/l816/L816Link";
 import { KnownL816, loadKnownL816s, rememberL816 } from "./src/l816/L816Store";
 import { L816ConnectScreen } from "./src/screens/L816ConnectScreen";
 import { PLAUD_ENABLED, PENDANT_ENABLED, L816_ENABLED } from "./src/features";
@@ -285,16 +285,11 @@ function Root() {
           api={api}
           l816={l816}
           targetId={screen.targetId}
-          onConnected={(id, name) => {
-            rememberL816(id, name).then(setKnownL816s);
-            // Also tell the SERVER, so the unit shows in Connected Recorders on
-            // the web next to the SATE recorders. Best-effort: pairing must work
-            // with the server unreachable, and device-api backfills a row from
-            // the device's sessions if this never lands.
-            api
-              .registerExternalDevice(l816Serial(id), name)
-              .catch((e) => console.log("[L816] register failed (harmless):", e?.message));
-          }}
+          // No server-side registration call: the web derives an L816 device row
+          // from its uploaded sessions client-side (DeviceProvider), so
+          // POST /devices/external is not needed — and calling an endpoint that
+          // is not deployed just 404s on every pair and buries real errors.
+          onConnected={(id, name) => rememberL816(id, name).then(setKnownL816s)}
           // goHome acquires 'autosync', which releases the L816 (teardown:
           // stopScan + drop connection) WITHOUT destroying the shared manager.
           onClose={goHome}

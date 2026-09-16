@@ -30,6 +30,7 @@ import {
   startBackgroundLink,
   stopBackgroundLink,
 } from "../../modules/sate-fgservice";
+import { loadUploaded, markUploaded } from "../l816/L816Store";
 import { D } from "../theme";
 
 // Connect-with-SATE-L816: find the recorder over BLE -> connect -> drive its record
@@ -52,6 +53,13 @@ import { D } from "../theme";
 //     started by the hardware button, phone in a pocket, is the one the user
 //     cares about most — so the link watches for it (`onDeviceEvent`) and this
 //     screen downloads and uploads it with no tap at all.
+//   * A TAKE RECORDED WHILE THE PHONE WAS AWAY MUST STILL COME BACK BY ITSELF.
+//     The device records with no phone at all — that is the whole point of it —
+//     so most takes are made with nothing connected and produce no live event.
+//     Listing them behind an Upload button meant they sat on the device forever
+//     unless someone noticed and tapped each one. On connect we now diff the
+//     device's file list against what has already been sent and upload the rest,
+//     oldest first, with no tap.
 //   * AND THAT HAS TO KEEP WORKING WITH THE APP CLOSED, or it only works in the
 //     one situation the user is least likely to be in — staring at the screen.
 //     Android stops scheduling a backgrounded app, which kills the 3 s poll, so
@@ -129,6 +137,16 @@ export function L816ConnectScreen({
   const [files, setFiles] = useState<L816File[]>([]);
   const [progress, setProgress] = useState<L816Progress | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+
+  // Names already sent to SATE from this device, so a reconnect does not re-upload
+  // the whole card. Loaded per device in afterConnect.
+  const uploadedRef = useRef<Set<string>>(new Set());
+  // Set when the screen is going away. The catch-up sweep is a long loop of BLE
+  // transfers; without this it keeps running after the link has been dropped,
+  // fails on a dead connection, and reports "transfer failed" for a screen the
+  // user already left.
+  const leaving = useRef(false);
+  const [pendingCount, setPendingCount] = useState(0);
 
   const [patients, setPatients] = useState<Patient[]>([]);
   const [patientId, setPatientId] = useState<string | null>(null);
@@ -212,6 +230,7 @@ export function L816ConnectScreen({
     })();
     return () => {
       cancelled = true;
+      leaving.current = true;
       if (scanning.current) l816.stopScan();
       l816.disconnect().catch(() => {});
       // Leaving the screen drops the link, so the notification must go with it —
@@ -231,9 +250,122 @@ export function L816ConnectScreen({
     return () => clearInterval(t);
   }, [recording]);
 
+
+
+
+
+  // Push a decoded take to SATE. ONE implementation, shared by the manual button,
+  // the file list and the device-initiated path — three call sites uploading with
+  // three slightly different argument sets is how a take ends up filed under the
+  // wrong patient.
+  const pushTake = useCallback(
+    async (take: L816Take) => {
+      // The REF, not the state. `afterConnect` sets both and then immediately
+      // runs the catch-up sweep — within the same render, so the `connectedId`
+      // STATE is still null in every closure created before it. Using it here
+      // meant `l816Serial(null)` and a "Cannot read property 'replace' of null"
+      // that surfaced as a failed sync of the whole card. The `!` was a lie.
+      const id = connectedIdRef.current;
+      if (!id) throw new Error("Lost the connection to the SATE L816");
+      await api.uploadSession({
+        device_serial: l816Serial(id),
+        patient_id: patientId || "Unassigned",
+        // The take's own timestamp, not the upload time: it is stable across a
+        // retry, so re-uploading the same take dedups instead of duplicating.
+        session_number: takeTimestamp(take.name),
+        sample_rate: take.sampleRate,
+        wav_base64: take.wavBase64,
+      });
+      // Remember it here, in the ONE function every upload path goes through —
+      // the manual button, the live device event and the catch-up sweep. Marking
+      // it in each caller instead is how one path quietly forgets and re-uploads
+      // the same take on every connect.
+      uploadedRef.current.add(take.name);
+      await markUploaded(id, take.name);
+      setStatus(`Uploaded ${fmtTakeName(take.name)} · ${fmtDur(take.durationMs)} ✓`);
+    },
+    [api, patientId]
+  );
+
+  /**
+   * Send everything on the device that SATE does not have yet, oldest first.
+   *
+   * This is the path that matters most: the L816 records with no phone present,
+   * so the typical take generates no live event and would otherwise sit on the
+   * device until someone noticed it in the list and tapped Upload.
+   *
+   * Sequential on purpose — one BLE link, one transfer at a time — and it stops
+   * at the first failure rather than hammering a device that has gone out of
+   * range. Whatever is left stays in the list and is retried on the next connect.
+   */
+  const syncPending = useCallback(
+    async (all: L816File[]) => {
+      const pending = all
+        .filter((f) => !uploadedRef.current.has(f.name))
+        .sort((a, b) => takeTimestamp(a.name) - takeTimestamp(b.name));
+      setPendingCount(pending.length);
+      if (pending.length === 0) return;
+
+      // Claim the transfer lock for the WHOLE sweep. The device-event handler
+      // checks this before starting its own download, and the link allows exactly
+      // one at a time — without it, a stop pressed on the device mid-sweep starts
+      // a second transfer and both fail with "a download is already running".
+      if (busyRef.current) return;
+      busyRef.current = true;
+      setPhase("busy");
+      try {
+      for (let i = 0; i < pending.length; i++) {
+        if (leaving.current) return;
+        const file = pending[i];
+        const label = `Recording ${i + 1} of ${pending.length}`;
+        try {
+          const take = await l816.fetchTake(file, (pr) => {
+            setProgress({ ...pr, message: `${label} · ${pr.message}` });
+            bgStatus(
+              `${label} · ${pr.message}`,
+              pr.phase === "downloading" ? pr.percent : undefined
+            );
+          });
+          setProgress({ phase: "decoding", message: `${label} · Uploading to SATE…` });
+          bgStatus(`${label} · Uploading to SATE…`, undefined, true);
+          await pushTake(take);
+          setPendingCount(pending.length - i - 1);
+        } catch (e: any) {
+          setError(
+            `${e?.message ?? "Transfer failed"}\n\n${pending.length - i} recording(s) are ` +
+              `still on the SATE L816 and were not uploaded. They stay in the list below — ` +
+              `reconnect or tap Upload to try again.`
+          );
+          setPhase("error");
+          setProgress(null);
+          bgStatus("Sync failed — open SATE to retry", undefined, true);
+          if (backgrounded.current) {
+            notifyOnce(0xfd, "SATE L816 sync incomplete",
+              `${pending.length - i} recording(s) still on the device.`);
+          }
+          return;
+        }
+      }
+      setProgress(null);
+      setPhase("ready");
+      bgStatus("Connected · waiting for a recording", undefined, true);
+      if (backgrounded.current) {
+        notifyOnce(0xfc, "SATE L816 synced",
+          `${pending.length} recording(s) uploaded to SATE.`);
+      }
+      } finally {
+        busyRef.current = false;
+      }
+    },
+    [l816, pushTake]
+  );
+
   const afterConnect = useCallback(
     async (id: string) => {
       setConnectedId(id);
+      // What this device has already sent, before anything is listed — the sweep
+      // below is a diff against it, so loading it late would re-upload the card.
+      uploadedRef.current = await loadUploaded(id);
       connectedIdRef.current = id;
       connectedNameRef.current = L816_DISPLAY_NAME;
       onConnected?.(id, L816_DISPLAY_NAME);
@@ -254,8 +386,11 @@ export function L816ConnectScreen({
       setElapsedMs(0);
       setPhase("ready");
       // Don't list while a take is running: the device refuses a list mid-record,
-      // and the answer would be stale the moment it stops anyway. The list is
-      // refreshed after Stop, and there's a Refresh button.
+      // and the answer would be stale the moment it stops anyway. The backlog is
+      // NOT abandoned though — the stop handler sweeps once the take lands, or
+      // there's the Refresh button. Returning here without that was a real hole:
+      // connect while the device happens to be recording and every earlier take
+      // stayed stranded until you next connected while it was idle.
       if (live) {
         setFiles([]);
         return;
@@ -263,12 +398,17 @@ export function L816ConnectScreen({
       // Listing is best-effort: a device with recordings we cannot enumerate is
       // still usable for a NEW take, so don't fail the whole screen on it.
       try {
-        setFiles(await l816.listFiles());
+        const list = await l816.listFiles();
+        setFiles(list);
+        // Anything here that SATE does not have was recorded while the phone was
+        // away. Send it now rather than leaving it behind an Upload button that
+        // nobody knows to press.
+        await syncPending(list);
       } catch {
         setFiles([]);
       }
     },
-    [l816, onConnected]
+    [l816, onConnected, syncPending]
   );
 
   const onPickDevice = useCallback(
@@ -294,30 +434,16 @@ export function L816ConnectScreen({
     [onPickDevice]
   );
 
-  // Push a decoded take to SATE. ONE implementation, shared by the manual button,
-  // the file list and the device-initiated path — three call sites uploading with
-  // three slightly different argument sets is how a take ends up filed under the
-  // wrong patient.
-  const pushTake = useCallback(
-    async (take: L816Take) => {
-      await api.uploadSession({
-        device_serial: l816Serial(connectedId!),
-        patient_id: patientId || "Unassigned",
-        // The take's own timestamp, not the upload time: it is stable across a
-        // retry, so re-uploading the same take dedups instead of duplicating.
-        session_number: takeTimestamp(take.name),
-        sample_rate: take.sampleRate,
-        wav_base64: take.wavBase64,
-      });
-      setStatus(`Uploaded ${fmtTakeName(take.name)} · ${fmtDur(take.durationMs)} ✓`);
-    },
-    [api, connectedId, patientId]
-  );
-
   // Download one take off the device, decode it, and upload it to SATE.
   const uploadTake = useCallback(
     async (file: L816File) => {
-      if (!connectedId) return;
+      if (!connectedIdRef.current) return;
+      // Claim the same lock every other path uses. The row is already disabled
+      // while phase is 'busy', so today the UI alone would do — but one path
+      // guarding on `phase` and three on `busyRef` is how a second transfer
+      // eventually slips through and both fail.
+      if (busyRef.current) return;
+      busyRef.current = true;
       setPhase("busy");
       setStatus(null);
       try {
@@ -335,10 +461,11 @@ export function L816ConnectScreen({
         );
         setPhase("error");
       } finally {
+        busyRef.current = false;
         setProgress(null);
       }
     },
-    [l816, connectedId, pushTake]
+    [l816, pushTake]
   );
 
 
@@ -393,9 +520,14 @@ export function L816ConnectScreen({
           setProgress({ phase: "decoding", message: "Uploading to SATE…" });
           bgStatus("Uploading to SATE…", undefined, true);
           await pushTake(take);
-          setFiles(await l816.listFiles().catch(() => filesRef.current));
+          const fresh = await l816.listFiles().catch(() => filesRef.current);
+          setFiles(fresh);
           setPhase("ready");
           bgStatus("Connected · waiting for a recording", undefined, true);
+          // Catch up anything still outstanding — e.g. we connected while the
+          // device was mid-take, so afterConnect could not list or sweep.
+          busyRef.current = false;
+          await syncPending(fresh);
           // The user was elsewhere the whole time. This dismissible notice is the
           // ONLY way they learn the take arrived without opening the app.
           if (backgrounded.current) {
@@ -428,7 +560,10 @@ export function L816ConnectScreen({
       })();
     });
     return () => sub.remove();
-  }, [l816, pushTake]);
+    // syncPending is in here because the stop handler calls it. It and pushTake
+    // change together, so this never actually re-subscribes mid-take — but
+    // leaving it out would silently capture a stale sweep the day that changes.
+  }, [l816, pushTake, syncPending]);
 
   const onToggleRecord = useCallback(async () => {
     busyRef.current = true;
@@ -647,23 +782,38 @@ export function L816ConnectScreen({
                   <Text style={s.link}>Refresh</Text>
                 </Pressable>
               </View>
+              <Muted>
+                {pendingCount > 0
+                  ? `${pendingCount} recording${pendingCount === 1 ? "" : "s"} still to upload — ` +
+                    `this happens on its own when the device connects.`
+                  : "Everything here is already in SATE. Recordings made with the phone " +
+                    "away upload themselves the next time you connect."}
+              </Muted>
               {files.length === 0 ? (
                 <Text style={s.dim}>No recordings on this SATE L816.</Text>
               ) : (
-                files.map((f) => (
-                  <Pressable
-                    key={f.name}
-                    onPress={() => uploadTake(f)}
-                    disabled={busy || recording}
-                    style={[s.row, (busy || recording) && { opacity: 0.4 }]}
-                  >
-                    <View style={{ flex: 1 }}>
-                      <Text style={s.rowName}>{fmtTakeName(f.name)}</Text>
-                      <Text style={s.dim}>{f.name}</Text>
-                    </View>
-                    <Text style={s.link}>Upload</Text>
-                  </Pressable>
-                ))
+                files.map((f) => {
+                  const done = uploadedRef.current.has(f.name);
+                  return (
+                    <Pressable
+                      key={f.name}
+                      onPress={() => uploadTake(f)}
+                      disabled={busy || recording}
+                      style={[s.row, (busy || recording) && { opacity: 0.4 }]}
+                    >
+                      <View style={{ flex: 1 }}>
+                        <Text style={s.rowName}>{fmtTakeName(f.name)}</Text>
+                        <Text style={s.dim}>{f.name}</Text>
+                      </View>
+                      {/* Already-sent takes stay listed and stay tappable: the
+                          device keeps them, and re-uploading one is a legitimate
+                          thing to want after a delete on the SATE side. */}
+                      <Text style={[s.link, done && { color: D.green }]}>
+                        {done ? "In SATE ✓" : "Upload"}
+                      </Text>
+                    </Pressable>
+                  );
+                })
               )}
             </Card>
 
