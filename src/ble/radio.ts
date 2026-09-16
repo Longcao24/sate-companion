@@ -40,6 +40,8 @@ export interface RadioHooks {
   disconnectPendant(): void;
   /** Drop the L816's connection/scan (does NOT destroy the shared manager). */
   disconnectL816(): void;
+  /** Stop the L816's SCAN but KEEP its connection (see setL816Held). */
+  stopL816Scan(): void;
 }
 
 const noop = () => {};
@@ -49,9 +51,29 @@ let hooks: RadioHooks = {
   disconnectPlaud: noop,
   disconnectPendant: noop,
   disconnectL816: noop,
+  stopL816Scan: noop,
 };
 
 let active: RadioOwner | null = null;
+// The L816 session is holding a live connection ACROSS screens.
+//
+// It is the only device family that does. The L816 records on its own with the
+// phone in a pocket, and the app's job is to notice and upload that take — which
+// it cannot do if the link dies the moment the user navigates away, and leaving
+// the L816 screen acquires 'autosync', whose release for `l816` is teardown().
+// So while this is set, handing the radio to another ble-plx owner stops the
+// L816's SCAN and leaves its CONNECTION up.
+//
+// This does not weaken RULE #2: there is still exactly ONE shared BleManager and
+// it is still never destroyed on this path. A held connection and auto-sync's
+// scan coexist on it — ble-plx allows that; what it does not allow is two
+// managers, or two scans.
+//
+// 🛑 The Plaud handoff is NOT covered by this and must not be. The Plaud SDK
+// needs the radio to itself and that path DESTROYS the shared manager, so a
+// "held" L816 connection would be severed anyway — pretending otherwise would
+// leave the session believing it still had a link. Plaud always fully releases.
+let l816Held = false;
 const subs = new Set<() => void>();
 
 function emit() {
@@ -78,7 +100,10 @@ export function acquireRadio(owner: RadioOwner): void {
   // Release what the previous owner held.
   if (prev === "plaud" && owner !== "plaud") hooks.disconnectPlaud();
   if (prev === "pendant" && owner !== "pendant") hooks.disconnectPendant();
-  if (prev === "l816" && owner !== "l816") hooks.disconnectL816();
+  if (prev === "l816" && owner !== "l816") {
+    if (l816Held && owner !== "plaud") hooks.stopL816Scan();
+    else hooks.disconnectL816();
+  }
 
   if (owner === "plaud") {
     // Plaud SDK needs the radio to itself: this is the ONLY destroy path.
@@ -93,6 +118,14 @@ export function acquireRadio(owner: RadioOwner): void {
 
   active = owner;
   emit();
+}
+
+/**
+ * Declare whether the L816 session is holding a connection that must survive a
+ * handoff. Called by the session itself as it connects/disconnects.
+ */
+export function setL816Held(held: boolean): void {
+  l816Held = held;
 }
 
 /** Who owns the radio right now, or null if free. */

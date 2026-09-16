@@ -49,6 +49,37 @@ const stamp = (sec: number) => {
 const num = (v: unknown, digits = 2): string =>
   typeof v === "number" && Number.isFinite(v) ? v.toFixed(digits).replace(/\.00$/, "") : "—";
 
+/** A metric the server did not store. Named, not hidden: a missing figure the
+ *  user can see is missing is very different from one silently dropped. */
+function Absent({ label, hint }: { label: string; hint: string }) {
+  return (
+    <View style={s.metRow}>
+      <View style={{ flex: 1 }}>
+        <Text style={s.mLabel}>{label}</Text>
+        <Text style={s.mHint}>{hint}</Text>
+      </View>
+      <Text style={s.mAbsent}>not stored</Text>
+    </View>
+  );
+}
+
+/** One metric row: code, full name, value — the shape the web sidebar uses. */
+function Row({ code, name, value }: { code: string; name: string; value: string }) {
+  return (
+    <View style={s.metRow}>
+      <View style={{ flex: 1 }}>
+        <Text style={s.mLabel}>{code}</Text>
+        <Text style={s.mHint}>{name}</Text>
+      </View>
+      <Text style={s.mValue}>{value}</Text>
+    </View>
+  );
+}
+
+function Group({ title }: { title: string }) {
+  return <Text style={s.group}>{title}</Text>;
+}
+
 function Metric({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <View style={s.metric}>
@@ -278,53 +309,133 @@ export function SateReportScreen({
               {segments.length === 0 ? (
                 <Text style={s.dim}>This recording has no transcript.</Text>
               ) : (
-                segments.map((seg, i) => (
-                  <View key={i} style={s.seg}>
-                    <View style={s.segHead}>
-                      <Text style={s.segWho}>{seg.speaker || "—"}</Text>
-                      <Text style={s.segAt}>{stamp(Number(seg.start) || 0)}</Text>
+                segments.map((seg, i) => {
+                  // The utterance under the playhead. Checked against start/end
+                  // rather than "nearest", so a gap between utterances highlights
+                  // nothing — better than lighting up a line nobody is speaking.
+                  const t = status?.currentTime ?? -1;
+                  const live =
+                    !!status?.playing &&
+                    t >= (Number(seg.start) || 0) &&
+                    t < (Number(seg.end) || 0);
+                  const who = (seg.speaker ?? "").trim();
+                  return (
+                    <View key={i} style={[s.seg, live && s.segLive]}>
+                      <View style={s.segHead}>
+                        {/* Renaming is reachable from the transcript too: this is
+                            where you realise who a speaker actually is. */}
+                        <Pressable
+                          onPress={() => {
+                            const row = speakers.find((sp) => sp.id === who);
+                            if (!row) return;
+                            setEditing(row);
+                            setDraft(row.id);
+                            setNotice(null);
+                          }}
+                          disabled={!who}
+                          hitSlop={8}
+                          accessibilityRole="button"
+                          accessibilityLabel={who ? `Rename ${who}` : undefined}
+                        >
+                          <Text style={[s.segWho, who && s.segWhoTap]}>
+                            {who || "—"}
+                            {who ? "  ✎" : ""}
+                          </Text>
+                        </Pressable>
+                        <Text style={s.segAt}>{stamp(Number(seg.start) || 0)}</Text>
+                      </View>
+                      <Text style={s.segText}>{seg.text}</Text>
                     </View>
-                    <Text style={s.segText}>{seg.text}</Text>
-                  </View>
-                ))
+                  );
+                })
               )}
             </>
           )}
 
           {tab === "analysis" && (
             <>
-              <View style={s.grid}>
-                <Metric label="MLUm" value={num(a.mlum)} hint="morphemes / utterance" />
-                <Metric label="MLUw" value={num(a.mluw)} hint="words / utterance" />
-                <Metric label="TNW" value={String(a.ntw ?? "—")} hint="total words" />
-                <Metric label="NDW" value={String(a.ndw ?? "—")} hint="different words" />
-              </View>
-              <View style={s.grid}>
-                <Metric label="Speaking rate" value={num(a.speakingRate, 1)} hint="words / min" />
-                <Metric label="Pauses" value={String(a.numberOfPauses ?? "—")} />
-              </View>
+              <Group title="PRIORITY METRICS" />
+              <Row code="TNU" name="Total Utterances" value={String(a.segmentCount ?? "—")} />
+              <Row code="TNW" name="Total Words" value={String(a.ntw ?? a.totalWords ?? "—")} />
+              <Row code="NDW" name="Different Words" value={String(a.ndw ?? "—")} />
+              <Row code="MLUm" name="Mean Length (Morphemes)" value={num(a.mlum)} />
+              <Row
+                code="Pause Rate"
+                name="Pauses per words"
+                value={
+                  typeof a.numberOfPauses === "number" && typeof a.ntw === "number" && a.ntw > 0
+                    ? (a.numberOfPauses / a.ntw).toFixed(3)
+                    : "—"
+                }
+              />
+
+              <Group title="SYNTAX / MORPHOLOGY" />
+              <Row code="MLUw" name="Mean Length (Words)" value={num(a.mluw)} />
+
+              {/* SEMANTICS sits between syntax and fluency on the web, and the
+                  order is the grouping — a clinician reading the two screens
+                  side by side should find the same figure in the same place. */}
+              <Group title="SEMANTICS" />
+              <Row
+                code="TTR"
+                name="Type-Token Ratio"
+                value={
+                  typeof a.ndw === "number" && typeof a.ntw === "number" && a.ntw > 0
+                    ? (a.ndw / a.ntw).toFixed(3)
+                    : "—"
+                }
+              />
+              {/* TTR is NDW/TNW — arithmetic on two stored figures, not a second
+                  implementation of an algorithm. The three below ARE algorithms
+                  (a sliding window, and a curve fit over random samples), and a
+                  second implementation is exactly what must not exist here. */}
+              <Absent
+                label="Moving-Avg NTW / NDW / TTR"
+                hint="windowed averages — computed by the web from the transcript"
+              />
+              <Absent
+                label="VOCO-D"
+                hint="vocabulary diversity — a curve fit the web runs on the transcript"
+              />
+
+              <Group title="VERBAL FLUENCY" />
+              <Row code="Speech Rate" name="Words per minute" value={num(a.speakingRate, 1)} />
+              <Row code="Pauses" name="Number of pauses" value={String(a.numberOfPauses ?? "—")} />
+              <Absent
+                label="Maze Rate"
+                hint="maze words / total words — needs maze marks the app does not receive"
+              />
+              <Absent
+                label="Avg Pause per Utterance"
+                hint="derived from pause timings, which are not in the stored analysis"
+              />
+
               <Text style={s.hint}>
                 Every figure here was computed by SATE when the recording was processed. The app
-                displays them; it does not calculate any of them.
+                displays them and never recalculates one — a figure derived on the phone would
+                eventually disagree with the web over the same recording, and nothing would say
+                which was right.
               </Text>
             </>
           )}
 
           {tab === "language" && (
             <>
-              <View style={s.grid}>
-                <Metric label="NDW" value={String(a.ndw ?? "—")} hint="different words" />
-                <Metric label="TNW" value={String(a.ntw ?? a.totalWords ?? "—")} hint="total words" />
-              </View>
-              <Text style={s.section}>Type–token ratio</Text>
-              <Text style={s.big}>
-                {typeof a.ndw === "number" && typeof a.ntw === "number" && a.ntw > 0
-                  ? (a.ndw / a.ntw).toFixed(3)
-                  : "—"}
-              </Text>
+              {/* On the web this tab is ONE thing: the list of word roots. The
+                  semantics figures live in Analysis, so repeating them here
+                  would be a second place to read the same number — and the two
+                  would eventually disagree. */}
+              <Group title="LIST OF WORD ROOTS (LEMMA)" />
+              <Absent
+                label="Word roots"
+                hint="lemmas are derived from the transcript's morpheme data, which the server does not store with the analysis"
+              />
+              <Row code="NDW" name="Different words counted" value={String(a.ndw ?? "—")} />
               <Text style={s.hint}>
-                Reference values against CHILDES are on the web report — they need a child's age,
-                which is entered there.
+                SATE stored how MANY different words this sample used, but not which ones — the
+                list itself is built on the web from the transcript. Reference values against
+                CHILDES also sit on the web report: they need the child's age, which is entered
+                there.
               </Text>
             </>
           )}
@@ -444,7 +555,9 @@ const s = StyleSheet.create({
     padding: 12,
     marginBottom: 8,
   },
+  segLive: { borderColor: D.sky, backgroundColor: D.skyBg },
   segHead: { flexDirection: "row", justifyContent: "space-between", marginBottom: 4 },
+  segWhoTap: { textDecorationLine: "underline" },
   segWho: { color: D.sky, fontSize: 12, fontWeight: "700" },
   segAt: { color: D.faint, fontSize: 12 },
   segText: { color: D.ink, fontSize: 15, lineHeight: 21 },
@@ -490,6 +603,27 @@ const s = StyleSheet.create({
     flexShrink: 0,
     textAlign: "right",
   },
+  group: {
+    color: D.faint,
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 1.1,
+    marginTop: 18,
+    marginBottom: 2,
+  },
+  metRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: D.line,
+  },
+  mLabel: { color: D.ink, fontSize: 15, fontWeight: "700" },
+  mHint: { color: D.faint, fontSize: 11, marginTop: 2 },
+  mValue: { color: D.ink, fontSize: 17, fontWeight: "800", fontVariant: ["tabular-nums"] },
+  // Deliberately quiet: absent is information, not an error.
+  mAbsent: { color: D.faint, fontSize: 12, fontStyle: "italic" },
   notice: { backgroundColor: D.skyBg, borderRadius: 10, padding: 11, marginBottom: 12 },
   noticeTxt: { color: D.sky, fontSize: 13 },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 28 },

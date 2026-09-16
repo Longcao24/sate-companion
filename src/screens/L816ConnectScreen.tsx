@@ -1,36 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  AppState,
-  FlatList,
-  PermissionsAndroid,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
+import { FlatList, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SateApi } from "../api/sateApi";
 import { Button, Card, GlassBackground, Muted, ProgressBar, Title } from "../components/ui";
 import { Patient } from "../protocol";
-import {
-  L816File,
-  L816FoundDevice,
-  L816Link,
-  L816Progress,
-  L816SeenDevice,
-  L816Take,
-  L816_DISPLAY_NAME,
-  l816Serial,
-  takeTimestamp,
-} from "../l816/L816Link";
-import {
-  isBackgroundLinkSupported,
-  notifyOnce,
-  startBackgroundLink,
-  stopBackgroundLink,
-} from "../../modules/sate-fgservice";
-import { loadUploaded, markUploaded } from "../l816/L816Store";
+import { L816FoundDevice, L816Link, L816SeenDevice } from "../l816/L816Link";
+import { L816Session, fmtDur, fmtTakeName } from "../l816/useL816Session";
 import { D } from "../theme";
 
 // Connect-with-SATE-L816: find the recorder over BLE -> connect -> drive its record
@@ -39,8 +13,20 @@ import { D } from "../theme";
 // else (api.uploadSession -> device-api -> AI -> recordings), device_serial
 // `l816-<mac>`.
 //
-// The shape deliberately matches PendantConnectScreen, but the DEVICE is a very
-// different animal and the differences are the interesting part:
+// 🛑 THIS SCREEN NO LONGER OWNS THE CONNECTION. The link, the device-event watch
+// and the whole upload engine live in `useL816Session`, mounted once in App.tsx.
+// They used to live here, and the screen's unmount cleanup disconnected — so the
+// feature existed only while this screen was on top. Walk to Reports and the
+// recorder was connected to nothing: a take started on the device was never
+// noticed and nothing was uploaded, which is the one case the device exists for
+// (it records with the phone in a pocket). See the header of useL816Session.ts.
+//
+// What is left here is what is only meaningful while the screen is open: asking
+// for permissions, SCANNING, and the device picker. Everything else is rendered
+// from the session.
+//
+// The DEVICE is a very different animal from the pendant, and the differences
+// are the interesting part:
 //
 //   * The L816 records to its OWN storage, not to a live stream. Stopping is not
 //     the end of the take — the transfer afterwards is, and it can take longer
@@ -49,71 +35,25 @@ import { D } from "../theme";
 //     reconnecting can land straight in a recording state rather than idle.
 //   * Everything already on the device is listed and downloadable, so a take
 //     that failed to upload is never lost — it is still on the hardware.
-//   * THE RECORD BUTTON ON THE DEVICE IS A FIRST-CLASS WAY TO RECORD. A take
-//     started by the hardware button, phone in a pocket, is the one the user
-//     cares about most — so the link watches for it (`onDeviceEvent`) and this
-//     screen downloads and uploads it with no tap at all.
-//   * A TAKE RECORDED WHILE THE PHONE WAS AWAY MUST STILL COME BACK BY ITSELF.
-//     The device records with no phone at all — that is the whole point of it —
-//     so most takes are made with nothing connected and produce no live event.
-//     Listing them behind an Upload button meant they sat on the device forever
-//     unless someone noticed and tapped each one. On connect we now diff the
-//     device's file list against what has already been sent and upload the rest,
-//     oldest first, with no tap.
-//   * AND THAT HAS TO KEEP WORKING WITH THE APP CLOSED, or it only works in the
-//     one situation the user is least likely to be in — staring at the screen.
-//     Android stops scheduling a backgrounded app, which kills the 3 s poll, so
-//     while a device is connected we run an Android foreground service
-//     (modules/sate-fgservice) purely to keep the process alive. That service's
-//     ongoing notification is not decoration: Android requires it, and it is
-//     also the user's only status readout while they are elsewhere.
+//   * A TAKE RECORDED WHILE THE PHONE WAS AWAY MUST STILL COME BACK BY ITSELF:
+//     most takes are made with nothing connected and produce no live event, so
+//     the session diffs the device's file list against what has already been
+//     sent and uploads the rest with no tap.
 
-type Phase = "init" | "scan" | "connecting" | "ready" | "busy" | "done" | "error";
-
-function fmtDur(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000));
-  const m = Math.floor(s / 60);
-  return `${m}:${(s % 60).toString().padStart(2, "0")}`;
-}
-
-/**
- * Android 13+ gates the ongoing notification behind runtime consent — and a
- * foreground service without a visible notification is not something Android
- * allows. Declining does not break recording; it costs the background link, so
- * ask once and carry on either way.
- */
-async function requestNotificationPermission(): Promise<boolean> {
-  if (Platform.OS !== "android" || Platform.Version < 33) return true;
-  try {
-    const res = await PermissionsAndroid.request(
-      "android.permission.POST_NOTIFICATIONS" as any
-    );
-    return res === "granted";
-  } catch {
-    return false;
-  }
-}
-
-/** `01_20260915145726` -> `15 Sep, 14:57`. Thirteen digits is not a name. */
-function fmtTakeName(name: string): string {
-  const t = takeTimestamp(name);
-  return new Date(t * 1000).toLocaleString([], {
-    day: "numeric",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
+type ScanPhase = "init" | "scan" | "error";
 
 export function L816ConnectScreen({
   api,
   l816,
+  session,
   onClose,
   onConnected,
   targetId,
 }: {
   api: SateApi;
   l816: L816Link;
+  /** The app-level session. This screen drives it; it does not own it. */
+  session: L816Session;
   onClose: () => void;
   /** Called once connected, so Home can remember it and show it as a paired
    *  device on the next launch (no re-scanning). */
@@ -122,77 +62,38 @@ export function L816ConnectScreen({
    *  back to a scan if the direct connect fails (out of range / off). */
   targetId?: string;
 }) {
-  const [phase, setPhase] = useState<Phase>("init");
-  const [error, setError] = useState<string | null>(null);
+  const [scanPhase, setScanPhase] = useState<ScanPhase>("init");
+  const [scanError, setScanError] = useState<string | null>(null);
   const [found, setFound] = useState<Record<string, L816FoundDevice>>({});
   const [seen, setSeen] = useState<Record<string, L816SeenDevice>>({});
   const [bleState, setBleState] = useState<string>("starting…");
-
-  const [connectedId, setConnectedId] = useState<string | null>(null);
-  // The PRODUCT name, not the advertised one. The hardware calls itself `L816`;
-  // in SATE it is a SATE L816, and that is what Home remembers it as.
-  const [connectedName] = useState(L816_DISPLAY_NAME);
-  const [recording, setRecording] = useState(false);
-  const [elapsedMs, setElapsedMs] = useState(0);
-  const [files, setFiles] = useState<L816File[]>([]);
-  const [progress, setProgress] = useState<L816Progress | null>(null);
-  const [status, setStatus] = useState<string | null>(null);
-
-  // Names already sent to SATE from this device, so a reconnect does not re-upload
-  // the whole card. Loaded per device in afterConnect.
-  const uploadedRef = useRef<Set<string>>(new Set());
-  // Set when the screen is going away. The catch-up sweep is a long loop of BLE
-  // transfers; without this it keeps running after the link has been dropped,
-  // fails on a dead connection, and reports "transfer failed" for a screen the
-  // user already left.
-  const leaving = useRef(false);
-  const [pendingCount, setPendingCount] = useState(0);
-
   const [patients, setPatients] = useState<Patient[]>([]);
-  const [patientId, setPatientId] = useState<string | null>(null);
-
   const scanning = useRef(false);
-  // When the take started, by the phone's clock. The device does not report
-  // elapsed time, and on a reconnect-into-a-running-take we genuinely do not
-  // know when it began — the timer then counts from the reconnect, and says so.
-  const startedAt = useRef<number | null>(null);
-  const resumed = useRef(false);
 
-  // ---- background link -----------------------------------------------------
-  // Is the app currently out of sight? Only used to decide whether a finished
-  // transfer deserves a notification: interrupting someone who is already
-  // looking at the result is noise.
-  const backgrounded = useRef(AppState.currentState !== "active");
-  useEffect(() => {
-    const sub = AppState.addEventListener("change", (st) => {
-      backgrounded.current = st !== "active";
-    });
-    return () => sub.remove();
-  }, []);
+  const { state, connectedId, connectedName, recording, resumed } = session;
+  const busy = state === "busy";
+  const connected = !!connectedId;
 
-  // The ongoing notification is the ONLY status a user gets while elsewhere, so
-  // keep it honest and current. Throttled: BLE delivers a download notification
-  // every few milliseconds and re-rendering the notification that often is both
-  // wasteful and visibly janky in the shade.
-  // Read through refs: bgStatus is called from callbacks that must not be
-  // re-created (and re-subscribed) every time a name or id changes.
-  const connectedIdRef = useRef<string | null>(null);
-  const connectedNameRef = useRef(L816_DISPLAY_NAME);
+  const startScan = useCallback(() => {
+    if (scanning.current) return;
+    setScanPhase("scan");
+    scanning.current = true;
+    l816.startScan(
+      (d) => setFound((prev) => ({ ...prev, [d.id]: d })),
+      (sd) => setSeen((prev) => ({ ...prev, [sd.id]: sd })),
+      (st) => setBleState(st)
+    );
+  }, [l816]);
 
-  const lastNotif = useRef(0);
-  const bgStatus = useCallback(
-    (text: string, percent?: number, force = false) => {
-      if (!connectedIdRef.current) return;
-      const now = Date.now();
-      if (!force && now - lastNotif.current < 1000) return;
-      lastNotif.current = now;
-      startBackgroundLink(connectedNameRef.current, text, percent);
-    },
-    []
-  );
+  const stopScan = useCallback(() => {
+    if (!scanning.current) return;
+    l816.stopScan();
+    scanning.current = false;
+  }, [l816]);
 
-
-  // 1. Permissions -> connect to a known unit, or scan.
+  // Permissions -> connect to a known unit, or scan. The session may ALREADY be
+  // connected (it survives navigation now), in which case there is nothing to do
+  // but render it.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -200,233 +101,53 @@ export function L816ConnectScreen({
         await l816.requestPermissions();
         api.listPatients().then((p) => !cancelled && setPatients(p)).catch(() => {});
         if (cancelled) return;
+        if (session.connectedId) return;
 
-        if (targetId) {
-          setPhase("connecting");
+        const target = targetId;
+        if (target) {
           try {
-            await l816.connect(targetId);
+            await session.connect(target);
             if (cancelled) return;
-            await afterConnect(targetId);
             return;
           } catch {
             if (cancelled) return;
             // Out of range or off — fall through to a scan.
           }
         }
-
-        setPhase("scan");
-        scanning.current = true;
-        l816.startScan(
-          (d) => setFound((prev) => ({ ...prev, [d.id]: d })),
-          (sd) => setSeen((prev) => ({ ...prev, [sd.id]: sd })),
-          (st) => setBleState(st)
-        );
+        if (!cancelled) startScan();
       } catch (e: any) {
         if (!cancelled) {
-          setError(e?.message ?? "Could not start Bluetooth");
-          setPhase("error");
+          setScanError(e?.message ?? "Could not start Bluetooth");
+          setScanPhase("error");
         }
       }
     })();
     return () => {
       cancelled = true;
-      leaving.current = true;
-      if (scanning.current) l816.stopScan();
-      l816.disconnect().catch(() => {});
-      // Leaving the screen drops the link, so the notification must go with it —
-      // one that outlives the connection it describes is a lie.
-      connectedIdRef.current = null;
-      stopBackgroundLink();
+      // Stop SCANNING only. Leaving this screen must NOT drop the link any more —
+      // that is the whole point of the session living above it.
+      stopScan();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, l816, targetId]);
 
-  // Tick the on-screen duration while a take runs.
+  // Once connected there is nothing left to find.
   useEffect(() => {
-    if (!recording) return;
-    const t = setInterval(() => {
-      setElapsedMs(startedAt.current ? Date.now() - startedAt.current : 0);
-    }, 500);
-    return () => clearInterval(t);
-  }, [recording]);
-
-
-
-
-
-  // Push a decoded take to SATE. ONE implementation, shared by the manual button,
-  // the file list and the device-initiated path — three call sites uploading with
-  // three slightly different argument sets is how a take ends up filed under the
-  // wrong patient.
-  const pushTake = useCallback(
-    async (take: L816Take) => {
-      // The REF, not the state. `afterConnect` sets both and then immediately
-      // runs the catch-up sweep — within the same render, so the `connectedId`
-      // STATE is still null in every closure created before it. Using it here
-      // meant `l816Serial(null)` and a "Cannot read property 'replace' of null"
-      // that surfaced as a failed sync of the whole card. The `!` was a lie.
-      const id = connectedIdRef.current;
-      if (!id) throw new Error("Lost the connection to the SATE L816");
-      await api.uploadSession({
-        device_serial: l816Serial(id),
-        patient_id: patientId || "Unassigned",
-        // The take's own timestamp, not the upload time: it is stable across a
-        // retry, so re-uploading the same take dedups instead of duplicating.
-        session_number: takeTimestamp(take.name),
-        sample_rate: take.sampleRate,
-        wav_base64: take.wavBase64,
-      });
-      // Remember it here, in the ONE function every upload path goes through —
-      // the manual button, the live device event and the catch-up sweep. Marking
-      // it in each caller instead is how one path quietly forgets and re-uploads
-      // the same take on every connect.
-      uploadedRef.current.add(take.name);
-      await markUploaded(id, take.name);
-      setStatus(`Uploaded ${fmtTakeName(take.name)} · ${fmtDur(take.durationMs)} ✓`);
-    },
-    [api, patientId]
-  );
-
-  /**
-   * Send everything on the device that SATE does not have yet, oldest first.
-   *
-   * This is the path that matters most: the L816 records with no phone present,
-   * so the typical take generates no live event and would otherwise sit on the
-   * device until someone noticed it in the list and tapped Upload.
-   *
-   * Sequential on purpose — one BLE link, one transfer at a time — and it stops
-   * at the first failure rather than hammering a device that has gone out of
-   * range. Whatever is left stays in the list and is retried on the next connect.
-   */
-  const syncPending = useCallback(
-    async (all: L816File[]) => {
-      const pending = all
-        .filter((f) => !uploadedRef.current.has(f.name))
-        .sort((a, b) => takeTimestamp(a.name) - takeTimestamp(b.name));
-      setPendingCount(pending.length);
-      if (pending.length === 0) return;
-
-      // Claim the transfer lock for the WHOLE sweep. The device-event handler
-      // checks this before starting its own download, and the link allows exactly
-      // one at a time — without it, a stop pressed on the device mid-sweep starts
-      // a second transfer and both fail with "a download is already running".
-      if (busyRef.current) return;
-      busyRef.current = true;
-      setPhase("busy");
-      try {
-      for (let i = 0; i < pending.length; i++) {
-        if (leaving.current) return;
-        const file = pending[i];
-        const label = `Recording ${i + 1} of ${pending.length}`;
-        try {
-          const take = await l816.fetchTake(file, (pr) => {
-            setProgress({ ...pr, message: `${label} · ${pr.message}` });
-            bgStatus(
-              `${label} · ${pr.message}`,
-              pr.phase === "downloading" ? pr.percent : undefined
-            );
-          });
-          setProgress({ phase: "decoding", message: `${label} · Uploading to SATE…` });
-          bgStatus(`${label} · Uploading to SATE…`, undefined, true);
-          await pushTake(take);
-          setPendingCount(pending.length - i - 1);
-        } catch (e: any) {
-          setError(
-            `${e?.message ?? "Transfer failed"}\n\n${pending.length - i} recording(s) are ` +
-              `still on the SATE L816 and were not uploaded. They stay in the list below — ` +
-              `reconnect or tap Upload to try again.`
-          );
-          setPhase("error");
-          setProgress(null);
-          bgStatus("Sync failed — open SATE to retry", undefined, true);
-          if (backgrounded.current) {
-            notifyOnce(0xfd, "SATE L816 sync incomplete",
-              `${pending.length - i} recording(s) still on the device.`);
-          }
-          return;
-        }
-      }
-      setProgress(null);
-      setPhase("ready");
-      bgStatus("Connected · waiting for a recording", undefined, true);
-      if (backgrounded.current) {
-        notifyOnce(0xfc, "SATE L816 synced",
-          `${pending.length} recording(s) uploaded to SATE.`);
-      }
-      } finally {
-        busyRef.current = false;
-      }
-    },
-    [l816, pushTake]
-  );
-
-  const afterConnect = useCallback(
-    async (id: string) => {
-      setConnectedId(id);
-      // What this device has already sent, before anything is listed — the sweep
-      // below is a diff against it, so loading it late would re-upload the card.
-      uploadedRef.current = await loadUploaded(id);
-      connectedIdRef.current = id;
-      connectedNameRef.current = L816_DISPLAY_NAME;
-      onConnected?.(id, L816_DISPLAY_NAME);
-      // Keep the process alive from here on. Without this the 3 s poll — and so
-      // the whole detect-a-take-started-on-the-device feature — stops the moment
-      // the user leaves the screen.
-      if (isBackgroundLinkSupported()) {
-        await requestNotificationPermission();
-        bgStatus("Connected · waiting for a recording", undefined, true);
-      }
-      // The device may have been recording all along — it does not stop because
-      // the app went away. Pick the state up rather than assuming idle.
-      const live = l816.isRecording();
-      resumed.current = live;
-      setRecording(live);
-      if (live) bgStatus("Recording on the device", undefined, true);
-      startedAt.current = live ? Date.now() : null;
-      setElapsedMs(0);
-      setPhase("ready");
-      // Don't list while a take is running: the device refuses a list mid-record,
-      // and the answer would be stale the moment it stops anyway. The backlog is
-      // NOT abandoned though — the stop handler sweeps once the take lands, or
-      // there's the Refresh button. Returning here without that was a real hole:
-      // connect while the device happens to be recording and every earlier take
-      // stayed stranded until you next connected while it was idle.
-      if (live) {
-        setFiles([]);
-        return;
-      }
-      // Listing is best-effort: a device with recordings we cannot enumerate is
-      // still usable for a NEW take, so don't fail the whole screen on it.
-      try {
-        const list = await l816.listFiles();
-        setFiles(list);
-        // Anything here that SATE does not have was recorded while the phone was
-        // away. Send it now rather than leaving it behind an Upload button that
-        // nobody knows to press.
-        await syncPending(list);
-      } catch {
-        setFiles([]);
-      }
-    },
-    [l816, onConnected, syncPending]
-  );
+    if (connected) stopScan();
+  }, [connected, stopScan]);
 
   const onPickDevice = useCallback(
     async (d: L816FoundDevice) => {
-      if (scanning.current) {
-        l816.stopScan();
-        scanning.current = false;
-      }
-      setPhase("connecting");
+      stopScan();
       try {
-        await l816.connect(d.id);
-        await afterConnect(d.id);
-      } catch (e: any) {
-        setError(e?.message ?? "Connection failed");
-        setPhase("error");
+        await session.connect(d.id);
+        onConnected?.(d.id, connectedName);
+      } catch {
+        // The session already surfaced the reason; offer the list again.
+        startScan();
       }
     },
-    [l816, afterConnect]
+    [session, stopScan, startScan, onConnected, connectedName]
   );
 
   const onPickSeen = useCallback(
@@ -434,194 +155,48 @@ export function L816ConnectScreen({
     [onPickDevice]
   );
 
-  // Download one take off the device, decode it, and upload it to SATE.
-  const uploadTake = useCallback(
-    async (file: L816File) => {
-      if (!connectedIdRef.current) return;
-      // Claim the same lock every other path uses. The row is already disabled
-      // while phase is 'busy', so today the UI alone would do — but one path
-      // guarding on `phase` and three on `busyRef` is how a second transfer
-      // eventually slips through and both fail.
-      if (busyRef.current) return;
-      busyRef.current = true;
-      setPhase("busy");
-      setStatus(null);
-      try {
-        const take = await l816.fetchTake(file, setProgress);
-        setProgress({ phase: "decoding", message: "Uploading to SATE…" });
-        await pushTake(take);
-        setPhase("ready");
-      } catch (e: any) {
-        // The recording is still ON the device — nothing has been lost, and the
-        // list below is the way back to it. Say so; a bare error reads like the
-        // take is gone.
-        setError(
-          `${e?.message ?? "Transfer failed"}\n\nThe recording is still on the SATE L816 — ` +
-            `pick it from the list below to try again.`
-        );
-        setPhase("error");
-      } finally {
-        busyRef.current = false;
-        setProgress(null);
-      }
-    },
-    [l816, pushTake]
-  );
-
-
-  // The user pressed record/stop ON THE DEVICE. `files` is read through a ref so
-  // this subscription does not tear down and re-subscribe on every list refresh —
-  // resubscribing mid-take is how you miss the stop you were waiting for.
-  const filesRef = useRef<L816File[]>([]);
-  filesRef.current = files;
-  const busyRef = useRef(false);
-
+  // Tell Home about a connection the SESSION made on its own (the retry loop, or
+  // a reconnect at launch) — not just one picked here.
   useEffect(() => {
-    const sub = l816.onDeviceEvent((ev) => {
-      if (ev.type === "started") {
-        resumed.current = false;
-        startedAt.current = Date.now();
-        setElapsedMs(0);
-        setRecording(true);
-        setStatus(null);
-        setPhase((p) => (p === "error" ? "ready" : p));
-        bgStatus("Recording on the device", undefined, true);
-        return;
-      }
-
-      // Stopped on the device. Pull the take down and upload it with no tap.
-      setRecording(false);
-      startedAt.current = null;
-      // A manual "Stop & upload" already owns this take — its own stopAndFetch is
-      // mid-flight, and starting a second download would collide with it.
-      if (busyRef.current) return;
-      busyRef.current = true;
-      (async () => {
-        setPhase("busy");
-        try {
-          // The push path names the file; the poll path does not, and then the
-          // only evidence is which entry is new since the last listing.
-          const onProg = (pr: L816Progress) => {
-            setProgress(pr);
-            bgStatus(
-              pr.message,
-              pr.phase === "downloading" ? pr.percent : undefined
-            );
-          };
-          const take = ev.file
-            ? await (async () => {
-                await new Promise((r) => setTimeout(r, 1500));
-                return l816.fetchTake(ev.file!, onProg);
-              })()
-            : await l816.fetchNewSince(
-                filesRef.current.map((f) => f.name),
-                onProg
-              );
-          setProgress({ phase: "decoding", message: "Uploading to SATE…" });
-          bgStatus("Uploading to SATE…", undefined, true);
-          await pushTake(take);
-          const fresh = await l816.listFiles().catch(() => filesRef.current);
-          setFiles(fresh);
-          setPhase("ready");
-          bgStatus("Connected · waiting for a recording", undefined, true);
-          // Catch up anything still outstanding — e.g. we connected while the
-          // device was mid-take, so afterConnect could not list or sweep.
-          busyRef.current = false;
-          await syncPending(fresh);
-          // The user was elsewhere the whole time. This dismissible notice is the
-          // ONLY way they learn the take arrived without opening the app.
-          if (backgrounded.current) {
-            notifyOnce(
-              takeTimestamp(take.name) & 0xff,
-              "Recording saved to SATE",
-              `${fmtTakeName(take.name)} · ${fmtDur(take.durationMs)}`
-            );
-          }
-        } catch (e: any) {
-          setError(
-            `${e?.message ?? "Transfer failed"}\n\nYou recorded on the SATE L816 itself. ` +
-              `The take is still on the device — pick it from the list below to upload it.`
-          );
-          setPhase("error");
-          bgStatus("Transfer failed — open SATE to retry", undefined, true);
-          // Silence here would be the worst outcome: the user believes a take is
-          // safely uploaded when it is still only on the device.
-          if (backgrounded.current) {
-            notifyOnce(
-              0xfe,
-              "SATE L816 transfer failed",
-              "The recording is still on the device. Open SATE to try again."
-            );
-          }
-        } finally {
-          busyRef.current = false;
-          setProgress(null);
-        }
-      })();
-    });
-    return () => sub.remove();
-    // syncPending is in here because the stop handler calls it. It and pushTake
-    // change together, so this never actually re-subscribes mid-take — but
-    // leaving it out would silently capture a stale sweep the day that changes.
-  }, [l816, pushTake, syncPending]);
-
-  const onToggleRecord = useCallback(async () => {
-    busyRef.current = true;
-    try {
-      if (recording) {
-        setPhase("busy");
-        setStatus(null);
-        const take = await l816.stopAndFetch(setProgress);
-        setRecording(false);
-        startedAt.current = null;
-        setProgress({ phase: "decoding", message: "Uploading to SATE…" });
-        await pushTake(take);
-        setFiles(await l816.listFiles().catch(() => files));
-        setPhase("ready");
-      } else {
-        setStatus(null);
-        await l816.startRecording();
-        resumed.current = false;
-        startedAt.current = Date.now();
-        setElapsedMs(0);
-        setRecording(true);
-      }
-    } catch (e: any) {
-      setRecording(l816.isRecording());
-      setError(e?.message ?? "Recording control failed");
-      setPhase("error");
-    } finally {
-      busyRef.current = false;
-      setProgress(null);
-    }
-  }, [l816, recording, files, pushTake]);
-
-  const refreshFiles = useCallback(async () => {
-    try {
-      setFiles(await l816.listFiles());
-    } catch (e: any) {
-      setStatus(e?.message ?? "Could not read the device's recordings");
-    }
-  }, [l816]);
+    if (connectedId) onConnected?.(connectedId, connectedName);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectedId]);
 
   const foundList = useMemo(() => Object.values(found), [found]);
   const seenList = useMemo(() => Object.values(seen).sort((a, b) => b.rssi - a.rssi), [seen]);
-  const busy = phase === "busy";
+  const scanningNow = !connected && state !== "connecting" && scanPhase === "scan";
 
   return (
     <View style={{ flex: 1 }}>
       <GlassBackground />
       <ScrollView contentContainerStyle={s.container}>
         <View style={s.header}>
-          <Title>Connect with SATE L816</Title>
-          <Pressable onPress={onClose} hitSlop={8} accessibilityRole="button">
+          {/* The title is long enough to push "Close" off the right edge, which
+              rendered as "Clos". It shrinks; the exit does not. */}
+          {/* Short on purpose. "Connect with SATE L816" ran into the Close
+              button at the system font sizes people actually use, and the card
+              below already names the device — the header does not need to. */}
+          <View style={s.headerTitle}>
+            <Title>SATE L816</Title>
+          </View>
+          {/* flexShrink on the PRESSABLE, not on its Text: the Pressable is the
+              flex item, and with the default flexShrink:1 it squeezed its own
+              label down to "Clos" at large system font sizes. */}
+          <Pressable
+            onPress={onClose}
+            hitSlop={12}
+            accessibilityRole="button"
+            style={s.closeBtn}
+          >
             <Text style={s.close}>Close</Text>
           </Pressable>
         </View>
 
-        {phase === "init" && <Muted>Preparing Bluetooth…</Muted>}
+        {!connected && state !== "connecting" && scanPhase === "init" && (
+          <Muted>Preparing Bluetooth…</Muted>
+        )}
 
-        {phase === "scan" && (
+        {scanningNow && (
           <Card>
             <Text style={s.sectionTitle}>Nearby SATE L816 recorders</Text>
             <Muted>
@@ -649,7 +224,7 @@ export function L816ConnectScreen({
         {/* On-screen BLE diagnostics — the L816 does not always advertise its
             service UUID, and its name can be a stale cached one, so a manual pick
             is the difference between "not supported" and "tap the right row". */}
-        {phase === "scan" && (
+        {scanningNow && (
           <Card>
             <Text style={s.sectionTitle}>Bluetooth diagnostics</Text>
             <Text style={s.dim}>Radio: {bleState}</Text>
@@ -688,34 +263,41 @@ export function L816ConnectScreen({
           </Card>
         )}
 
-        {phase === "connecting" && (
+        {state === "connecting" && (
           <Card>
             <Text style={s.sectionTitle}>Connecting…</Text>
             <Muted>Setting up the recorder and syncing its clock.</Muted>
           </Card>
         )}
 
-        {(phase === "ready" || busy) && (
+        {connected && state !== "error" && (
           <>
             <Card>
               <Text style={s.sectionTitle}>{connectedName}</Text>
               <Muted>
                 {recording
-                  ? resumed.current
+                  ? resumed
                     ? "This SATE L816 was already recording when we connected — it keeps " +
-                      "going " +
-                      "on its own. The timer below counts from now, not from the start."
+                      "going on its own. The timer below counts from now, not from the start."
                     : "Recording on the SATE L816. Audio is stored on the device and " +
-                      "transferred " +
-                      "when you stop."
+                      "transferred when you stop."
                   : "Press record to start. The SATE L816 records on its own — the take is " +
                     "downloaded and uploaded to SATE when you stop."}
               </Muted>
 
-              <Text style={s.dur}>{fmtDur(elapsedMs)}</Text>
+              {/* The one thing a user cannot tell by looking at the phone: the
+                  link is kept up after this screen closes, so a take made later
+                  arrives by itself. Saying so is the difference between trusting
+                  the device in a pocket and checking the app after every take. */}
+              <Text style={s.keep}>
+                Stays connected in the background — recordings you start on the device upload
+                themselves, even from another screen.
+              </Text>
+
+              <Text style={s.dur}>{fmtDur(session.elapsedMs)}</Text>
 
               <Pressable
-                onPress={onToggleRecord}
+                onPress={session.toggleRecord}
                 disabled={busy}
                 accessibilityRole="button"
                 style={({ pressed }) => [
@@ -731,22 +313,24 @@ export function L816ConnectScreen({
                 </Text>
               </Pressable>
 
-              {progress && (
+              {session.progress && (
                 <View style={{ marginTop: 14 }}>
                   <Text style={s.progressTxt}>
-                    {progress.message}
-                    {progress.phase === "downloading" ? ` · ${progress.percent}%` : ""}
+                    {session.progress.message}
+                    {session.progress.phase === "downloading"
+                      ? ` · ${session.progress.percent}%`
+                      : ""}
                   </Text>
                   {/* Only the download can be measured — one byte count against
                       another. Waiting, listing and decoding get the message and no
                       bar, rather than a bar creeping forward on a guess. */}
-                  {progress.phase === "downloading" && (
-                    <ProgressBar value={progress.percent / 100} />
+                  {session.progress.phase === "downloading" && (
+                    <ProgressBar value={session.progress.percent / 100} />
                   )}
                 </View>
               )}
 
-              {status && <Text style={s.status}>{status}</Text>}
+              {session.status && <Text style={s.status}>{session.status}</Text>}
             </Card>
 
             {/* Optional — assign a patient now, or leave it and tag the recording
@@ -761,9 +345,11 @@ export function L816ConnectScreen({
                 renderItem={({ item }) => (
                   <Pressable
                     onPress={() =>
-                      setPatientId((cur) => (cur === item.patient_id ? null : item.patient_id))
+                      session.setPatientId(
+                        session.patientId === item.patient_id ? null : item.patient_id
+                      )
                     }
-                    style={[s.patRow, patientId === item.patient_id && s.patRowOn]}
+                    style={[s.patRow, session.patientId === item.patient_id && s.patRowOn]}
                   >
                     <Text style={s.rowName}>{item.patient_id}</Text>
                     <Text style={s.dim}>{item.name}</Text>
@@ -778,26 +364,27 @@ export function L816ConnectScreen({
             <Card>
               <View style={s.rowBetween}>
                 <Text style={s.sectionTitle}>On the device</Text>
-                <Pressable onPress={refreshFiles} hitSlop={8} accessibilityRole="button">
+                <Pressable onPress={session.refreshFiles} hitSlop={8} accessibilityRole="button">
                   <Text style={s.link}>Refresh</Text>
                 </Pressable>
               </View>
               <Muted>
-                {pendingCount > 0
-                  ? `${pendingCount} recording${pendingCount === 1 ? "" : "s"} still to upload — ` +
-                    `this happens on its own when the device connects.`
+                {session.pendingCount > 0
+                  ? `${session.pendingCount} recording${
+                      session.pendingCount === 1 ? "" : "s"
+                    } still to upload — this happens on its own while the device is connected.`
                   : "Everything here is already in SATE. Recordings made with the phone " +
-                    "away upload themselves the next time you connect."}
+                    "away upload themselves the next time it connects."}
               </Muted>
-              {files.length === 0 ? (
+              {session.files.length === 0 ? (
                 <Text style={s.dim}>No recordings on this SATE L816.</Text>
               ) : (
-                files.map((f) => {
-                  const done = uploadedRef.current.has(f.name);
+                session.files.map((f) => {
+                  const done = session.uploaded.has(f.name);
                   return (
                     <Pressable
                       key={f.name}
-                      onPress={() => uploadTake(f)}
+                      onPress={() => session.uploadTake(f)}
                       disabled={busy || recording}
                       style={[s.row, (busy || recording) && { opacity: 0.4 }]}
                     >
@@ -817,25 +404,33 @@ export function L816ConnectScreen({
               )}
             </Card>
 
+            {/* Two different exits, and conflating them is how a user loses the
+                background link by accident. "Done" leaves the screen with the
+                recorder still connected; disconnecting is a deliberate act. */}
             <Button title="Done" onPress={onClose} disabled={busy} />
+            <Pressable
+              onPress={() => {
+                session.disconnect();
+                onClose();
+              }}
+              disabled={busy}
+              hitSlop={8}
+              accessibilityRole="button"
+            >
+              <Text style={[s.disconnect, busy && { opacity: 0.4 }]}>
+                Disconnect this recorder
+              </Text>
+            </Pressable>
           </>
         )}
 
-        {phase === "done" && (
-          <Card>
-            <Text style={s.sectionTitle}>Done</Text>
-            <Muted>Recording uploaded. It'll appear on your home screen once processed.</Muted>
-            <Button title="Back to home" onPress={onClose} />
-          </Card>
-        )}
-
-        {phase === "error" && (
+        {(state === "error" || scanPhase === "error") && (
           <Card>
             <Text style={[s.sectionTitle, { color: D.red }]}>Something went wrong</Text>
-            <Muted>{error}</Muted>
+            <Muted>{session.error ?? scanError}</Muted>
             <Button
-              title={connectedId ? "Back to the recorder" : "Close"}
-              onPress={() => (connectedId ? setPhase("ready") : onClose())}
+              title={connected ? "Back to the recorder" : "Close"}
+              onPress={() => (connected ? session.clearError() : onClose())}
             />
           </Card>
         )}
@@ -846,7 +441,9 @@ export function L816ConnectScreen({
 
 const s = StyleSheet.create({
   container: { padding: 20, paddingTop: 64, gap: 16 },
-  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
+  headerTitle: { flex: 1, flexShrink: 1 },
+  closeBtn: { flexShrink: 0, flexGrow: 0 },
   close: { color: D.sub, fontSize: 15 },
   sectionTitle: { color: D.ink, fontSize: 16, fontWeight: "600", marginBottom: 6 },
   row: {
@@ -870,6 +467,7 @@ const s = StyleSheet.create({
   dim: { color: D.sub, fontSize: 13, marginTop: 2 },
   link: { color: D.sky, fontSize: 14, fontWeight: "600" },
   chev: { color: D.sub, fontSize: 22 },
+  keep: { color: D.green, fontSize: 12, fontWeight: "600", marginTop: 8 },
   dur: { color: D.ink, fontSize: 34, fontWeight: "800", textAlign: "center", marginVertical: 10 },
   recBtn: {
     marginTop: 4,
@@ -881,4 +479,5 @@ const s = StyleSheet.create({
   recTxt: { color: "#FFFFFF", fontSize: 17, fontWeight: "700" },
   progressTxt: { color: D.sub, fontSize: 13, marginBottom: 6 },
   status: { color: D.sky, fontSize: 13, fontWeight: "600", marginTop: 12 },
+  disconnect: { color: D.red, fontSize: 14, fontWeight: "600", textAlign: "center", paddingVertical: 8 },
 });

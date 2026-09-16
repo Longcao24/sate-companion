@@ -6,7 +6,11 @@ import { LoginScreen } from "../screens/LoginScreen";
 import { DeviceListScreen } from "../screens/DeviceListScreen";
 import { useManagedDevices } from "../devices/useManagedDevices";
 import { makePlaudLink } from "../plaud/PlaudLink";
-import { KnownL816, loadKnownL816s } from "../l816/L816Store";
+import { KnownL816, loadKnownL816s, rememberL816 } from "../l816/L816Store";
+import { makeL816Link } from "../l816/L816Link";
+import { useL816Session } from "../l816/useL816Session";
+import { L816ConnectScreen } from "../screens/L816ConnectScreen";
+import { L816_ENABLED } from "../features";
 import { KnownPendant, loadKnownPendants } from "../pendant/PendantStore";
 import { Recording } from "../protocol";
 import { useStore } from "../store";
@@ -22,11 +26,21 @@ import { useEffect, useRef } from "react";
 //
 // Deliberately much smaller than SATE Companion's root. This build is for
 // reading what the hardware produced: a list of reports, a report, and the
-// device list tucked behind a corner button. It runs no BLE of its own, so it
-// never touches the radio arbiter, and pairing hardware stays in Companion.
+// device list tucked behind a corner button.
 //
 // It shares the store, the API client and the login screen, so the two apps sign
 // in the same way against the same account.
+//
+// 🛑 IT DOES RUN ONE PIECE OF BLE: the SATE L816 session. That is not a
+// contradiction of "the app does not create reports" — it creates none. It pulls
+// a take the RECORDER made off the device and hands it to the same server
+// pipeline every other recording goes through; the report still comes back from
+// the server. Without it, an account whose only hardware is an L816 would open
+// this app, see the recorder listed as paired, and watch nothing ever arrive:
+// the takes sit on the device until someone opens the OTHER app. So the session
+// is mounted here, at the root, exactly as it is in Companion — it starts on
+// launch, reconnects by itself, quick-checks the device for takes recorded while
+// the phone was away, and uploads them from whatever screen the user is on.
 
 // A tab, or a screen pushed on top of one. The report and the device list are
 // NOT tabs: they are places you go from a tab and come back from, and putting
@@ -34,7 +48,8 @@ import { useEffect, useRef } from "react";
 type Screen =
   | { name: "tab"; tab: SateTab }
   | { name: "report"; recording: Recording }
-  | { name: "devices" };
+  | { name: "devices" }
+  | { name: "l816"; targetId?: string };
 
 export function SateRoot() {
   const { settings, ready, update, signOut } = useStore();
@@ -112,6 +127,7 @@ export function SateRoot() {
   // was forgotten every launch, so the devices screen only ever offered "connect
   // your first device" no matter how many were set up.
   const plaud = useMemo(() => makePlaudLink(), []);
+  const l816 = useMemo(() => makeL816Link(), []);
   const [knownL816s, setKnownL816s] = useState<KnownL816[]>([]);
   const [knownPendants, setKnownPendants] = useState<KnownPendant[]>([]);
   useEffect(() => {
@@ -130,6 +146,37 @@ export function SateRoot() {
     // registry has to be live on the tabs too — not only on the device screen.
     !!settings.token
   );
+
+  // The L816 session. Mounted at the root so it outlives every screen: a take
+  // started on the recorder has to reach SATE whether the user is reading a
+  // report, on the dashboard, or not looking at the phone at all.
+  const l816Session = useL816Session(api, l816, L816_ENABLED && !!settings.token, knownL816s);
+
+  // One sentence describing what the recorder is doing, for the dashboard row.
+  // Ordered by what a user most needs to know first: a take in progress beats a
+  // backlog, and a backlog beats "idle".
+  const l816Line = l816Session.recording
+    ? "Recording on the device now"
+    : l816Session.state === "connecting"
+      ? "Connecting…"
+      : l816Session.state === "busy"
+        ? l816Session.progress?.message ?? "Uploading to SATE…"
+        : l816Session.pendingCount > 0
+          ? `${l816Session.pendingCount} recording${
+              l816Session.pendingCount === 1 ? "" : "s"
+            } waiting to upload`
+          : "Connected · new recordings upload themselves";
+  const liveL816 = l816Session.connectedId
+    ? {
+        connectedId: l816Session.connectedId,
+        line: l816Line,
+        busy: l816Session.state === "busy" || l816Session.recording,
+      }
+    : null;
+
+  const openL816 = (d: { kind?: string | null; serial: string }) => {
+    if (d.kind === "l816" && L816_ENABLED) setScreen({ name: "l816", targetId: d.serial });
+  };
 
   if (!ready) return <View style={{ flex: 1, backgroundColor: D.bg }} />;
   if (!settings.token) {
@@ -152,6 +199,8 @@ export function SateRoot() {
           onOpenReports={() => setScreen({ name: "tab", tab: "reports" })}
           onOpenReport={(recording) => setScreen({ name: "report", recording })}
           onAddDevice={() => setScreen({ name: "devices" })}
+          onOpenDevice={openL816}
+          liveL816={liveL816}
         />
       )}
       {screen.name === "tab" && screen.tab === "reports" && (
@@ -182,7 +231,10 @@ export function SateRoot() {
             fetchFailed={fetchFailed}
             nearby={new Set()}
             onRefresh={refresh}
-            onOpenDevice={() => {}}
+            // Tapping a paired L816 opens its screen. This used to be a
+            // no-op, so the one row on the page did nothing when tapped —
+            // which reads as a broken app, not as "there is nothing here".
+            onOpenDevice={openL816}
             onOpenSettings={() => setScreen({ name: "tab", tab: "settings" })}
             onOpenPreview={() => setScreen({ name: "tab", tab: "dashboard" })}
             onAddSate={() => setScreen({ name: "tab", tab: "dashboard" })}
@@ -198,6 +250,18 @@ export function SateRoot() {
             </Pressable>
           </View>
         </View>
+      )}
+      {screen.name === "l816" && (
+        <L816ConnectScreen
+          api={api}
+          l816={l816}
+          session={l816Session}
+          targetId={screen.targetId}
+          onConnected={(id, name) => rememberL816(id, name).then(setKnownL816s)}
+          // Closing goes back to the device list, and — unlike Companion's old
+          // behaviour — leaves the recorder CONNECTED.
+          onClose={() => setScreen({ name: "devices" })}
+        />
       )}
       {/* Only on tabs. A bar under a report would offer to jump away mid-read
           with no way back to where you were. */}

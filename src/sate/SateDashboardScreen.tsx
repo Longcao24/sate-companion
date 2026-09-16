@@ -31,6 +31,8 @@ export function SateDashboardScreen({
   onOpenReports,
   onOpenReport,
   onAddDevice,
+  onOpenDevice,
+  liveL816,
 }: {
   api: SateApi;
   devices: ManagedDevice[];
@@ -38,6 +40,11 @@ export function SateDashboardScreen({
   onOpenReports: () => void;
   onOpenReport: (r: Recording) => void;
   onAddDevice: () => void;
+  onOpenDevice?: (d: ManagedDevice) => void;
+  /** What the L816 session is doing RIGHT NOW. A paired row that only ever says
+   *  "paired over Bluetooth" cannot answer the one question the dashboard is
+   *  for — is the recorder connected, and is anything still waiting to upload? */
+  liveL816?: { connectedId: string | null; line: string; busy: boolean } | null;
 }) {
   const [rows, setRows] = useState<Recording[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -124,27 +131,42 @@ export function SateDashboardScreen({
           devices.map((d) => {
             const kind = d.kind ?? "sate";
             const external = kind !== "sate";
+            // Live only for the L816 that is actually connected right now.
+            const live =
+              kind === "l816" && liveL816 && liveL816.connectedId === d.serial ? liveL816 : null;
+            const dot = live
+              ? live.busy
+                ? D.amber
+                : D.green
+              : external
+                ? D.sky
+                : d.online
+                  ? D.green
+                  : D.faint;
             return (
-              <View key={d.id} style={s.devRow}>
-                <View
-                  style={[
-                    s.dot,
-                    { backgroundColor: external ? D.sky : d.online ? D.green : D.faint },
-                  ]}
-                />
+              <Pressable
+                key={d.id}
+                onPress={() => onOpenDevice?.(d)}
+                disabled={!onOpenDevice}
+                style={({ pressed }) => [s.devRow, { opacity: pressed ? 0.7 : 1 }]}
+              >
+                <View style={[s.dot, { backgroundColor: dot }]} />
                 <View style={{ flex: 1 }}>
                   <Text style={s.rowTitle}>{d.name}</Text>
                   <Text style={s.rowSub}>
-                    {external
-                      ? // A Plaud / Pendant / L816 has no Wi-Fi and no heartbeat, so
-                        // "offline" would be wrong rather than merely unhelpful.
-                        `${d.fw} · paired over Bluetooth`
-                      : d.online
-                        ? "Online"
-                        : "Offline · it keeps recording on its own"}
+                    {live
+                      ? live.line
+                      : external
+                        ? // A Plaud / Pendant / L816 has no Wi-Fi and no heartbeat, so
+                          // "offline" would be wrong rather than merely unhelpful.
+                          `${d.fw} · paired over Bluetooth`
+                        : d.online
+                          ? "Online"
+                          : "Offline · it keeps recording on its own"}
                   </Text>
                 </View>
-              </View>
+                {onOpenDevice && <Feather name="chevron-right" size={18} color={D.faint} />}
+              </Pressable>
             );
           })
         )}

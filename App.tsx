@@ -12,6 +12,7 @@ import { PendantConnectScreen } from "./src/screens/PendantConnectScreen";
 import { makeL816Link } from "./src/l816/L816Link";
 import { KnownL816, loadKnownL816s, rememberL816 } from "./src/l816/L816Store";
 import { L816ConnectScreen } from "./src/screens/L816ConnectScreen";
+import { useL816Session } from "./src/l816/useL816Session";
 import { PLAUD_ENABLED, PENDANT_ENABLED, L816_ENABLED } from "./src/features";
 import { acquireRadio, registerRadio } from "./src/ble/radio";
 import { useManagedDevices } from "./src/devices/useManagedDevices";
@@ -190,6 +191,11 @@ function Root() {
       },
       disconnectPendant: () => pendant.teardown(), // stops scan + drops connection
       disconnectL816: () => l816.teardown(), // same: stops scan + drops connection
+      // A HELD L816 link survives the handoff — only its scan is stopped. The
+      // session sets that flag (setL816Held); see ble/radio.ts for why this does
+      // not weaken RULE #2, and useL816Session.ts for why the link must outlive
+      // the screen at all.
+      stopL816Scan: () => l816.stopScan(),
     });
   }, [link, plaud, pendant, l816]);
 
@@ -216,6 +222,12 @@ function Root() {
     acquireRadio("sate-fg"); // setup/restart needs the radio alone: pauses auto-sync
     setScreen(next);
   }, []);
+
+  // The SATE L816 session: the link, the device-event watch and the upload
+  // engine, mounted HERE rather than in the connect screen so that a take
+  // started on the device is noticed and uploaded from any screen — and after
+  // the app is reopened. The screen below is just a view over it.
+  const l816Session = useL816Session(api, l816, L816_ENABLED && !!settings.token, knownL816s);
 
   // Kept mounted so the background BLE bridge keeps running across screens. It
   // gates itself on the arbiter — no screen-name allowlist. It is also the ONLY
@@ -336,14 +348,17 @@ function Root() {
         <L816ConnectScreen
           api={api}
           l816={l816}
+          session={l816Session}
           targetId={screen.targetId}
           // No server-side registration call: the web derives an L816 device row
           // from its uploaded sessions client-side (DeviceProvider), so
           // POST /devices/external is not needed — and calling an endpoint that
           // is not deployed just 404s on every pair and buries real errors.
           onConnected={(id, name) => rememberL816(id, name).then(setKnownL816s)}
-          // goHome acquires 'autosync', which releases the L816 (teardown:
-          // stopScan + drop connection) WITHOUT destroying the shared manager.
+          // goHome acquires 'autosync'. With a live L816 session that now stops
+          // the L816's SCAN and KEEPS its connection — leaving this screen is
+          // not a reason to stop watching the recorder. Dropping the link is a
+          // separate, deliberate action on the screen itself.
           onClose={goHome}
         />
       )}

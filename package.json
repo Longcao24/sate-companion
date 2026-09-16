@@ -8,7 +8,10 @@
     "ios": "expo run:ios",
     "sate:prebuild": "SATE_VARIANT=sate expo prebuild -p android --clean",
     "sate:build": "cd android && rm -rf app/build/generated/assets app/build/intermediates/assets && SATE_VARIANT=sate ./gradlew :app:assembleRelease",
-    "sate:android": "npm run sate:prebuild && npm run sate:build && adb install -r android/app/build/outputs/apk/release/app-release.apk"
+    "sate:android": "npm run sate:prebuild && npm run sate:build && adb install -r android/app/build/outputs/apk/release/app-release.apk",
+    "companion:prebuild": "expo prebuild -p android --clean",
+    "companion:build": "cd android && rm -rf app/build/generated/assets app/build/intermediates/assets && ./gradlew :app:assembleRelease",
+    "companion:android": "npm run companion:prebuild && npm run companion:build && adb install -r android/app/build/outputs/apk/release/app-release.apk"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",

@@ -85,6 +85,16 @@ const SETTLE_BEFORE_DOWNLOAD_MS = 600;
 // download is how you corrupt one.
 const STATE_POLL_MS = 3000;
 
+// How long to wait for the device to answer a connect.
+//
+// ble-plx's connectToDevice NEVER gives up on its own. With the connect driven
+// by a screen that was fine — the user sees "Connecting…" and walks away — but
+// the session now reconnects on a timer, and one attempt against a recorder that
+// is simply switched off would hang forever, leave the "connecting" latch set,
+// and stop every later retry. The feature would then be dead for the rest of the
+// process with nothing in the log after the first line.
+const CONNECT_TIMEOUT_MS = 15000;
+
 export interface L816FoundDevice {
   id: string;
   name: string;
@@ -139,6 +149,10 @@ export interface L816Link {
   /** True when react-native-ble-plx is present (a dev build, not Expo Go). */
   isAvailable(): boolean;
   requestPermissions(): Promise<boolean>;
+  /** Already granted? Asks nothing. The background reconnect uses this: popping
+   *  a permission dialog out of nowhere at app launch is not acceptable, and a
+   *  silent no simply means the link waits for the user to open the screen. */
+  hasPermissions(): Promise<boolean>;
   startScan(
     onFound: (d: L816FoundDevice) => void,
     onSeen?: (d: L816SeenDevice) => void,
@@ -154,6 +168,19 @@ export interface L816Link {
   /** True when the device was already recording when we connected — it keeps
    *  recording with the app closed, so this is a normal state, not an error. */
   isRecording(): boolean;
+  /** True while a connection is actually held. */
+  isConnected(): boolean;
+  /**
+   * The link DROPPED on its own — out of range, device off, radio reset.
+   *
+   * Nothing used to notice. The 3 s poll swallows its own failures (a missed
+   * tick is normal), so a dead link looked exactly like an idle one: the screen
+   * still said Connected, the notification still claimed a live connection, and
+   * every take made after that point was invisible. Anything holding the link
+   * across screens MUST subscribe and reconnect, or "keep it connected" is only
+   * true until the user walks out of the room once.
+   */
+  onDisconnected(cb: () => void): { remove(): void };
   /** Start a recording on the device. Resolves with the file name it allocated. */
   startRecording(): Promise<string>;
   /** Stop recording. Resolves with the finished file and its listed size. */
@@ -254,6 +281,22 @@ class NativeL816Link implements L816Link {
   // The name Stop handed back, awaiting its download.
   private lastStopped: L816File | null = null;
   private deviceCbs = new Set<(e: L816DeviceEvent) => void>();
+  private dropCbs = new Set<() => void>();
+  private dropSub: { remove(): void } | null = null;
+  // Set by disconnect()/teardown() so a drop WE caused does not look like the
+  // device walking away — a reconnect loop would otherwise fight the user
+  // closing the link.
+  private closing = false;
+  // Is OUR scan the one running on the shared manager?
+  //
+  // `stopScan()` reaches the SHARED BleManager's `stopDeviceScan()`, which is
+  // global — it stops whoever is scanning, not just us. connect() used to call
+  // it unconditionally, which was harmless while the only way to connect was
+  // from the L816 screen (that screen had already taken the radio). Now the
+  // session reconnects on its own while AUTO-SYNC owns the radio and is the only
+  // background scanner, and stopping its scan from under it would quietly stop
+  // SATE recorders being discovered — with nothing failing anywhere.
+  private scanActive = false;
   private poll: ReturnType<typeof setInterval> | null = null;
 
   isAvailable() {
@@ -273,6 +316,19 @@ class NativeL816Link implements L816Link {
     return Object.values(res).every((v) => v === "granted");
   }
 
+  async hasPermissions(): Promise<boolean> {
+    if (Platform.OS !== "android") return true;
+    const wanted =
+      Platform.Version >= 31
+        ? [
+            PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
+            PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
+          ]
+        : [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION];
+    const got = await Promise.all(wanted.map((p) => PermissionsAndroid.check(p)));
+    return got.every(Boolean);
+  }
+
   // ---------------------------------------------------------------- scan
 
   startScan(
@@ -282,6 +338,7 @@ class NativeL816Link implements L816Link {
   ): void {
     this.scanStateSub?.remove();
     this.seenLog.clear();
+    this.scanActive = true;
     // One scan per manager: clear whatever auto-sync/SATE left running.
     try {
       this.manager.stopDeviceScan();
@@ -336,17 +393,39 @@ class NativeL816Link implements L816Link {
   stopScan(): void {
     this.scanStateSub?.remove();
     this.scanStateSub = null;
-    if (hasSharedBleManager()) getSharedBleManager().stopDeviceScan();
+    // Only stop the radio if the scan running on it is ours — see scanActive.
+    if (this.scanActive && hasSharedBleManager()) getSharedBleManager().stopDeviceScan();
+    this.scanActive = false;
   }
 
   // ------------------------------------------------------------- connect
 
   async connect(deviceId: string): Promise<void> {
     this.stopScan();
-    const dev = await this.manager.connectToDevice(deviceId, { requestMTU: 247 });
+    this.closing = false;
+    const dev = await this.manager.connectToDevice(deviceId, {
+      requestMTU: 247,
+      timeout: CONNECT_TIMEOUT_MS,
+    });
     await dev.discoverAllServicesAndCharacteristics();
     this.device = dev;
     this.rxBuffer = Buffer.alloc(0);
+
+    // Tell anyone holding this link when it goes away by itself. Registered
+    // BEFORE the handshake: a device that drops mid-setup is exactly the case
+    // that used to leave a half-connected link nothing ever cleaned up.
+    this.dropSub?.remove();
+    this.dropSub = dev.onDisconnected(() => {
+      if (this.closing) return;
+      console.log("[L816] link dropped");
+      this.stopPolling();
+      this.cancelTransfer();
+      this.failAll(new Error("The SATE L816 disconnected"));
+      this.subs.forEach((s) => s.remove());
+      this.subs = [];
+      this.reset();
+      this.dropCbs.forEach((cb) => cb());
+    });
 
     // CCCD order is 1203a -> 1204a -> 1201a and it MATTERS: with only the first
     // two enabled, transfers stalled on this firmware. ble-plx serialises GATT
@@ -427,6 +506,9 @@ class NativeL816Link implements L816Link {
   }
 
   async disconnect(): Promise<void> {
+    this.closing = true;
+    this.dropSub?.remove();
+    this.dropSub = null;
     this.stopPolling();
     this.cancelTransfer();
     this.failAll(new Error("Disconnected"));
@@ -442,6 +524,9 @@ class NativeL816Link implements L816Link {
 
   teardown(): void {
     // Never destroys the shared manager — see RULE #2.
+    this.closing = true;
+    this.dropSub?.remove();
+    this.dropSub = null;
     this.stopPolling();
     this.stopScan();
     this.cancelTransfer();
@@ -464,6 +549,15 @@ class NativeL816Link implements L816Link {
 
   isRecording(): boolean {
     return this.recording;
+  }
+
+  isConnected(): boolean {
+    return this.device !== null;
+  }
+
+  onDisconnected(cb: () => void) {
+    this.dropCbs.add(cb);
+    return { remove: () => this.dropCbs.delete(cb) };
   }
 
   // ------------------------------------------------------------ commands
