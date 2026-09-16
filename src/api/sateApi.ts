@@ -70,6 +70,16 @@ export interface SateApi {
      * SATE hardware's physical flag button. */
     flags?: number[];
   }): Promise<void>;
+  /**
+   * Register a device the phone paired over Bluetooth (Plaud / Pendant / L816) so
+   * it appears in Connected Recorders on the web, alongside the SATE recorders.
+   *
+   * These devices can never register themselves the way a recorder does — they
+   * have no Wi-Fi and no device key — so the phone vouches for them. Best-effort
+   * by design: pairing must still work with the server unreachable, and the
+   * server backfills a row from the device's sessions anyway.
+   */
+  registerExternalDevice(serial: string, name: string): Promise<void>;
   /** The processed report row (transcript + analysis) — the SAME record the web app shows. */
   getRecording(id: string): Promise<Recording>;
   /** First-open review: rename + set protocol/notes and clear needs_review. */
@@ -201,6 +211,12 @@ export class HttpApi implements SateApi {
     await this.req("/api/sessions", {
       method: "POST",
       body: JSON.stringify(args),
+    });
+  }
+  async registerExternalDevice(serial: string, name: string) {
+    await this.req("/api/devices/external", {
+      method: "POST",
+      body: JSON.stringify({ serial, name }),
     });
   }
   async getPlaudToken() {

@@ -9,7 +9,10 @@ import { PlaudSettingsScreen } from "./src/screens/PlaudSettingsScreen";
 import { makePendantLink } from "./src/pendant/PendantLink";
 import { KnownPendant, loadKnownPendants, rememberPendant } from "./src/pendant/PendantStore";
 import { PendantConnectScreen } from "./src/screens/PendantConnectScreen";
-import { PLAUD_ENABLED, PENDANT_ENABLED } from "./src/features";
+import { makeL816Link, l816Serial } from "./src/l816/L816Link";
+import { KnownL816, loadKnownL816s, rememberL816 } from "./src/l816/L816Store";
+import { L816ConnectScreen } from "./src/screens/L816ConnectScreen";
+import { PLAUD_ENABLED, PENDANT_ENABLED, L816_ENABLED } from "./src/features";
 import { acquireRadio, registerRadio } from "./src/ble/radio";
 import { useManagedDevices } from "./src/devices/useManagedDevices";
 import { ManagedDevice, UploadedSession } from "./src/protocol";
@@ -36,6 +39,7 @@ type Screen =
   | { name: "plaud"; targetSn?: string }
   | { name: "plaudSettings"; sn: string; deviceName: string }
   | { name: "pendant"; targetId?: string }
+  | { name: "l816"; targetId?: string }
   | { name: "report"; session: UploadedSession }
   | { name: "settings" };
 
@@ -85,6 +89,7 @@ function Root() {
   const link = useMemo(() => makeLink(), []);
   const plaud = useMemo(() => makePlaudLink(), []);
   const pendant = useMemo(() => makePendantLink(), []);
+  const l816 = useMemo(() => makeL816Link(), []);
 
   // Pendants the account has paired (persisted locally — no lock concern, unlike
   // Plaud). Loaded once so Home can show them as device rows on every launch.
@@ -92,6 +97,14 @@ function Root() {
   useEffect(() => {
     if (!PENDANT_ENABLED) return;   // recorder-only build: nothing to list
     loadKnownPendants().then(setKnownPendants);
+  }, []);
+
+  // L816s the account has paired. Same store shape and same reasoning as the
+  // pendant's — plain BLE, no binding, so AsyncStorage is enough.
+  const [knownL816s, setKnownL816s] = useState<KnownL816[]>([]);
+  useEffect(() => {
+    if (!L816_ENABLED) return;   // no ASC decoder in this build: nothing to list
+    loadKnownL816s().then(setKnownL816s);
   }, []);
 
   // Belt-and-suspenders: also refresh proactively just before expiry, so most
@@ -124,8 +137,9 @@ function Root() {
         plaud.disconnect().catch(() => {});
       },
       disconnectPendant: () => pendant.teardown(), // stops scan + drops connection
+      disconnectL816: () => l816.teardown(), // same: stops scan + drops connection
     });
-  }, [link, plaud, pendant]);
+  }, [link, plaud, pendant, l816]);
 
   // Navigation helpers. The radio is acquired SYNCHRONOUSLY here, before the new
   // screen renders — never in an effect (a parent effect runs after the child's,
@@ -142,6 +156,10 @@ function Root() {
     acquireRadio("pendant"); // shares SATE's manager — stopScan only, no destroy
     setScreen({ name: "pendant", targetId });
   }, []);
+  const openL816 = useCallback((targetId?: string) => {
+    acquireRadio("l816"); // shares SATE's manager — stopScan only, no destroy
+    setScreen({ name: "l816", targetId });
+  }, []);
   const openSateFg = useCallback((next: Screen) => {
     acquireRadio("sate-fg"); // setup/restart needs the radio alone: pauses auto-sync
     setScreen(next);
@@ -152,11 +170,13 @@ function Root() {
   // BLE scanner, and publishes which recorders are `nearby` (one scan per manager).
   const { nearby } = useAutoSync(settings.autoSync, link, api, !!settings.token);
 
-  // One registry: SATE recorders (server) + Plaud (Keychain) + pendants (storage).
+  // One registry: SATE recorders (server) + Plaud (Keychain) + pendants and
+  // L816s (storage).
   const { devices, loaded, fetchFailed, refresh } = useManagedDevices(
     api,
     plaud,
     knownPendants,
+    knownL816s,
     !!settings.token
   );
 
@@ -189,6 +209,7 @@ function Root() {
             // scan forever and look like broken hardware.
             if (kind === "plaud") { if (PLAUD_ENABLED) openPlaud(d.serial); }
             else if (kind === "pendant") { if (PENDANT_ENABLED) openPendant(d.serial); }
+            else if (kind === "l816") { if (L816_ENABLED) openL816(d.serial); }
             else setScreen({ name: "recorderDetail", device: d });
           }}
           onOpenSettings={() => setScreen({ name: "settings" })}
@@ -196,6 +217,7 @@ function Root() {
           onAddSate={() => openSateFg({ name: "provision" })}
           onAddPlaud={PLAUD_ENABLED ? () => openPlaud() : undefined}
           onAddPendant={PENDANT_ENABLED ? () => openPendant() : undefined}
+          onAddL816={L816_ENABLED ? () => openL816() : undefined}
         />
       )}
       {screen.name === "recorderDetail" && (
@@ -254,6 +276,26 @@ function Root() {
           targetId={screen.targetId}
           onConnected={(id, name) => rememberPendant(id, name).then(setKnownPendants)}
           // goHome acquires 'autosync', which releases the pendant (teardown:
+          // stopScan + drop connection) WITHOUT destroying the shared manager.
+          onClose={goHome}
+        />
+      )}
+      {screen.name === "l816" && (
+        <L816ConnectScreen
+          api={api}
+          l816={l816}
+          targetId={screen.targetId}
+          onConnected={(id, name) => {
+            rememberL816(id, name).then(setKnownL816s);
+            // Also tell the SERVER, so the unit shows in Connected Recorders on
+            // the web next to the SATE recorders. Best-effort: pairing must work
+            // with the server unreachable, and device-api backfills a row from
+            // the device's sessions if this never lands.
+            api
+              .registerExternalDevice(l816Serial(id), name)
+              .catch((e) => console.log("[L816] register failed (harmless):", e?.message));
+          }}
+          // goHome acquires 'autosync', which releases the L816 (teardown:
           // stopScan + drop connection) WITHOUT destroying the shared manager.
           onClose={goHome}
         />

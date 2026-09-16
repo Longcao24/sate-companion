@@ -107,8 +107,9 @@ export interface ManagedDevice {
   slp?: string; // clinician the recorder is assigned to (set at registration)
   slp_id?: string;
   // Which device family this is. Defaults to 'sate' (a SATE recorder from the
-  // server); 'plaud'/'pendant' are synthesized locally from paired-device stores.
-  kind?: "sate" | "plaud" | "pendant";
+  // server); 'plaud'/'pendant'/'l816' are synthesized locally from paired-device
+  // stores, because none of them has a server-side row of its own.
+  kind?: "sate" | "plaud" | "pendant" | "l816";
 }
 
 // Live activity the recorder reports in its heartbeat so the app can show what

@@ -1,7 +1,7 @@
-// Unified device registry (mobile). The account's devices come from three very
+// Unified device registry (mobile). The account's devices come from four very
 // different places — SATE recorders from the server, Plaud from the iOS Keychain,
-// pendants from AsyncStorage — and the UI shouldn't care. This hook merges all
-// three into ONE `ManagedDevice[]` (each tagged with `kind`), the mobile mirror
+// pendants and L816s from AsyncStorage — and the UI shouldn't care. This hook
+// merges them into ONE `ManagedDevice[]` (each tagged with `kind`), the mobile mirror
 // of the web app's `deriveExternalDevices` (DeviceProvider.tsx). Screens read one
 // list and branch on `kind`; adding a device family is a change in one place.
 
@@ -9,13 +9,22 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { SateApi } from "../api/sateApi";
 import { PlaudLink } from "../plaud/PlaudLink";
 import { KnownPendant } from "../pendant/PendantStore";
+import { KnownL816 } from "../l816/L816Store";
+import { L816_DISPLAY_NAME } from "../l816/L816Link";
 import { ManagedDevice } from "../protocol";
 
 // Synthesize a passive device row from a locally-remembered external device
-// (Plaud / pendant). We don't have server telemetry for these, so online/pending
-// default to "unknown-ish" — the row is a launcher into that device's screen.
+// (Plaud / pendant / L816). We don't have server telemetry for these, so
+// online/pending default to "unknown-ish" — the row is a launcher into that
+// device's screen.
+const FAMILY_LABEL: Record<"plaud" | "pendant" | "l816", string> = {
+  plaud: "Plaud",
+  pendant: "Pendant",
+  l816: L816_DISPLAY_NAME,
+};
+
 function synth(
-  kind: "plaud" | "pendant",
+  kind: "plaud" | "pendant" | "l816",
   serial: string,
   name: string
 ): ManagedDevice {
@@ -23,7 +32,7 @@ function synth(
     id: `${kind}:${serial}`,
     name,
     serial,
-    fw: kind === "plaud" ? "Plaud" : "Pendant",
+    fw: FAMILY_LABEL[kind],
     online: false,
     last_seen: "",
     pending_sessions: 0,
@@ -42,6 +51,7 @@ export function useManagedDevices(
   api: SateApi,
   plaud: PlaudLink,
   knownPendants: KnownPendant[],
+  knownL816s: KnownL816[],
   /** Only poll while signed in — otherwise every tick 401s on the login screen. */
   enabled: boolean
 ): DeviceRegistry {
@@ -59,8 +69,9 @@ export function useManagedDevices(
     const pendantRows = knownPendants.map((p) =>
       synth("pendant", p.id, p.name)
     );
-    return [...plaudRows, ...pendantRows];
-  }, [plaud, knownPendants]);
+    const l816Rows = knownL816s.map((d) => synth("l816", d.id, d.name));
+    return [...plaudRows, ...pendantRows, ...l816Rows];
+  }, [plaud, knownPendants, knownL816s]);
 
   const refresh = useCallback(async () => {
     try {
@@ -72,8 +83,8 @@ export function useManagedDevices(
       setFetchFailed(false);
     } catch {
       if (!mounted.current) return;
-      // Server unreachable: still surface the locally-known Plaud/pendants so a
-      // user who owns only those never sees an empty/error wall.
+      // Server unreachable: still surface the locally-known Plaud/pendant/L816 so
+      // a user who owns only those never sees an empty/error wall.
       setDevices(externals());
       setLoaded(true);
       setFetchFailed(true);

@@ -1,0 +1,73 @@
+# SATE Notes — the consumer ("Plaud-like") lane. Full Cloudflare: Worker + D1 + R2 + Workers AI.
+#
+# This service shares NOTHING with the clinical stack except the device contract itself.
+# No patients, no clinicians, no PHI, no Supabase, no self-hosted GPU. A recorder joins this
+# lane by being provisioned with cfgServer = this Worker's URL — same firmware, same image.
+#
+#   npx wrangler d1 create sate-notes            # paste the id below
+#   npx wrangler r2 bucket create sate-notes-audio
+#   npx wrangler d1 execute sate-notes --remote --file=./schema.sql
+#   npx wrangler secret put ADMIN_KEY            # gates claim-token minting + control routes
+#   npx wrangler deploy
+
+name = "sate-notes"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "sate-notes"
+database_id = "217b7f35-e6a4-432a-84ad-987e5db480e3"
+
+# One bucket. Keys are prefixed by purpose: audio/<user>/<serial>/<note>.wav and
+# _tmp/<device>/<folder>/s<n>/<offset>.part for in-flight chunk assembly.
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "sate-notes-audio"
+
+# Workers AI: Whisper for ASR, an instruct model for the summary. Both are swappable by
+# var — the summariser is deliberately behind one call site (src/pipeline.ts) because ASR is
+# ~96% of the per-hour cost and the summary model is the cheap half to upgrade.
+[ai]
+binding = "AI"
+
+[vars]
+# Deepgram nova-3: Cloudflare-hosted (partner), multilingual, and the only ASR on the catalog
+# with diarization. ~10x the price of whisper-large-v3-turbo ($0.0052 vs $0.00051 per audio
+# minute = $0.31 vs $0.031 per audio hour) and ASR is ~96% of this feature's cost, so the
+# feature costs roughly 10x what it did. Rolling back is a one-line change: the pipeline keeps
+# a Whisper adapter and picks by model id.
+ASR_MODEL = "@cf/deepgram/nova-3"
+# BCP-47 hint. Was hardcoded 'en' in the pipeline, which turned every other language into noise.
+ASR_LANGUAGE = "en"
+SUMMARY_MODEL = "@cf/meta/llama-3.1-8b-instruct-fp8-fast"
+# Seconds of audio per Whisper chunk, and the overlap that stops a word being cut in half at
+# the seam. 16 kHz mono s16le => 32000 B/s, so 60 s ~= 1.92 MB per chunk.
+# 60s was sized for Whisper's short attention window. Deepgram takes long audio natively, and
+# every chunk boundary is a place where speaker identities have to be re-matched across an
+# independent diarization — so FEWER, BIGGER chunks means fewer chances to mis-attribute. At
+# 600s a typical voice note is one chunk (diarization exact, no stitching at all) and an hour
+# long meeting is six. Memory: 600s x 32 kB/s = ~19 MB of PCM, well inside the Worker limit.
+CHUNK_SECONDS = "600"
+# The overlap is now doing a second job: it is the ONLY evidence that chunk i's "speaker 0" is
+# chunk i-1's "speaker 0". Two seconds often contains just one voice, which strands the other
+# speakers and invents new identities for them; 20s usually catches a real exchange.
+CHUNK_OVERLAP_SECONDS = "20"
+
+# Identity provider. This service verifies a user's Supabase access token against this host
+# and holds no user table of its own — see src/auth.ts. The anon key is public by design.
+SUPABASE_URL = "https://zlgdpivcbmaodgokkdvz.supabase.co"
+DEVICE_API_URL = "https://zlgdpivcbmaodgokkdvz.supabase.co/functions/v1/device-api"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpsZ2RwaXZjYm1hb2Rnb2trZHZ6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDk3NTY5NTgsImV4cCI6MjA2NTMzMjk1OH0.x58hiBi5EeRwbedrsrBzRkw7y2tFBw5ztIdmujZoPMQ"
+
+[observability]
+enabled = true
+
+# The pipeline is a Workflow, not a fetch handler: durable execution with per-step retries
+# and no wall-clock ceiling. A long transcription CANNOT be awaited inside a request — see
+# the header comment in src/pipeline.ts.
+[[workflows]]
+name = "sate-notes-pipeline"
+binding = "PIPELINE"
+class_name = "NotePipeline"

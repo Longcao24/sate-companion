@@ -44,13 +44,13 @@ Where the logic lives: `src/plaud/PlaudLink.ts` (identity, bindings, resetBindin
 `src/screens/PlaudConnectScreen.tsx` (connect guard), `src/screens/PlaudSettingsScreen.tsx`
 (UNBIND), `modules/plaud-sate/ios/PlaudSateModule.swift` (native connect/depair + ACK).
 
-## ⚠️ RULE #2 — ONE shared BleManager (SATE + Pendant)
+## ⚠️ RULE #2 — ONE shared BleManager (SATE + Pendant + L816)
 
-Three BLE stacks fight for one radio: **SATE** (`SateLink`, react-native-ble-plx),
-**Pendant** (also ble-plx), **Plaud** (proprietary SDK, its own `CBCentralManager`,
-created at app launch).
+Two BLE stacks fight for one radio: **ble-plx** — used by **SATE** (`SateLink`), the
+**Pendant** and the **L816** — and **Plaud** (proprietary SDK, its own
+`CBCentralManager`, created at app launch).
 
-**SATE and Pendant SHARE a single `BleManager`** — `src/ble/bleManager.ts`
+**SATE, the Pendant and the L816 SHARE a single `BleManager`** — `src/ble/bleManager.ts`
 (`getSharedBleManager()`). This is not a style choice:
 
 - Two ble-plx `BleManager` instances, **or destroying one and immediately creating
@@ -58,24 +58,25 @@ created at app launch).
   with no error. This is exactly what stopped the pendant being found for days
   (the SATE→Pendant handoff used to `link.teardown()` → destroy → pendant built its
   own manager → empty scan).
-- **SATE ↔ Pendant handoff: `stopScan()` only. NEVER destroy.**
+- **SATE ↔ Pendant ↔ L816 handoff: `stopScan()` only. NEVER destroy.**
 - **Plaud handoff: DO destroy** (`link.teardown()` → `destroySharedBleManager()`) —
   the Plaud SDK needs the radio to itself. Rebuilt lazily afterwards. This is a
   radio handoff only; it never touches Plaud's binding (see RULE #1).
 - Auto-sync (`useAutoSync`) owns SATE's manager in the background. It **must be
   paused** on any screen that needs the radio: `provision`, `changeWifi`,
-  `recorderSettings`, `plaud`, `pendant` (see `syncEnabled` in `App.tsx`). Leaving
+  `recorderSettings`, `plaud`, `pendant`, `l816` (it gates itself via
+  `autoSyncAllowed()`; the screen just takes the radio). Leaving
   it on rebuilds/rescans the shared manager under the screen and starves it.
 - Only one scan per manager: a screen taking over should `stopDeviceScan()` first.
 
 **`src/ble/radio.ts` is the arbiter and the ONLY place that hands the radio over.**
-Logical owners (`autosync` | `sate-fg` | `pendant` | `plaud`) sit over the two
+Logical owners (`autosync` | `sate-fg` | `pendant` | `l816` | `plaud`) sit over the two
 physical stacks; it encodes both rules above, including the lock-safe Plaud release
 (`disconnect()`, never `depair()`). Rules for touching it:
 
 - A screen that scans/connects MUST own the radio. `acquireRadio(...)` is called
   **synchronously in the navigation handler in `App.tsx`** (`goHome` / `openPlaud` /
-  `openPendant` / `openSateFg`) — NEVER in an effect: a parent effect runs after the
+  `openPendant` / `openL816` / `openSateFg`) — NEVER in an effect: a parent effect runs after the
   child's, so it would stop the scan the screen just started.
 - Auto-sync gates itself via `autoSyncAllowed()`. There is **no screen-name
   allowlist** any more — don't reintroduce one; give the screen an owner instead.
@@ -495,6 +496,96 @@ setup + prebuilt flash assets: `SETUP.md` + the **GitHub Release** (`gh release 
 - Recordings upload as **Standalone** by default — assigning a patient is optional
   and can be done later on the web report. Don't force patient assignment at capture.
 
+**SATE L816 handheld recorder (Android-only) — `src/l816/` + `modules/sate-asc/`**
+- **Called a SATE L816 in the product; the hardware advertises `L816`.** Those are
+  deliberately different strings: `L816_DISPLAY_NAME` (`src/l816/L816Link.ts`) is the ONE
+  place the product name is written and is what a paired unit is remembered as, while the
+  scan matcher and the diagnostics list keep using the raw advertised name — that list
+  exists to show what the phone actually hears. Don't "fix" the mismatch by renaming
+  either one, and don't hardcode the display string a second time.
+- A BLE handheld ("2837 protocol family") the app drives directly: find → record →
+  stop → download → upload, no vendor app and no vendor cloud. Plain ble-plx on the SHARED
+  manager, radio owner `l816` — **no binding, no lock concern** (RULE #1 is Plaud-only).
+  Full reference: `doc/14-l816.md`.
+- **It is the MIRROR IMAGE of Plaud, and for the same kind of reason.** Plaud is iOS-only
+  because its SDK is an arm64 *iOS* binary; the L816 is **Android-only** because its audio
+  is ASC-VI and the only decoder in existence is a pair of proprietary ARM *Android* ELF
+  binaries (`libasc_dec.so` + `libASCDecoder.so`) lifted from the vendor APK. They cannot
+  load on iOS and cannot run in the x86 `cf-processor` container, so the conversion must
+  happen on the phone. `L816_ENABLED = android && isAscAvailable()` — the second half
+  matters: the `.so`s are git-ignored like the Plaud frameworks, so a clone without them
+  still builds and simply never offers the device. Copy them in per
+  `modules/sate-asc/README.md`. Everything else in the family is portable TypeScript.
+- 🛑 **Do NOT rename/move `com.actions.asc.jni.ASCDecoder`.** The binary exports
+  `Java_com_actions_asc_jni_ASCDecoder_decode`, so the symbols only resolve at exactly that
+  fully-qualified name — and a rename fails with `UnsatisfiedLinkError` at the first
+  `decode()`, not at load, so it reads as a codec bug rather than a packaging one.
+- **The legacy length byte is the whole ballgame for the parser.** Framing is
+  `55 AA <len> <op> <payload>` / `AA 55 …`, normally `len+3` bytes total — EXCEPT opcode
+  `03` (declares `0x0F`, carries a 17-byte name) and `04`/`05`/`07` (declare `0x13`, carry
+  a name + 4-byte size). Each is three bytes longer than the formula. Miss it and every
+  packet after the first is lost, which on screen looks exactly like a dead device. The
+  download REQUEST declares `0x13` while carrying 21 bytes for the same reason — mirroring
+  the quirk is what makes the device accept it.
+- **Enable all THREE notifies, in the order `1203a → 1204a → 1201a`.** With only the first
+  two, transfers stall. `1201a` carries file bytes as well as record events, so both it and
+  `1204a` feed the same assembler.
+- **A transfer is complete on EOF (opcode 09) AND an exact byte match against the opcode-07
+  ACK — never the list size.** The two differ by design (listed 204332 → 26158 transferred).
+  A take that merely stopped arriving is truncated, and a truncated recording that uploads
+  successfully is indistinguishable from a real one. Sizes that are not a multiple of 82
+  are refused up front.
+- **After Stop: wait 1500 ms → re-list → match the EXACT name Stop returned → wait 600 ms →
+  download.** An immediate download returns error opcode `FD` (the device is still
+  flushing), and "the last entry in the list" is a different take the moment anything else
+  is on the device. Nothing is ever deleted from the L816, so a failed upload is still
+  recoverable from the on-screen file list.
+- **It keeps recording with the app closed or out of range** — `connect()` queries opcode
+  `0F` and the screen picks the live state up instead of assuming idle. It also only talks
+  to one phone at a time: if the vendor app holds the link, it will not be found.
+- **A take started by the PHYSICAL button must reach SATE with no tap** — that's the take a
+  user actually cares about (phone in a pocket). TWO signals feed it and you need both:
+  an UNSOLICITED opcode `03`/`04` (instant, carries the file name — but no capture from the
+  reference unit ever shows the device sending one, so it can't be relied on), and a 3 s
+  poll of opcode `0F` (always works, no file name). 🛑 **`settle()` returns a boolean on
+  purpose**: an `03`/`04` that NO waiter expected is by definition the user pressing the
+  button, and that's what becomes an `L816DeviceEvent`. Swallow the unmatched response —
+  which a promise-per-command port does by default — and the whole feature silently
+  vanishes with nothing failing. The poll only sees the state FLIP, so a stop with no name
+  goes to `fetchNewSince(knownNames)`, which DIFFS the file list (never "the last entry":
+  these devices don't list in a guaranteed order). The poll must never run while a command,
+  listing or transfer is in flight.
+- **The background link is an Android FOREGROUND SERVICE (`modules/sate-fgservice`), and it
+  does no Bluetooth.** Android stops scheduling a backgrounded app, so the 3 s poll — and
+  with it the entire detect-a-take-started-on-the-device feature — dies the moment the user
+  leaves the screen. The service exists ONLY to keep the process alive; BLE, the protocol
+  and the upload stay in JS where they're already tested. `START_NOT_STICKY` + `onTaskRemoved`
+  → stop, both deliberate: Android must never revive the service with no JS runtime behind
+  it, because a notification claiming a live connection that nothing holds is worse than no
+  notification. Swiping the app away stops it; backgrounding does not. iOS is NOT supported
+  (a backgrounded iOS app keeps the BLE link but suspends JS timers, so the poll can't run).
+  🛑 The permissions + `<service>` live in the MODULE's own `AndroidManifest.xml` (library
+  manifests merge) — never in `app.json`'s android block or in `android/`, which is
+  git-ignored and regenerated by prebuild.
+- **Bytes on `1201a`/`1204a` outside a transfer are LOGGED, not dropped.** The reference app
+  discards them, but `1201a` is named "Record Notify" in the vendor docs — if the device
+  announces a button press anywhere, that's the likeliest channel and nobody has looked.
+- **The device's clock lies** — the reference unit lists `01_20821119193921` (year 2082)
+  beside takes from 2022. That becomes `session_number`, and 3.5e9 overflows a 32-bit
+  column, so `takeTimestamp()` clamps outside 2000..(now+1d) back to now.
+- **The web needs NO L816-specific code to process the audio** — the phone decodes ASC-VI to a
+  plain 16 kHz mono WAV before upload, so `POST /api/sessions` gets the same shape the pendant
+  sends and `cf-processor`/`finalize-session` never look at `device_serial`. ⚠️ But an L816 gets
+  NO DEVICE ROW on the web: `GET /api/devices` returns `sate_devices` rows only, and
+  `ManagedDevice.kind` is declared + branched on in `DeviceCard`/`DevicePanel` while **nothing
+  populates it** — so that branching is unreachable for Plaud and the pendant too. Pre-existing,
+  not L816-specific; an external take reaches the web as a session + recording, never as hardware.
+- `device_serial` is `l816-<MAC, separators stripped>` (the serial lands in a storage key,
+  so the colons come out in `l816Serial()`), and `session_number` is the take's own
+  timestamp from `NN_yyyyMMddHHmmss` — stable across a retry, so a re-upload dedups instead
+  of duplicating. That makes L816 the third family putting a TIMESTAMP where the recorder
+  puts a take number; `recordingName.ts` labels it `L-3:17 PM`.
+
 **The consumer ("Plaud-like") lane — `sate-notes/`**
 - A SECOND backend for the same recorder, same firmware, same image: a device joins it purely by
   being provisioned with `cfgServer` pointing at it. Full Cloudflare — Worker + D1 + R2 + Workers
@@ -679,9 +770,9 @@ setup + prebuilt flash assets: `SETUP.md` + the **GitHub Release** (`gh release 
 
 ## Docs
 
-`doc/` is the numbered project handbook (`08-plaud.md` = Plaud; **`12-hardware.md`** = the deep
-recorder hardware reference + the device↔server API contract — moved there from the repo root,
-so it now publishes to the internal docs site). `plaud-integration.md`
+`doc/` is the numbered project handbook (`08-plaud.md` = Plaud; `14-l816.md` = the L816
+handheld; **`12-hardware.md`** = the deep recorder hardware reference + the device↔server API
+contract — moved there from the repo root, so it now publishes to the internal docs site). `plaud-integration.md`
 (repo root) is the Plaud deep dive. Keep docs current when behavior changes. Deeper /
 cross-session context lives in the agent memory at
 `~/.claude/projects/-Users-hoanglong-Documents-sate-companion/memory/`.

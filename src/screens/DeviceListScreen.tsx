@@ -6,14 +6,16 @@ import { GlassBackground, Logo } from "../components/ui";
 import { AddDeviceSheet } from "../components/AddDeviceSheet";
 import { PlaudDeviceCard } from "../components/PlaudDeviceCard";
 import { PendantDeviceCard } from "../components/PendantDeviceCard";
+import { L816DeviceCard } from "../components/L816DeviceCard";
 import { ManagedDevice } from "../protocol";
 import { D } from "../theme";
 
 // The account's devices, one row each, whatever family they are. The list is fed
 // by ONE registry (useManagedDevices in App) that merges SATE recorders from the
-// server with Plaud (Keychain) and pendants (AsyncStorage) — so this screen just
-// renders rows and branches on `kind`. Tapping a row opens that device; a single
-// "Add a device" button opens the picker for all three families.
+// server with Plaud (Keychain), pendants and L816s (AsyncStorage) — so this
+// screen just renders rows and branches on `kind`. Tapping a row opens that
+// device; a single "Add a device" button opens the picker for every family this
+// build ships.
 
 export function DeviceListScreen({
   devices,
@@ -27,6 +29,7 @@ export function DeviceListScreen({
   onAddSate,
   onAddPlaud,
   onAddPendant,
+  onAddL816,
 }: {
   devices: ManagedDevice[];
   loaded: boolean;
@@ -41,6 +44,7 @@ export function DeviceListScreen({
   // Undefined on a build that does not ship the family (see src/features.ts).
   onAddPlaud?: () => void;
   onAddPendant?: () => void;
+  onAddL816?: () => void;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
 
@@ -64,6 +68,13 @@ export function DeviceListScreen({
         (() => {
           setPickerOpen(false);
           onAddPendant();
+        })
+      }
+      onPickL816={
+        onAddL816 &&
+        (() => {
+          setPickerOpen(false);
+          onAddL816();
         })
       }
     />
@@ -132,8 +143,8 @@ export function DeviceListScreen({
         <View style={s.empty}>
           <Text style={s.emptyTitle}>Connect your first device</Text>
           <Text style={s.emptySub}>
-            SATE works with a recorder, a Plaud, or a pendant. Pick one to pair — it
-            then records and uploads on its own, and this app is your window into it.
+            Pick the device you have and pair it — it then records and uploads, and
+            this app is your window into it.
           </Text>
           <Pressable
             onPress={() => setPickerOpen(true)}
@@ -228,6 +239,9 @@ function DeviceRow({
   } else if (kind === "pendant") {
     glyph = <PendantDeviceCard width={44} />;
     sub = "Paired pendant · tap to connect & stream";
+  } else if (kind === "l816") {
+    glyph = <L816DeviceCard width={44} />;
+    sub = "Paired SATE L816 · tap to record & upload";
   }
 
   return (

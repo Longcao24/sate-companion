@@ -2,17 +2,20 @@ import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import { PlaudDeviceCard } from "./PlaudDeviceCard";
 import { PendantDeviceCard } from "./PendantDeviceCard";
+import { L816DeviceCard } from "./L816DeviceCard";
 import { D } from "../theme";
 
-// The "Add a device" bottom sheet: one entry point for pairing any of the three
-// device families (SATE recorder / Plaud / Pendant). Shared by the empty state
-// and the device list so pairing always starts the same way.
+// The "Add a device" bottom sheet: one entry point for pairing any device family
+// (SATE recorder / Plaud / Pendant / SATE L816). Shared by the empty state and the
+// device list so pairing always starts the same way. Which rows appear is a
+// build question, not a UI one — see src/features.ts.
 export function AddDeviceSheet({
   visible,
   onClose,
   onPickSate,
   onPickPlaud,
   onPickPendant,
+  onPickL816,
 }: {
   visible: boolean;
   onClose: () => void;
@@ -21,6 +24,7 @@ export function AddDeviceSheet({
   // row is not rendered at all, rather than being shown and then failing.
   onPickPlaud?: () => void;
   onPickPendant?: () => void;
+  onPickL816?: () => void;
 }) {
   return (
     <Modal
@@ -80,6 +84,23 @@ export function AddDeviceSheet({
             <View style={{ flex: 1 }}>
               <Text style={s.rowTitle}>Pendant</Text>
               <Text style={s.rowSub}>Wearable · streams live audio over Bluetooth</Text>
+            </View>
+            <Feather name="chevron-right" size={20} color={D.sub} />
+          </Pressable>
+          )}
+
+          {onPickL816 && (
+          <Pressable
+            onPress={onPickL816}
+            accessibilityRole="button"
+            style={({ pressed }) => [s.row, { opacity: pressed ? 0.85 : 1 }]}
+          >
+            <View style={s.glyph}>
+              <L816DeviceCard width={40} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={s.rowTitle}>SATE L816</Text>
+              <Text style={s.rowSub}>Handheld recorder · records and sends over Bluetooth</Text>
             </View>
             <Feather name="chevron-right" size={20} color={D.sub} />
           </Pressable>

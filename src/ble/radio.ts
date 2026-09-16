@@ -11,10 +11,12 @@
 //   'autosync' — background BLE bridge (default owner)
 //   'sate-fg'  — provision / change-Wi-Fi / recorder-settings (needs the radio alone)
 //   'pendant'  — pendant connect screen
+//   'l816'     — L816 connect screen (plain ble-plx, like the pendant)
 //   'plaud'    — Plaud connect/settings screen
 //
 // THE TWO RULES THIS ENCODES (see CLAUDE.md RULE #2):
-//  1. SATE ↔ Pendant share `bleplx`. Handing off between them = stopScan() ONLY.
+//  1. SATE, the Pendant and the L816 all share `bleplx`. Handing off between them
+//     = stopScan() ONLY.
 //     Destroying and recreating the manager leaves the native iOS BLE stack broken
 //     (scans return zero devices, silently). NEVER destroy on that path.
 //  2. Plaud needs the radio to itself → and ONLY there do we destroy `bleplx`.
@@ -25,7 +27,7 @@
 // resetBinding (the user UNBIND) is never wired here. Anything else risks
 // desyncing the binding and permanently locking the device.
 
-export type RadioOwner = "autosync" | "sate-fg" | "pendant" | "plaud";
+export type RadioOwner = "autosync" | "sate-fg" | "pendant" | "l816" | "plaud";
 
 export interface RadioHooks {
   /** Stop any scan running on the shared ble-plx manager (never destroys it). */
@@ -36,6 +38,8 @@ export interface RadioHooks {
   disconnectPlaud(): void;
   /** Drop the pendant's connection/scan (does NOT destroy the shared manager). */
   disconnectPendant(): void;
+  /** Drop the L816's connection/scan (does NOT destroy the shared manager). */
+  disconnectL816(): void;
 }
 
 const noop = () => {};
@@ -44,6 +48,7 @@ let hooks: RadioHooks = {
   destroyBle: noop,
   disconnectPlaud: noop,
   disconnectPendant: noop,
+  disconnectL816: noop,
 };
 
 let active: RadioOwner | null = null;
@@ -73,14 +78,16 @@ export function acquireRadio(owner: RadioOwner): void {
   // Release what the previous owner held.
   if (prev === "plaud" && owner !== "plaud") hooks.disconnectPlaud();
   if (prev === "pendant" && owner !== "pendant") hooks.disconnectPendant();
+  if (prev === "l816" && owner !== "l816") hooks.disconnectL816();
 
   if (owner === "plaud") {
     // Plaud SDK needs the radio to itself: this is the ONLY destroy path.
     hooks.stopBleScan();
     hooks.destroyBle();
   } else {
-    // autosync / sate-fg / pendant all drive the SHARED ble-plx manager. Only one
-    // scan per manager, so clear whatever was scanning — but never destroy it.
+    // autosync / sate-fg / pendant / l816 all drive the SHARED ble-plx manager.
+    // Only one scan per manager, so clear whatever was scanning — but never
+    // destroy it.
     hooks.stopBleScan();
   }
 
