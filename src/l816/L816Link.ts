@@ -20,7 +20,7 @@ import { Buffer } from "buffer";
 import { PermissionsAndroid, Platform } from "react-native";
 import { BleManager, Device, Subscription } from "react-native-ble-plx";
 import { getSharedBleManager, hasSharedBleManager } from "../ble/bleManager";
-import { decodeAscToWavBase64 } from "../../modules/sate-asc";
+import { decodeAscToWavFile } from "../../modules/sate-asc";
 
 /**
  * The models in this family, lowercase, and the ONE list that decides what the
@@ -155,7 +155,19 @@ export interface L816File {
 export interface L816Take {
   /** The device's own file name, `NN_yyyyMMddHHmmss`. */
   name: string;
-  wavBase64: string;
+  /**
+   * The decoded WAV, ON DISK — never in the JS heap.
+   *
+   * 🛑 This used to be `wavBase64`, the whole recording as a string, and a real
+   * take killed the app with it: `OutOfMemoryError: Failed to allocate a
+   * 183468512 byte allocation ... growth limit 268435456`. Android's heap ceiling
+   * is 256 MB and the decode path held four or five live copies of audio that is
+   * already ~7.8x the ASC it came from. A path costs nothing to carry and the
+   * upload streams straight from the file.
+   */
+  wavPath: string;
+  /** `file://…` form of the same file, for APIs that want a URI. */
+  wavUri: string;
   sampleRate: number;
   bytes: number; // WAV bytes (header included)
   durationMs: number;
@@ -970,14 +982,16 @@ class NativeL816Link implements L816Link {
   async fetchTake(file: L816File, onProgress?: (p: L816Progress) => void): Promise<L816Take> {
     const asc = await this.downloadAsc(file, onProgress);
     onProgress?.({ phase: "decoding", message: "Converting the recording…" });
-    const wavBase64 = await decodeAscToWavBase64(asc.toString("base64"));
-    const bytes = Buffer.from(wavBase64, "base64").length;
+    // Decoded straight to a file: the byte count comes back with it, so nothing
+    // has to materialise the audio just to measure it.
+    const wav = await decodeAscToWavFile(asc.toString("base64"));
     return {
       name: file.name,
-      wavBase64,
-      sampleRate: 16000,
-      bytes,
-      durationMs: Math.round(((bytes - 44) / (16000 * 2)) * 1000),
+      wavPath: wav.path,
+      wavUri: wav.uri,
+      sampleRate: wav.sampleRate || 16000,
+      bytes: wav.bytes,
+      durationMs: Math.round(((wav.bytes - 44) / (16000 * 2)) * 1000),
     };
   }
 

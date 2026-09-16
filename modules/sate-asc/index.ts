@@ -19,6 +19,24 @@ interface SateAscNative {
   unavailableReason(): string | null;
   /** base64 ASC frames -> base64 16 kHz mono 16-bit WAV. */
   decodeToWavBase64(ascBase64: string): Promise<string>;
+  /** base64 ASC frames -> a WAV written to the cache, never held in the heap. */
+  decodeToWavFile(ascBase64: string): Promise<{
+    path: string;
+    uri: string;
+    bytes: number;
+    sampleRate: number;
+  }>;
+}
+
+/** A decoded take on disk. */
+export interface AscWavFile {
+  /** Absolute path, for the native module. */
+  path: string;
+  /** `file://…`, for anything that wants a URI. */
+  uri: string;
+  /** WAV bytes, header included. */
+  bytes: number;
+  sampleRate: number;
 }
 
 const native = requireOptionalNativeModule<SateAscNative>("SateAsc");
@@ -60,4 +78,25 @@ export async function decodeAscToWavBase64(ascBase64: string): Promise<string> {
     throw new Error("The L816 audio decoder is not available in this build (Android only).");
   }
   return native.decodeToWavBase64(ascBase64);
+}
+
+/**
+ * Decode a take STRAIGHT TO A FILE, and never let the audio into the JS heap.
+ *
+ * 🛑 This is what long takes must use. The base64 version above returns the whole
+ * recording as a string: Android hands this app a 256 MB heap, and a real take
+ * asked for a single 183 MB allocation inside it and died —
+ * `OutOfMemoryError: Failed to allocate a 183468512 byte allocation ...
+ * growth limit 268435456`. Between the decoder's buffer, the byte array, the
+ * header concatenation and the base64 string there were four or five live copies
+ * of audio that is itself ~7.8x the size of the ASC it came from.
+ *
+ * On disk there is one frame in memory at a time, and the upload streams from the
+ * file — so the take's length stops being a number anyone has to think about.
+ */
+export async function decodeAscToWavFile(ascBase64: string): Promise<AscWavFile> {
+  if (!native) {
+    throw new Error("The L816 audio decoder is not available in this build (Android only).");
+  }
+  return native.decodeToWavFile(ascBase64);
 }

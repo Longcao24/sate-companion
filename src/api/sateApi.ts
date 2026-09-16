@@ -27,6 +27,7 @@ import {
   TranscriptSegment,
 } from "../protocol";
 import { Buffer } from "buffer";
+import { uploadAsync, FileSystemUploadType } from "expo-file-system/legacy";
 
 // Columns the report viewer needs. Kept explicit so we don't pull big rows.
 const RECORDING_COLS =
@@ -70,7 +71,7 @@ export interface SateApi {
     patient_id: string;
     session_number: number;
     sample_rate: number;
-    wav_base64: string;
+    wav_base64?: string;
     /** Ms offsets into the recording — same seek-bar-tick pipeline as the
      * SATE hardware's physical flag button. */
     flags?: number[];
@@ -78,6 +79,11 @@ export interface SateApi {
      *  handed to SATE than it did coming off the device, and a screen that says
      *  only "Uploading…" for two minutes cannot be told apart from a stall. */
     onProgress?: (fraction: number) => void;
+    /** The WAV ON DISK, instead of `wav_base64`. Preferred for anything long:
+     *  the audio never enters the JS heap and the upload streams from the file. */
+    wav_path?: string;
+    /** Size of that file, so nothing has to read it to find out. */
+    wav_bytes?: number;
   }): Promise<void>;
   /**
    * Register a device the phone paired over Bluetooth (Plaud / Pendant / L816) so
@@ -275,11 +281,57 @@ export class HttpApi implements SateApi {
     patient_id: string;
     session_number: number;
     sample_rate: number;
-    wav_base64: string;
+    wav_base64?: string;
+    wav_path?: string;
+    wav_bytes?: number;
     flags?: number[];
     onProgress?: (fraction: number) => void;
   }) {
-    const { wav_base64, onProgress, ...meta } = args;
+    const { wav_base64, wav_path, wav_bytes, onProgress, ...meta } = args;
+
+    // A take on DISK never touches the JS heap. This is the path the L816 uses,
+    // and it is the only one whose cost does not grow with the recording.
+    if (wav_path) {
+      const slot = await this.req<{
+        session_id: string;
+        storage_path: string;
+        signed_url: string;
+      }>("/api/sessions/upload-url", {
+        method: "POST",
+        body: JSON.stringify({ device_serial: meta.device_serial }),
+      });
+
+      // BINARY_CONTENT streams the file as the request body straight from disk —
+      // no base64, no Buffer, nothing proportional to the take in memory.
+      const res = await uploadAsync(slot.signed_url, wav_path, {
+        httpMethod: "PUT",
+        uploadType: FileSystemUploadType.BINARY_CONTENT,
+        headers: { "Content-Type": "audio/wav", "x-upsert": "true" },
+      });
+      if (res.status < 200 || res.status >= 300) {
+        // The take is still on the device and still unmarked, so this is a retry,
+        // not a loss — say which half failed so the log is worth reading.
+        throw new Error(`storage upload failed: ${res.status} ${res.body?.slice(0, 200) ?? ""}`);
+      }
+      onProgress?.(1);
+
+      // Registering only AFTER the object is really in Storage is what keeps a
+      // failed upload from leaving a row pointing at nothing — the ghost that
+      // strands a recording on the device for ever.
+      await this.req("/api/sessions/register", {
+        method: "POST",
+        body: JSON.stringify({
+          session_id: slot.session_id,
+          storage_path: slot.storage_path,
+          ...meta,
+        }),
+      });
+      return;
+    }
+
+    if (!wav_base64) throw new Error("uploadSession needs either wav_path or wav_base64");
+
+    // In-memory callers (the pendant streams PCM and is always short).
     const bytes = Buffer.from(wav_base64, "base64");
     if (bytes.length <= SINGLE_SHOT_MAX) {
       await this.req("/api/sessions", {
@@ -297,24 +349,17 @@ export class HttpApi implements SateApi {
       method: "POST",
       body: JSON.stringify({ device_serial: meta.device_serial }),
     });
-
     const put = await fetch(slot.signed_url, {
       method: "PUT",
       headers: { "Content-Type": "audio/wav", "x-upsert": "true" },
       body: bytes as unknown as BodyInit,
     });
     if (!put.ok) {
-      // The take is still on the device and still unmarked, so this is a retry,
-      // not a loss — say which half failed so the log is worth reading.
       throw new Error(
         `storage upload failed: ${put.status} ${await put.text().catch(() => "")}`
       );
     }
     onProgress?.(1);
-
-    // Only now does a row exist. Registering AFTER the object is what keeps a
-    // failed upload from leaving a session pointing at nothing — the ghost row
-    // that strands a recording on the device for ever.
     await this.req("/api/sessions/register", {
       method: "POST",
       body: JSON.stringify({

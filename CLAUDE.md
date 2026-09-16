@@ -603,6 +603,20 @@ setup + prebuilt flash assets: `SETUP.md` + the **GitHub Release** (`gh release 
   matters: the `.so`s are git-ignored like the Plaud frameworks, so a clone without them
   still builds and simply never offers the device. Copy them in per
   `modules/sate-asc/README.md`. Everything else in the family is portable TypeScript.
+- 🛑 **A TAKE IS DECODED TO A FILE, NEVER TO A base64 STRING (2026-09-16).** `decodeToWavFile`
+  streams straight to the cache and returns a path; `decodeToWavBase64` is kept for short takes
+  only. The base64 version killed the app on a real recording:
+  `OutOfMemoryError: Failed to allocate a 183468512 byte allocation with 8694048 free bytes ...
+  growth limit 268435456` — Android's heap ceiling is 256 MB and that path held FOUR TO FIVE
+  live copies of the audio: the `ByteArrayOutputStream` (which doubles its buffer as it grows),
+  `toByteArray()`, the `header + pcm` array concatenation, the base64 string at 1.33x, then the
+  same string again in JS and a `Buffer` from it. And the WAV is already ~7.8x the ASC it came
+  from, so ASC that fits comfortably becomes a WAV that cannot. The upload then streams from the
+  file with `expo-file-system`'s `uploadAsync` + `BINARY_CONTENT` (a PUT whose body is read off
+  disk), so nothing proportional to the take is ever in the heap. **The cache file is deleted
+  only after the upload succeeds** — it can be hundreds of MB and nothing else collects it.
+  ⚠️ The ASC input is still passed in as base64 (~14.8 MB/h, so ~40 MB of string for a 2-hour
+  take); that is survivable today and is the next thing to move to a file if it ever is not.
 - 🛑 **Do NOT rename/move `com.actions.asc.jni.ASCDecoder`.** The binary exports
   `Java_com_actions_asc_jni_ASCDecoder_decode`, so the symbols only resolve at exactly that
   fully-qualified name — and a rename fails with `UnsatisfiedLinkError` at the first

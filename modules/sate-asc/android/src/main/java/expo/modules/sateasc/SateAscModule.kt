@@ -5,7 +5,11 @@ import com.actions.asc.jni.ASCDecoder
 import expo.modules.kotlin.exception.CodedException
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -81,10 +85,115 @@ class SateAscModule : Module() {
     // base64 ASC bytes in, base64 WAV out. Runs on a background thread (AsyncFunction)
     // because a full-length take is tens of thousands of JNI round-trips and must
     // not block the JS thread.
+    //
+    // ⚠️ KEPT FOR SHORT TAKES ONLY. It holds the whole recording in the heap four
+    // or five times over — see decodeToWavFile, which is what long takes use.
     AsyncFunction("decodeToWavBase64") { ascBase64: String ->
       ensureLoaded()
       val asc = Base64.decode(ascBase64, Base64.DEFAULT)
       decodeToWav(asc)
+    }
+
+    // Same decode, streamed to a FILE, returning its path.
+    //
+    // 🛑 THIS EXISTS BECAUSE THE BASE64 VERSION CANNOT SURVIVE A LONG TAKE.
+    // Android gave this app a 256 MB heap ceiling and the old path asked for a
+    // single 183 MB allocation inside it:
+    //
+    //     java.lang.OutOfMemoryError: Failed to allocate a 183468512 byte
+    //     allocation with 8694048 free bytes ... growth limit 268435456
+    //
+    // For P bytes of PCM it held P in a ByteArrayOutputStream (which doubles its
+    // buffer as it grows, so 2P transiently), P again from toByteArray(), P again
+    // from `header + pcm` array concatenation, and then 1.33P as a base64 STRING —
+    // before JS received a copy of that string and turned it back into bytes.
+    // Four to five live copies of a recording that is itself ~7.8x the ASC input.
+    //
+    // Written straight to disk there is one frame in memory at a time. The take
+    // length stops mattering.
+    AsyncFunction("decodeToWavFile") { ascBase64: String ->
+      ensureLoaded()
+      val asc = Base64.decode(ascBase64, Base64.DEFAULT)
+      decodeToWavFile(asc)
+    }
+  }
+
+  private fun decodeToWavFile(asc: ByteArray): Map<String, Any> {
+    if (asc.isEmpty() || asc.size % FRAME_BYTES != 0) {
+      throw AscBadInput("ASC data must be whole ${FRAME_BYTES}-byte frames (got ${asc.size})")
+    }
+    val cacheDir = appContext.cacheDirectory
+      ?: throw AscBadInput("No cache directory to decode into")
+    val dir = File(cacheDir, "l816")
+    dir.mkdirs()
+    val out = File(dir, "take-${System.currentTimeMillis()}.wav")
+
+    val decoder = ASCDecoder()
+    var pcmBytes = 0L
+    try {
+      BufferedOutputStream(FileOutputStream(out), 1 shl 16).use { sink ->
+        // A placeholder header: the two size fields are only knowable once every
+        // frame has been decoded, and they are patched in below.
+        sink.write(ByteArray(44))
+
+        val samplesPerFrame = decoder.init(ALGORITHM)
+        if (samplesPerFrame <= 0) throw AscBadInput("Could not initialise the ASC-VI codec")
+
+        val words = ShortArray(FRAME_WORDS)
+        val payload = ShortArray(PAYLOAD_WORDS)
+        val src = ByteBuffer.wrap(asc).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
+        val frames = asc.size / FRAME_BYTES
+        for (n in 0 until frames) {
+          src.get(words)
+          if (decoder.readHead(words) == 0) throw AscBadInput("Invalid ASC header at frame $n")
+          System.arraycopy(words, 1, payload, 0, PAYLOAD_WORDS)
+          val decoded = decoder.decode(payload, PAYLOAD_WORDS.toShort(), ALGORITHM)
+          if (decoded == null || decoded.isEmpty()) throw AscBadInput("Could not decode frame $n")
+          val bytes = ByteBuffer.allocate(decoded.size * 2).order(ByteOrder.LITTLE_ENDIAN)
+          bytes.asShortBuffer().put(decoded)
+          sink.write(bytes.array())
+          pcmBytes += decoded.size * 2
+        }
+      }
+    } catch (t: Throwable) {
+      out.delete()          // never leave a half-decoded take behind
+      throw t
+    } finally {
+      try { ASCDecoder.destroy() } catch (ignored: Throwable) { }
+    }
+
+    if (pcmBytes <= 0L) {
+      out.delete()
+      throw AscBadInput("Decoder produced no audio")
+    }
+    patchWavHeader(out, pcmBytes)
+    return mapOf(
+      "path" to out.absolutePath,
+      "uri" to "file://${out.absolutePath}",
+      "bytes" to (pcmBytes + 44).toDouble(),
+      "sampleRate" to SAMPLE_RATE,
+    )
+  }
+
+  /** Write the real RIFF/data sizes into the placeholder header. */
+  private fun patchWavHeader(file: File, pcmBytes: Long) {
+    RandomAccessFile(file, "rw").use { raf ->
+      val head = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
+      head.put("RIFF".toByteArray(Charsets.US_ASCII))
+      head.putInt((36 + pcmBytes).toInt())
+      head.put("WAVE".toByteArray(Charsets.US_ASCII))
+      head.put("fmt ".toByteArray(Charsets.US_ASCII))
+      head.putInt(16)
+      head.putShort(1)
+      head.putShort(1)
+      head.putInt(SAMPLE_RATE)
+      head.putInt(SAMPLE_RATE * 2)
+      head.putShort(2)
+      head.putShort(16)
+      head.put("data".toByteArray(Charsets.US_ASCII))
+      head.putInt(pcmBytes.toInt())
+      raf.seek(0)
+      raf.write(head.array())
     }
   }
 

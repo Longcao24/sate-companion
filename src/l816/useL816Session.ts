@@ -22,6 +22,7 @@ import {
   KnownL816,
 } from "./L816Store";
 import { radioOwner, setL816Held, subscribeRadio } from "../ble/radio";
+import { deleteAsync } from "expo-file-system/legacy";
 import {
   isBackgroundLinkSupported,
   notifyOnce,
@@ -290,14 +291,20 @@ export function useL816Session(
   // three slightly different argument sets is how a take ends up filed under the
   // wrong patient.
   const pushTake = useCallback(
-    async (take: { name: string; wavBase64: string; sampleRate: number; durationMs: number }) => {
+    async (take: {
+      name: string;
+      wavPath: string;
+      sampleRate: number;
+      bytes: number;
+      durationMs: number;
+    }) => {
       const id = connectedIdRef.current;
       if (!id) throw new Error("Not connected");
       // A big take goes straight into Storage in one PUT, which reports nothing
       // until it finishes. So say the SIZE rather than invent a percentage: it is
       // a fact, and it is the answer to "why is this taking so long" — a bar
       // creeping forward on a guess would only turn that question into a promise.
-      const mb = (take.wavBase64.length * 0.75) / 1e6;
+      const mb = take.bytes / 1e6;
       if (mb > 4) {
         setProgress({
           phase: "decoding",
@@ -305,14 +312,19 @@ export function useL816Session(
         });
       }
       await api.uploadSession({
+        wav_path: take.wavPath,
+        wav_bytes: take.bytes,
         device_serial: l816Serial(id, modelRef.current),
         patient_id: patientRef.current || "Unassigned",
         // The take's own timestamp, not the upload time: it is stable across a
         // retry, so re-uploading the same take dedups instead of duplicating.
         session_number: takeTimestamp(take.name),
         sample_rate: take.sampleRate,
-        wav_base64: take.wavBase64,
       });
+      // The decoded WAV lives in the cache only until it is safely in SATE. It
+      // can be hundreds of MB; leaving it there fills the phone one take at a
+      // time, and nothing else knows to collect it.
+      deleteAsync(take.wavPath, { idempotent: true }).catch(() => {});
       // Remember it here, in the ONE function every upload path goes through —
       // the manual button, the live device event and the catch-up sweep. Marking
       // it in each caller instead is how one path quietly forgets and re-uploads
