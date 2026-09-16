@@ -759,6 +759,31 @@ setup + prebuilt flash assets: `SETUP.md` + the **GitHub Release** (`gh release 
   `FixedLengthStream`. `cloudflare/src/functions/deviceApi.ts` had this bug too (every chunked
   upload's final slice would have failed there); fixed 2026-09-01.
 
+**Auth**
+- 🛑 **`supabase.auth.signOut()` DEFAULTS TO `scope: 'global'` — it revokes the user's refresh
+  tokens on EVERY device (2026-09-16).** The web app called it bare in `AuthProvider.signOut`,
+  so logging out of the browser silently signed the user out of the SATE apps on their phone.
+  From the phone it looked like a random "logged out after a while": nothing there had done
+  anything wrong, its stored refresh token simply stopped existing, and the next refresh came
+  back **`refresh_token_not_found`** — note the error, it means the row is GONE (session
+  deleted server-side), not "already used" (rotation/reuse), so it points AWAY from the
+  client's token handling and at whatever deleted the session. The normal logout is now
+  `signOut({ scope: 'local' })` = log out of THIS browser. The one place global is right is a
+  password change (`ResetPasswordPage`), which should end other sessions; that one is
+  deliberately left bare.
+- **The phone never revokes anything server-side.** Mobile `signOut()` only clears
+  AsyncStorage, so it cannot cascade to the web or the other app. Keep it that way.
+- **An unasked-for sign-out must say why.** `Settings.signedOutReason` is set when a refresh
+  fails with a dead token and rendered on the login screen (cleared on the next successful
+  sign-in). A session can be ended by something the phone never sees; landing on a login form
+  with no explanation is what makes a normal revocation read as the app losing sessions at
+  random.
+- **Refresh-token rotation is why the refresh path uses synchronous refs, not state.** Supabase
+  kills a refresh token the moment it is used; re-spending one is how the app used to sign
+  itself out seconds after signing in. `liveRefreshToken`/`tokenRef`/`lastRefreshOk` are refs
+  read inside `doRefresh`, with a shared in-flight promise so concurrent 401s make ONE call.
+  Don't reintroduce reads of `settings.refreshToken` there — it is a render behind.
+
 **Mobile UI**
 - 🛑 **Android's "Bold text" accessibility setting silently CLIPS THE LAST GLYPH of any
   short label (2026-09-16).** `settings get secure font_weight_adjustment` returns `300` on

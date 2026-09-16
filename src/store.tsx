@@ -16,6 +16,16 @@ export interface Settings {
   tokenExpiresAt: number | null;
   user: User | null;
   autoSync: boolean;
+  /**
+   * Why the last sign-out happened, when it was NOT the user tapping Sign out.
+   *
+   * A session can be ended by something the phone never sees — most often a
+   * sign-out in the web app, which used to revoke every device (see the web's
+   * AuthProvider). The phone then just appeared on the login screen with no
+   * explanation, which reads as the app losing your session at random. Shown
+   * once on the login screen and cleared the moment someone signs in.
+   */
+  signedOutReason: string | null;
 }
 
 const DEFAULTS: Settings = {
@@ -29,13 +39,16 @@ const DEFAULTS: Settings = {
   tokenExpiresAt: null,
   user: null,
   autoSync: true,
+  signedOutReason: null,
 };
 
 interface Store {
   settings: Settings;
   ready: boolean;
   update: (patch: Partial<Settings>) => void;
-  signOut: () => void;
+  /** `reason` is for a sign-out the user did not ask for. Omit it for the
+   *  Sign out button — there is nothing to explain about a deliberate one. */
+  signOut: (reason?: string) => void;
 }
 
 const Ctx = createContext<Store | null>(null);
@@ -65,8 +78,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     });
   };
 
-  const signOut = () =>
-    update({ token: null, refreshToken: null, tokenExpiresAt: null, user: null });
+  const signOut = (reason?: string) =>
+    update({
+      token: null,
+      refreshToken: null,
+      tokenExpiresAt: null,
+      user: null,
+      signedOutReason: reason ?? null,
+    });
 
   return (
     <Ctx.Provider value={{ settings, ready, update, signOut }}>

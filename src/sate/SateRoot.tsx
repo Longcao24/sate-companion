@@ -97,7 +97,13 @@ export function SateRoot() {
           `[auth] refresh failed: ${(e as Error).message} — ` +
             (authInvalid ? "signing out (refresh token is dead)" : "keeping the session")
         );
-        if (authInvalid) storeRef.current.signOut();
+        // Say WHY on the login screen. A session can be ended by something the
+        // phone never sees, and landing on a login form with no explanation
+        // reads as the app losing your session at random.
+        if (authInvalid)
+          storeRef.current.signOut(
+            "You were signed out because this session was ended somewhere else — signing out of the SATE web app, or changing your password, ends it on every device. Sign in again to carry on."
+          );
         return null;
       } finally {
         refreshing.current = null;

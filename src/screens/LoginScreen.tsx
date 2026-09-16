@@ -20,7 +20,7 @@ import { D } from "../theme";
 type Method = "password" | "quick";
 
 export function LoginScreen() {
-  const { update } = useStore();
+  const { settings, update } = useStore();
   const [method, setMethod] = useState<Method>("password");
 
   // Starts EMPTY. It used to be pre-filled with a fake clinician's address, which
@@ -51,6 +51,8 @@ export function LoginScreen() {
         refreshToken,
         tokenExpiresAt: expiresAt,
         user,
+        // Whatever ended the last session, it is answered now.
+        signedOutReason: null,
       });
     } catch (e: any) {
       setError(e?.message ?? "Sign-in failed");
@@ -76,6 +78,8 @@ export function LoginScreen() {
         refreshToken,
         tokenExpiresAt: expiresAt,
         user,
+        // Whatever ended the last session, it is answered now.
+        signedOutReason: null,
       });
     } catch (e: any) {
       setError(e?.message ?? "Sign-in failed");
@@ -101,6 +105,15 @@ export function LoginScreen() {
         contentContainerStyle={s.content}
         keyboardShouldPersistTaps="handled"
       >
+        {/* Why the app is asking again. Without this, a session ended somewhere
+            else — a web sign-out, a password change — lands the user on a login
+            form with no explanation, which reads as the app losing sessions at
+            random. */}
+        {!!settings.signedOutReason && (
+          <View style={s.notice}>
+            <Text style={s.noticeTxt}>{settings.signedOutReason}</Text>
+          </View>
+        )}
         {/* One login screen, two apps. The wording has to match what the user
             is signing in to: SATE is for reading reports, Companion is for
             setting hardware up, and telling a SATE user their "recorders are
@@ -230,6 +243,13 @@ const s = StyleSheet.create({
   brandRow: { flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 6 },
   logo: { fontSize: 28, fontWeight: "800", color: D.ink },
   error: { color: D.red, fontSize: 13, marginBottom: 4 },
+  notice: {
+    backgroundColor: D.amberBg,
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 16,
+  },
+  noticeTxt: { color: D.amber, fontSize: 13, lineHeight: 19 },
   tabs: {
     flexDirection: "row",
     backgroundColor: D.tile,
