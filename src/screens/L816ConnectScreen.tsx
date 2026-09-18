@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Modal,
   Alert,
   FlatList,
   Pressable,
@@ -10,6 +11,7 @@ import {
   View,
 } from "react-native";
 import { SateApi } from "../api/sateApi";
+import { Feather } from "@expo/vector-icons";
 import { Button, Card, GlassBackground, Muted, ProgressBar, Title } from "../components/ui";
 import { Patient } from "../protocol";
 import {
@@ -190,6 +192,7 @@ export function L816ConnectScreen({
   // has stay where they are. Say both, because "unpair" on a device that holds
   // the only copy of a session reads like it might throw them away.
   const confirmUnpair = useCallback(() => {
+    setMenu(false);
     Alert.alert(
       `Unpair this ${connectedName}?`,
       "SATE will forget this recorder and stop connecting to it. Nothing is " +
@@ -257,36 +260,48 @@ export function L816ConnectScreen({
   // "tap the right row" — but it is now behind a question a stuck user would
   // actually ask, and only after the automatic path has had time to work.
   const [showDiag, setShowDiag] = useState(false);
+  const [menu, setMenu] = useState(false);
   const stuck = scanningNow && waited >= 10 && foundList.length === 0;
 
   return (
     <View style={{ flex: 1 }}>
       <GlassBackground />
       <ScrollView contentContainerStyle={[s.container, { paddingBottom: padBottom }]}>
+        {/* Back on the LEFT, gear in the RIGHT CORNER, name on its own line —
+            the same shape as the device page, so the two screens do not teach
+            two different places to look. It used to be "title … gear … Close",
+            where the gear floated in the middle of the header (the Close label
+            carried a wide minWidth to survive Android's Bold-text clipping, and
+            the surplus was empty box) and read as a control belonging to the
+            title rather than to the screen. */}
         <View style={s.header}>
-          {/* The title is long enough to push "Close" off the right edge, which
-              rendered as "Clos". It shrinks; the exit does not. */}
-          {/* The CONNECTED unit's name, not the family's. The header said
-              "SATE L816" over a card that said "SATE L815", which is the app
-              disagreeing with itself about what is in the user's hand — and
-              exactly what L816_DISPLAY_NAME exists to prevent. Short on purpose
-              too: "Connect with …" ran into the Close button at the system font
-              sizes people actually use. */}
-          <View style={s.headerTitle}>
-            <Title>{connected ? connectedName : "SATE L816 / L815"}</Title>
-          </View>
-          {/* flexShrink on the PRESSABLE, not on its Text: the Pressable is the
-              flex item, and with the default flexShrink:1 it squeezed its own
-              label down to "Clos" at large system font sizes. */}
-          <Pressable
-            onPress={onClose}
-            hitSlop={12}
-            accessibilityRole="button"
-            style={s.closeBtn}
-          >
-            <Text style={s.close}>Close</Text>
+          <Pressable onPress={onClose} hitSlop={12} accessibilityRole="button">
+            {/* minWidth so Bold text cannot clip the last glyph. */}
+            <Text style={s.back}>‹ Back</Text>
           </Pressable>
+          {/* 🛑 Disconnect and Unpair live BEHIND this, not loose at the foot of
+              the page. Both end the background link — the thing that makes a
+              take recorded with the phone in a pocket reach SATE at all — and
+              they sat one stray tap below a "Done" the user is aiming for. */}
+          {connected && (
+            <Pressable
+              onPress={() => setMenu(true)}
+              hitSlop={12}
+              disabled={busy}
+              accessibilityRole="button"
+              accessibilityLabel="Recorder settings"
+              style={({ pressed }) => [s.gear, (pressed || busy) && { opacity: 0.45 }]}
+            >
+              <Feather name="settings" size={19} color={D.sub} />
+            </Pressable>
+          )}
         </View>
+
+        {/* The CONNECTED unit's name, not the family's. The header said
+            "SATE L816" over a card that said "SATE L815", which is the app
+            disagreeing with itself about what is in the user's hand — and
+            exactly what L816_DISPLAY_NAME exists to prevent. */}
+        <Title>{connected ? connectedName : "SATE L816 / L815"}</Title>
 
         {!connected && state !== "connecting" && scanPhase === "init" && (
           <Muted>Preparing Bluetooth…</Muted>
@@ -529,28 +544,10 @@ export function L816ConnectScreen({
             {/* Two different exits, and conflating them is how a user loses the
                 background link by accident. "Done" leaves the screen with the
                 recorder still connected; disconnecting is a deliberate act. */}
+            {/* "Done" leaves the screen with the recorder still CONNECTED —
+                that is the whole point of the background link. Ending it is a
+                deliberate act and lives behind the gear. */}
             <Button title="Done" onPress={onClose} disabled={busy} />
-            <Pressable
-              onPress={() => {
-                session.disconnect();
-                onClose();
-              }}
-              disabled={busy}
-              hitSlop={8}
-              accessibilityRole="button"
-            >
-              <Text style={[s.disconnect, busy && { opacity: 0.4 }]}>
-                Disconnect — keep it paired
-              </Text>
-            </Pressable>
-            <Pressable
-              onPress={confirmUnpair}
-              disabled={busy}
-              hitSlop={8}
-              accessibilityRole="button"
-            >
-              <Text style={[s.unpair, busy && { opacity: 0.4 }]}>Unpair this {connectedName}</Text>
-            </Pressable>
           </>
         )}
 
@@ -565,6 +562,55 @@ export function L816ConnectScreen({
           </Card>
         )}
       </ScrollView>
+
+      <Modal
+        visible={menu}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setMenu(false)}
+        statusBarTranslucent
+      >
+        <Pressable style={s.sheetBack} onPress={() => setMenu(false)}>
+          <Pressable style={[s.sheet, { marginBottom: padBottom }]} onPress={() => {}}>
+            <Text style={s.sheetTitle} numberOfLines={1}>
+              {connectedName}
+            </Text>
+            <Pressable
+              onPress={() => {
+                setMenu(false);
+                session.disconnect();
+                onClose();
+              }}
+              accessibilityRole="button"
+              style={({ pressed }) => [s.sheetRow, pressed && { opacity: 0.6 }]}
+            >
+              <Feather name="bluetooth" size={16} color={D.sub} />
+              <Text style={s.sheetRowTxt} numberOfLines={1}>
+                Disconnect — keep it paired
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={confirmUnpair}
+              accessibilityRole="button"
+              style={({ pressed }) => [s.sheetRow, pressed && { opacity: 0.6 }]}
+            >
+              <Feather name="trash-2" size={16} color={D.red} />
+              <Text style={[s.sheetRowTxt, { color: D.red }]} numberOfLines={1}>
+                Unpair this {connectedName}
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={() => setMenu(false)}
+              accessibilityRole="button"
+              style={({ pressed }) => [s.sheetRow, pressed && { opacity: 0.6 }]}
+            >
+              <Text style={[s.sheetRowTxt, { color: D.sub }]} numberOfLines={1}>
+                Cancel
+              </Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -576,9 +622,39 @@ const s = StyleSheet.create({
   // and the last item overflows the row by exactly the gap — which rendered the
   // Close button as "Clos". The title wrapper's flex:1 already keeps the two
   // apart; the sibling screens have no gap either.
-  header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  headerTitle: { flex: 1, flexShrink: 1, paddingRight: 12 },
-  closeBtn: { flexShrink: 0, flexGrow: 0, alignItems: "flex-end" },
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: -4,
+  },
+  back: { color: D.sky, fontSize: 15, fontWeight: "700", minWidth: 72 },
+  gear: { width: 40, height: 44, alignItems: "flex-end", justifyContent: "center" },
+  sheetBack: {
+    flex: 1,
+    backgroundColor: "rgba(9, 24, 23, 0.4)",
+    justifyContent: "flex-end",
+    padding: 16,
+  },
+  sheet: {
+    backgroundColor: D.panel,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: D.line,
+    padding: 8,
+  },
+  sheetTitle: { color: D.faint, fontSize: 13, paddingHorizontal: 12, paddingTop: 8, paddingBottom: 10 },
+  sheetRow: {
+    minHeight: 50,
+    borderRadius: 15,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 9,
+  },
+  // minWidth, not a hugging box: Android's Bold-text setting draws the font
+  // heavier than RN measured and clips the last glyph.
+  sheetRowTxt: { color: D.ink, fontSize: 15, fontWeight: "700", minWidth: 200, textAlign: "center" },
   // 🛑 `minWidth` on the TEXT, and it is load-bearing. This label rendered as
   // "Clos" and no amount of flex fixing changed it, because the box was never
   // the problem — it was measured at 188px around a word that needs ~95.
@@ -595,7 +671,6 @@ const s = StyleSheet.create({
   // Giving the Text a minimum width wider than the word can ever need, and
   // right-aligning inside it, is a fix that does not depend on the measurement
   // being right.
-  close: { color: D.sub, fontSize: 15, minWidth: 120, textAlign: "right" },
   sectionTitle: { color: D.ink, fontSize: 16, fontWeight: "600", marginBottom: 6 },
   row: {
     flexDirection: "row",

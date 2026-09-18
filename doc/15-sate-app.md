@@ -255,3 +255,13 @@ itself. `L816ConnectScreen` only skips connecting when it is already on the
 recorder it was ASKED for — `if (session.connectedId) return` meant tapping the
 L816 opened a screen titled L815, listing the L815's files, with no connect even
 attempted.
+
+**The recorder screen's header matches the device page**: `‹ Back` on the left, the
+gear in the right corner, the unit's name on its own line below. It used to be
+"title … gear … Close", where the gear floated in the MIDDLE of the header — the
+Close label carried a wide `minWidth` so Android's Bold-text setting could not clip
+it to "Clos", and the surplus was empty box — so the gear read as a control
+belonging to the title rather than to the screen. Disconnect and Unpair live behind
+that gear now, not loose at the foot of the page where they sat one stray tap below
+the "Done" a user is aiming for. Both end the background link, which is the thing
+that makes a take recorded with the phone in a pocket reach SATE at all.
