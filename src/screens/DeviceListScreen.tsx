@@ -10,6 +10,7 @@ import { PendantDeviceCard } from "../components/PendantDeviceCard";
 import { L816DeviceCard } from "../components/L816DeviceCard";
 import { ManagedDevice } from "../protocol";
 import { APP as D } from "../theme";
+import { useBottomInset } from "../ui/insets";
 
 // The account's devices, one row each, whatever family they are. The list is fed
 // by ONE registry (useManagedDevices in App) that merges SATE recorders from the
@@ -47,6 +48,8 @@ export function DeviceListScreen({
   onAddPendant?: () => void;
   onAddL816?: () => void;
 }) {
+  // Clears the system navigation bar — this build is edge-to-edge.
+  const padBottom = useBottomInset(48);
   const [pickerOpen, setPickerOpen] = useState(false);
 
   const picker = (
@@ -167,7 +170,7 @@ export function DeviceListScreen({
     <View style={s.flex}>
       <GlassBackground />
       <StatusBar style={IS_SATE_APP ? "dark" : "light"} />
-      <ScrollView style={s.scroll} contentContainerStyle={s.content}>
+      <ScrollView style={s.scroll} contentContainerStyle={[s.content, { paddingBottom: padBottom }]}>
         <View style={s.headerBlock}>
           <View style={{ flex: 1 }}>
             <View style={s.brandRow}>

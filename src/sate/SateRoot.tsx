@@ -12,13 +12,14 @@ import { useL816Session } from "../l816/useL816Session";
 import { L816ConnectScreen } from "../screens/L816ConnectScreen";
 import { L816_ENABLED } from "../features";
 import { KnownPendant, loadKnownPendants } from "../pendant/PendantStore";
-import { Recording } from "../protocol";
+import { ManagedDevice, Recording } from "../protocol";
 import { useStore } from "../store";
 import { SateHomeScreen } from "./SateHomeScreen";
 import { SateReportScreen } from "./SateReportScreen";
 import { SateDashboardScreen } from "./SateDashboardScreen";
 import { SateNavBar, SateTab } from "./SateNavBar";
 import { SateSettingsScreen } from "./SateSettingsScreen";
+import { SateDeviceScreen } from "./SateDeviceScreen";
 import { FONT, R, S } from "../theme";
 import {
   useFonts,
@@ -57,6 +58,10 @@ type Screen =
   | { name: "tab"; tab: SateTab }
   | { name: "report"; recording: Recording }
   | { name: "devices" }
+  // `back` is carried because this page is reached from BOTH the dashboard
+  // and the device list, and a Back that always lands on one of them takes
+  // half the users somewhere they were not.
+  | { name: "device"; device: ManagedDevice; back: Screen }
   | { name: "l816"; targetId?: string };
 
 export function SateRoot() {
@@ -188,9 +193,14 @@ export function SateRoot() {
       }
     : null;
 
-  const openL816 = (d: { kind?: string | null; serial: string }) => {
-    if (d.kind === "l816" && L816_ENABLED) setScreen({ name: "l816", targetId: d.serial });
-  };
+  // "View device" opens the DEVICE PAGE, for every family.
+  //
+  // This used to be `openL816`, which returns unless the row is an L816 — so the
+  // dashboard card and the device row drew "View device →" on a SATE recorder, a
+  // pendant and a Plaud and did nothing when tapped. The L81x handheld still gets
+  // its own screen, but from a button on the page rather than instead of it.
+  const openDevice = (d: ManagedDevice, back: Screen) =>
+    setScreen({ name: "device", device: d, back });
 
   // Manrope is the redesign's voice, and the app is unreadable in the wrong one
   // for the frame or two before it lands — so hold the splash rather than flash
@@ -226,7 +236,7 @@ export function SateRoot() {
           onOpenReports={() => setScreen({ name: "tab", tab: "reports" })}
           onOpenReport={(recording) => setScreen({ name: "report", recording })}
           onAddDevice={() => setScreen({ name: "devices" })}
-          onOpenDevice={openL816}
+          onOpenDevice={(d) => openDevice(d, { name: "tab", tab: "dashboard" })}
           liveL816={liveL816}
           l816={l816Session}
         />
@@ -268,7 +278,7 @@ export function SateRoot() {
             // Tapping a paired L816 opens its screen. This used to be a
             // no-op, so the one row on the page did nothing when tapped —
             // which reads as a broken app, not as "there is nothing here".
-            onOpenDevice={openL816}
+            onOpenDevice={(d) => openDevice(d, { name: "devices" })}
             onOpenSettings={() => setScreen({ name: "tab", tab: "settings" })}
             onOpenPreview={() => setScreen({ name: "tab", tab: "dashboard" })}
             // Pairing a SATE L816 is something THIS app can do — it holds the
@@ -300,6 +310,22 @@ export function SateRoot() {
             </Pressable>
           </View>
         </View>
+      )}
+      {screen.name === "device" && (
+        <SateDeviceScreen
+          api={api}
+          device={screen.device}
+          onClose={() => setScreen(screen.back)}
+          onOpenReport={(recording) => setScreen({ name: "report", recording })}
+          // Only a handheld this build can actually drive gets the action — the
+          // decoder is Android-only, so on any other build the button would open
+          // a screen that can download a take and never turn it into audio.
+          onOpenRecorder={
+            screen.device.kind === "l816" && L816_ENABLED
+              ? () => setScreen({ name: "l816", targetId: screen.device.serial })
+              : undefined
+          }
+        />
       )}
       {screen.name === "l816" && (
         <L816ConnectScreen

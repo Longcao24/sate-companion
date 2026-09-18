@@ -11,6 +11,7 @@ import {
   PendantSeenDevice,
 } from "../pendant/PendantLink";
 import { D } from "../theme";
+import { useBottomInset } from "../ui/insets";
 
 // Connect-with-Pendant: scan the SATE Pendant over BLE → connect → stream its
 // live PCM audio → on stop, wrap it in a WAV and push it through the SAME upload
@@ -41,6 +42,8 @@ export function PendantConnectScreen({
    *  Falls back to a scan if the direct connect fails (out of range / off). */
   targetId?: string;
 }) {
+  // Clears the system navigation bar — this build is edge-to-edge.
+  const padBottom = useBottomInset(20);
   const [phase, setPhase] = useState<Phase>("init");
   const [error, setError] = useState<string | null>(null);
   const [found, setFound] = useState<Record<string, PendantFoundDevice>>({});
@@ -246,7 +249,7 @@ export function PendantConnectScreen({
   return (
     <View style={{ flex: 1 }}>
       <GlassBackground />
-      <ScrollView contentContainerStyle={s.container}>
+      <ScrollView contentContainerStyle={[s.container, { paddingBottom: padBottom }]}>
         <View style={s.header}>
           <Title>Connect with Pendant</Title>
           <Pressable onPress={onClose} hitSlop={8} accessibilityRole="button">

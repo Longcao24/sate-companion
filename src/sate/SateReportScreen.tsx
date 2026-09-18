@@ -17,6 +17,7 @@ import { Recording, TranscriptSegment } from "../protocol";
 import { checkName, renameSpeaker, SpeakerRow, speakersOf } from "./speakers";
 import { recordingLabel } from "./label";
 import { FONT, R, S } from "../theme";
+import { useBottomInset } from "../ui/insets";
 
 // One report, read from the server, laid out as the web app lays it out:
 // Overview / Transcript / Analysis / Language / Issues.
@@ -98,6 +99,8 @@ export function SateReportScreen({
   recording: Recording;
   onClose: () => void;
 }) {
+  // Clears the system navigation bar — this build is edge-to-edge.
+  const padBottom = useBottomInset(56);
   // The list row carries only the light columns, so the full row — transcript
   // included — is fetched here.
   const [rec, setRec] = useState<Recording | null>(null);
@@ -255,7 +258,7 @@ export function SateReportScreen({
           <ActivityIndicator color={S.teal} />
         </View>
       ) : (
-        <ScrollView style={s.scroll} contentContainerStyle={s.content}>
+        <ScrollView style={s.scroll} contentContainerStyle={[s.content, { paddingBottom: padBottom }]}>
           {notice && (
             <Pressable onPress={() => setNotice(null)} style={s.notice}>
               <Text style={s.noticeTxt}>{notice}</Text>

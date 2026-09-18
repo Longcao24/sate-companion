@@ -3,12 +3,16 @@ import { Pressable, StyleSheet, Switch, Text, View } from "react-native";
 import { Button, Card, GlassBackground, Muted, Title } from "../components/ui";
 import { useStore } from "../store";
 import { APP as D } from "../theme";
+import { useBottomInset } from "../ui/insets";
 
 export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const { settings, update, signOut } = useStore();
+  // Sign out is the last child of a plain View, so on an edge-to-edge phone the
+  // system nav bar sits on top of it.
+  const padBottom = useBottomInset(16);
 
   return (
-    <View style={s.wrap}>
+    <View style={[s.wrap, { paddingBottom: padBottom }]}>
       <GlassBackground />
       <View style={s.header}>
         <Title>Settings</Title>

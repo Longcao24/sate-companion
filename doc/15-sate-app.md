@@ -161,8 +161,24 @@ inventing a fourth to fill the bar would put something in the user's way that le
 There is deliberately **no centre record button** — SATE reads what the hardware produced and
 cannot record anything, so that button would be a promise the app cannot keep.
 
-The report, the device list and the L816 screen are **not tabs**: they are places you go from
-a tab and come back from, and putting them in the bar would make "back" ambiguous. The device
+The report, the device list, the device page and the L816 screen are **not tabs**: they are
+places you go from a tab and come back from, and putting them in the bar would make "back"
+ambiguous. The device page carries the screen it was opened from, because it is reached from
+BOTH the dashboard card and the device row and a Back that always lands on one of them takes
+half the users somewhere they were not.
+
+🛑 **"View device" was a dead affordance until 2026-09-18.** Both the dashboard card and the
+device row drew "View device →" and a chevron on every device, and the handler behind them was
+`openL816`, whose first line is `if (d.kind === "l816")`. So the Wi-Fi recorder, the pendant and
+Plaud — four of the five rows on this account — offered a tap that did nothing, which reads as a
+broken app rather than as a screen that does not exist. `src/sate/SateDeviceScreen.tsx` is that
+screen, and it is deliberately **read-only**: name, serial, status, battery, last seen, pending,
+firmware, and the recordings that came from this unit. SATE reads what the hardware produced;
+setting hardware up is Companion's job, and the page says so rather than leaving a gap. Its one
+action is opening the L81x recorder screen, because driving that handheld genuinely is this
+app's job. A recording is matched to a device by the ALPHANUMERIC CORE of the serial — an L81x
+pairs by MAC (`19:40:9D:91:AB:AF`) and uploads as `l815-19409D91ABAF`, so comparing the strings
+directly finds nothing. The device
 list is Companion's screen reused — it has no "back" of its own, because it *is* that app's
 home, so SATE floats a real back pill over it rather than wiring "return to reports" onto a
 button labelled Settings.

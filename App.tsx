@@ -27,6 +27,7 @@ import { RecorderSettingsScreen } from "./src/screens/RecorderSettingsScreen";
 import { ReportScreen } from "./src/screens/ReportScreen";
 import { SettingsScreen } from "./src/screens/SettingsScreen";
 import { StoreProvider, useStore } from "./src/store";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 import { IS_SATE_APP } from "./src/sate/variant";
 import { SateRoot } from "./src/sate/SateRoot";
 import { useAutoSync } from "./src/sync/AutoSync";
@@ -393,7 +394,18 @@ export default function App() {
   // it only for the separate `com.auspexmedix.sate` package), so this branch is
   // fixed for the life of the process and SATE Companion renders exactly what it
   // always did — same component, same hooks, nothing behind a runtime toggle.
+  // 🛑 SafeAreaProvider wraps BOTH apps because this build is EDGE-TO-EDGE
+  // (`edgeToEdgeEnabled=true` in android/gradle.properties, forced by Android 15
+  // for SDK 35 targets). The system status and navigation bars are drawn OVER the
+  // app, not around it — so anything at the bottom of a screen sits underneath the
+  // nav bar. On a gesture-nav phone that steals a few millimetres and looks like
+  // padding; on a three-button phone it swallowed the "Unpair this SATE L816"
+  // button entirely, which is not merely ugly — it made a destructive-but-necessary
+  // action unreachable. The screens' `paddingTop: 64` was the hand-rolled TOP
+  // inset; there was never a bottom one.
   return (
-    <StoreProvider>{IS_SATE_APP ? <SateRoot /> : <Root />}</StoreProvider>
+    <SafeAreaProvider>
+      <StoreProvider>{IS_SATE_APP ? <SateRoot /> : <Root />}</StoreProvider>
+    </SafeAreaProvider>
   );
 }

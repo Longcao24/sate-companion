@@ -1,6 +1,7 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { Feather } from "@expo/vector-icons";
 import { FONT, R, S, TAP } from "../theme";
+import { useBottomInset } from "../ui/insets";
 
 // The SATE app's bottom navigation.
 //
@@ -38,8 +39,12 @@ export function SateNavBar({
   active: SateTab;
   onSelect: (t: SateTab) => void;
 }) {
+  // The bar is the bottom-most thing in the app, so it is the one that has to
+  // clear the system navigation. 8dp of its own on top of whatever the phone
+  // reserves: ~24dp for a gesture pill, ~48dp for three buttons.
+  const padBottom = useBottomInset(8);
   return (
-    <View style={s.bar}>
+    <View style={[s.bar, { paddingBottom: padBottom }]}>
       {ITEMS.map((it) => {
         const on = it.id === active;
         return (
@@ -69,8 +74,7 @@ const s = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: "#E4EAEA",
     paddingTop: 6,
-    // Clears the gesture bar without a safe-area dependency.
-    paddingBottom: 22,
+    // paddingBottom comes from the safe-area inset at render — see the component.
     paddingHorizontal: 8,
   },
   item: {

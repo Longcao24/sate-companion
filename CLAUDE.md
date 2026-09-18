@@ -888,6 +888,19 @@ setup + prebuilt flash assets: `SETUP.md` + the **GitHub Release** (`gh release 
   Don't reintroduce reads of `settings.refreshToken` there — it is a render behind.
 
 **Mobile UI**
+- 🛑 **THE APP IS EDGE-TO-EDGE, AND NOTHING HAD A BOTTOM INSET (2026-09-18).**
+  `android/gradle.properties` carries `edgeToEdgeEnabled=true` (Android 15 forces it for SDK 35
+  targets), so the system status and navigation bars are painted **over** the app rather than
+  around it — and `react-native-safe-area-context` was not even a dependency. Every screen's
+  `paddingTop: 64` was a hand-rolled TOP inset; there was never a bottom one. On a gesture-nav
+  phone that costs a few millimetres and reads as tight padding. On a **three-button** phone it
+  swallowed the last control on the screen: the L816 screen's **"Unpair this SATE L816" was
+  completely unreachable**, and unpairing is exactly what you need when a recorder is lost,
+  broken or being handed on. `src/ui/insets.ts` `useBottomInset(extra)` is the one helper —
+  `SafeAreaProvider` wraps both apps in `App.tsx`. Anything whose LAST child is a button or a
+  link must use it; a screen that ends in a scrolling list only looks cramped.
+  ⚠️ Adding it needed `expo prebuild` + a full native rebuild, so it is a native dependency, not
+  a style fix. Test on a three-button phone, not only the gesture-nav Pixel.
 - 🛑 **Android's "Bold text" accessibility setting silently CLIPS THE LAST GLYPH of any
   short label (2026-09-16).** `settings get secure font_weight_adjustment` returns `300` on
   the test Pixel. Android then draws every font that much heavier than the metrics React

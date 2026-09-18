@@ -7,6 +7,7 @@ import { Patient } from "../protocol";
 import { PlaudFile, PlaudFoundDevice, PlaudLink, plaudUserId } from "../plaud/PlaudLink";
 import { useStore } from "../store";
 import { D } from "../theme";
+import { useBottomInset } from "../ui/insets";
 
 // Connect-with-Plaud: mint a token → scan/connect a Plaud device over BLE →
 // list its recordings → pull each as WAV and push it through the SAME upload
@@ -36,6 +37,8 @@ export function PlaudConnectScreen({
   onClose: () => void;
   onOpenSettings: (sn: string, deviceName: string) => void;
 }) {
+  // Clears the system navigation bar — this build is edge-to-edge.
+  const padBottom = useBottomInset(20);
   const { settings } = useStore();
   const userId = settings.user?.id ?? "";
 
@@ -288,7 +291,7 @@ export function PlaudConnectScreen({
   return (
     <View style={{ flex: 1 }}>
       <GlassBackground />
-      <ScrollView contentContainerStyle={s.container}>
+      <ScrollView contentContainerStyle={[s.container, { paddingBottom: padBottom }]}>
         <View style={s.header}>
           <Title>Connect with Plaud</Title>
           <Pressable onPress={onClose} hitSlop={8} accessibilityRole="button">

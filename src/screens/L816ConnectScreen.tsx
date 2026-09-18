@@ -22,6 +22,7 @@ import {
 import { KnownL816 } from "../l816/L816Store";
 import { L816Session, fmtDur, fmtTakeName } from "../l816/useL816Session";
 import { APP as D } from "../theme";
+import { useBottomInset } from "../ui/insets";
 
 // Connect-with-SATE-L816: find the recorder over BLE -> connect -> drive its record
 // button from the phone -> pull the finished take off the device -> decode the
@@ -83,6 +84,8 @@ export function L816ConnectScreen({
    *  back to a scan if the direct connect fails (out of range / off). */
   targetId?: string;
 }) {
+  // Clears the system navigation bar — this build is edge-to-edge.
+  const padBottom = useBottomInset(20);
   const [scanPhase, setScanPhase] = useState<ScanPhase>("init");
   const [scanError, setScanError] = useState<string | null>(null);
   const [patients, setPatients] = useState<Patient[]>([]);
@@ -252,7 +255,7 @@ export function L816ConnectScreen({
   return (
     <View style={{ flex: 1 }}>
       <GlassBackground />
-      <ScrollView contentContainerStyle={s.container}>
+      <ScrollView contentContainerStyle={[s.container, { paddingBottom: padBottom }]}>
         <View style={s.header}>
           {/* The title is long enough to push "Close" off the right edge, which
               rendered as "Clos". It shrinks; the exit does not. */}
