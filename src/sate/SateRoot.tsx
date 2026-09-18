@@ -6,13 +6,13 @@ import { LoginScreen } from "../screens/LoginScreen";
 import { DeviceListScreen } from "../screens/DeviceListScreen";
 import { useManagedDevices } from "../devices/useManagedDevices";
 import { makePlaudLink } from "../plaud/PlaudLink";
-import { KnownL816, loadKnownL816s, rememberL816 } from "../l816/L816Store";
+import { KnownL816, forgetL816, loadKnownL816s, rememberL816 } from "../l816/L816Store";
 import { makeL816Link } from "../l816/L816Link";
 import { useL816Session } from "../l816/useL816Session";
 import { L816TransferModal } from "../l816/L816TransferModal";
 import { L816ConnectScreen } from "../screens/L816ConnectScreen";
 import { L816_ENABLED } from "../features";
-import { KnownPendant, loadKnownPendants } from "../pendant/PendantStore";
+import { KnownPendant, forgetPendant, loadKnownPendants } from "../pendant/PendantStore";
 import { ManagedDevice, Recording } from "../protocol";
 import { useStore } from "../store";
 import { SateHomeScreen } from "./SateHomeScreen";
@@ -203,6 +203,42 @@ export function SateRoot() {
   const openDevice = (d: ManagedDevice, back: Screen) =>
     setScreen({ name: "device", device: d, back });
 
+  /**
+   * How this device is forgotten — or `undefined` when this app must not be the
+   * one to do it.
+   *
+   * A paired recorder that cannot be reached is exactly the one a user needs to
+   * get rid of, and until now the only way out was buried inside the L81x
+   * recorder screen (and did not exist at all for the pendant or a Wi-Fi
+   * recorder). That is also the only cure for a pairing whose stored id is
+   * wrong: it can never connect, so nothing in the app will ever repair it.
+   */
+  const removeHandler = (d: ManagedDevice): (() => Promise<void>) | undefined => {
+    switch (d.kind) {
+      case "l816":
+        // Local only: the L81x has no binding and no server row (RULE #1 is
+        // Plaud's alone). Drop the link first if this is the connected one, or
+        // the reconnect loop brings back a device that is no longer paired.
+        return async () => {
+          if (l816Session.connectedId === d.serial) l816Session.disconnect();
+          setKnownL816s(await forgetL816(d.serial));
+        };
+      case "pendant":
+        return async () => setKnownPendants(await forgetPendant(d.serial));
+      case "plaud":
+        // See the comment at the call site. Deliberately no handler.
+        return undefined;
+      default:
+        // A Wi-Fi recorder is a real row on the server, so removing it is a
+        // server call — and it un-claims the hardware, which is what the
+        // confirmation says.
+        return async () => {
+          await api.removeDevice(d.id);
+          await refresh();
+        };
+    }
+  };
+
   // Manrope is the redesign's voice, and the app is unreadable in the wrong one
   // for the frame or two before it lands — so hold the splash rather than flash
   // the system font. `error` is treated as loaded on purpose: a missing font
@@ -326,6 +362,12 @@ export function SateRoot() {
               ? () => setScreen({ name: "l816", targetId: screen.device.serial })
               : undefined
           }
+          // 🛑 NOT offered for Plaud. Its binding is ACK-before-forget in the
+          // Keychain and mishandling it can lock the hardware for the account
+          // (CLAUDE.md RULE #1) — that unbind belongs to its own screen, which
+          // waits for the device to acknowledge before forgetting anything. A
+          // generic "remove" here would forget locally with no ACK at all.
+          onRemove={removeHandler(screen.device)}
         />
       )}
       {screen.name === "l816" && (

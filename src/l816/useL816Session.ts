@@ -604,6 +604,31 @@ export function useL816Session(
         if (cur.id === deviceId) return cur.p;
         throw new Error(`Already connecting to another ${l816DisplayName(modelRef.current)}`);
       }
+      // 🛑 CLAIM THE TARGET BEFORE LETTING GO OF THE OLD ONE.
+      //
+      // `wantId` is what the reconnect loop aims at, and it used to be set only
+      // in `afterConnect` — i.e. AFTER a successful connect. So re-targeting
+      // dropped the old link, the loop woke up still pointing at the old device,
+      // reconnected it within a second, and the user's tap on the other recorder
+      // appeared to do nothing at all. Caught in the logs: "connected" to the
+      // L815, then "connecting to 19:40:9D:91:AB:AF" again the instant the
+      // switch was attempted.
+      const prevWant = wantId.current;
+      wantId.current = deviceId;
+      // Re-targeting: the radio holds ONE link, so moving to another recorder
+      // means letting this one go first. `l816.connect` on a second peripheral
+      // would otherwise leave the first bound to us — and these devices talk to
+      // one phone at a time, so the abandoned unit becomes unreachable to
+      // everything, including us.
+      if (connectedIdRef.current && connectedIdRef.current !== deviceId) {
+        connectedIdRef.current = null;
+        setConnectedId(null);
+        setRecording(false);
+        setFiles([]);
+        setPendingCount(0);
+        setStatus(null);
+        await l816.disconnect().catch(() => {});
+      }
       unpaired.current = false;
       setState("connecting");
       setError(null);
@@ -612,6 +637,11 @@ export function useL816Session(
           await l816.connect(deviceId);
           await afterConnect(deviceId);
         } catch (e: any) {
+          // Give the target back. Latching `wantId` onto a recorder that cannot
+          // be reached would park the reconnect loop on it for ever, and the
+          // device that WAS working — the one holding takes nobody has uploaded
+          // yet — would never be picked up again.
+          if (wantId.current === deviceId) wantId.current = prevWant;
           // Leave nothing half-open: a connect that got a link and then failed
           // the handshake would otherwise keep the peripheral bound to us, and
           // the device only talks to one phone at a time.

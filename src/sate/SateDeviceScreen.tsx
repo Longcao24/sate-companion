@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
+  Modal,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -14,7 +16,7 @@ import { SateApi } from "../api/sateApi";
 import { ManagedDevice, Recording } from "../protocol";
 import { recordingLabel } from "./label";
 import { Body, Button, Card, H1, H3, Meta, Pill, SectionLabel, Tile, Tone } from "./ui";
-import { FONT, R, S } from "../theme";
+import { FONT, R, S, TAP } from "../theme";
 import { useBottomInset } from "../ui/insets";
 
 // "View device" — the page the dashboard card and the device row point at.
@@ -113,6 +115,7 @@ export function SateDeviceScreen({
   onClose,
   onOpenReport,
   onOpenRecorder,
+  onRemove,
 }: {
   api: SateApi;
   device: ManagedDevice;
@@ -120,12 +123,51 @@ export function SateDeviceScreen({
   onOpenReport: (r: Recording) => void;
   /** Present only for a handheld this build can actually drive. */
   onOpenRecorder?: () => void;
+  /**
+   * Forget this device. Absent when THIS app must not be the one to do it —
+   * 🛑 Plaud most of all: its binding is ACK-before-forget in the Keychain and a
+   * mis-handled unbind can lock the hardware for the account (CLAUDE.md RULE #1).
+   * That one unbinds from its own screen, never from a generic list.
+   */
+  onRemove?: () => Promise<void>;
 }) {
   // Clears the system navigation bar — this build is edge-to-edge.
   const padBottom = useBottomInset(40);
   const [rows, setRows] = useState<Recording[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [menu, setMenu] = useState(false);
+
+  // Removing asks, because it cannot be undone from here — the device has to be
+  // found and paired again. It is NOT destructive to any recording, and saying
+  // so is the point: "remove" on a handheld that holds the only copy of a
+  // session reads like it might throw the session away.
+  const confirmRemove = useCallback(() => {
+    setMenu(false);
+    Alert.alert(
+      `Remove ${device.name}?`,
+      "SATE will forget this device and stop connecting to it. Nothing is deleted — " +
+        "recordings on the device stay on the device, and the ones already uploaded stay " +
+        "in SATE. You can add it again at any time.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Remove",
+          style: "destructive",
+          onPress: () => {
+            setRemoving(true);
+            onRemove?.()
+              .then(onClose)
+              .catch((e: any) => {
+                setRemoving(false);
+                setError(e?.message ?? "Could not remove this device");
+              });
+          },
+        },
+      ]
+    );
+  }, [device.name, onRemove, onClose]);
 
   const load = useCallback(async () => {
     try {
@@ -161,6 +203,22 @@ export function SateDeviceScreen({
         <Pressable onPress={onClose} hitSlop={12} accessibilityRole="button">
           <Text style={s.back}>‹ Back</Text>
         </Pressable>
+        {/* 🛑 Removing a device lives BEHIND the gear, not in the page.
+            As a full-width button in the flow it sat between the section heading
+            and the recordings — on the way to what the user came for, and one
+            mis-tap from forgetting a recorder. Behind an icon it takes a
+            deliberate tap, then a choice, then a confirmation. */}
+        {!!onRemove && (
+          <Pressable
+            onPress={() => setMenu(true)}
+            hitSlop={12}
+            accessibilityRole="button"
+            accessibilityLabel="Device settings"
+            style={({ pressed }) => [s.gear, pressed && { opacity: 0.5 }]}
+          >
+            <Feather name="settings" size={19} color={S.mute} />
+          </Pressable>
+        )}
       </View>
 
       <ScrollView
@@ -274,14 +332,62 @@ export function SateDeviceScreen({
             </Card>
           ))}
         </View>
+
       </ScrollView>
+
+      {/* One action today, and room for more without moving anything the user
+          has already learned the position of. */}
+      <Modal
+        visible={menu}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setMenu(false)}
+        statusBarTranslucent
+      >
+        <Pressable style={s.sheetBack} onPress={() => setMenu(false)}>
+          <Pressable style={s.sheet} onPress={() => {}}>
+            <Meta style={s.sheetTitle} numberOfLines={1}>
+              {device.name}
+            </Meta>
+            <Pressable
+              onPress={confirmRemove}
+              disabled={removing}
+              accessibilityRole="button"
+              style={({ pressed }) => [s.sheetRow, pressed && { backgroundColor: S.badBg }]}
+            >
+              <Feather name="trash-2" size={16} color={S.badInk} />
+              {/* minWidth, not a hugging box: Android's Bold-text setting draws
+                  the font heavier than RN measured and clips the last glyph. */}
+              <Body style={s.sheetRowTxt} numberOfLines={1}>
+                {removing ? "Removing…" : "Remove this device"}
+              </Body>
+            </Pressable>
+            <Pressable
+              onPress={() => setMenu(false)}
+              accessibilityRole="button"
+              style={({ pressed }) => [s.sheetCancel, pressed && { opacity: 0.6 }]}
+            >
+              <Body style={s.sheetCancelTxt} numberOfLines={1}>
+                Cancel
+              </Body>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
 
 const s = StyleSheet.create({
   flex: { flex: 1, backgroundColor: S.bg },
-  head: { paddingHorizontal: 20, paddingTop: 56, paddingBottom: 2 },
+  head: {
+    paddingHorizontal: 20,
+    paddingTop: 56,
+    paddingBottom: 2,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
   back: { color: S.teal, fontFamily: FONT.extra, fontSize: 15, minWidth: 64 },
   scroll: { flex: 1 },
   content: { padding: 20, paddingTop: 10, paddingBottom: 40 },
@@ -304,6 +410,56 @@ const s = StyleSheet.create({
   },
 
   rowTop: { flexDirection: "row", alignItems: "center", gap: 12 },
+
+  gear: {
+    width: TAP.tap,
+    height: TAP.tap,
+    alignItems: "flex-end",
+    justifyContent: "center",
+  },
+
+  sheetBack: {
+    flex: 1,
+    backgroundColor: "rgba(9, 24, 23, 0.4)",
+    justifyContent: "flex-end",
+    padding: 16,
+    paddingBottom: 34,
+  },
+  sheet: {
+    backgroundColor: S.card,
+    borderRadius: R.card,
+    borderWidth: 1,
+    borderColor: S.line,
+    padding: 8,
+  },
+  sheetTitle: { paddingHorizontal: 12, paddingTop: 8, paddingBottom: 10 },
+  sheetRow: {
+    minHeight: TAP.button,
+    borderRadius: R.tile,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 9,
+  },
+  sheetRowTxt: {
+    fontFamily: FONT.extra,
+    color: S.badInk,
+    minWidth: 160,
+    textAlign: "center",
+  },
+  sheetCancel: {
+    minHeight: TAP.button,
+    borderRadius: R.tile,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 2,
+  },
+  sheetCancelTxt: {
+    fontFamily: FONT.extra,
+    color: S.sub,
+    minWidth: 72,
+    textAlign: "center",
+  },
 
   warn: {
     backgroundColor: S.warnBg,

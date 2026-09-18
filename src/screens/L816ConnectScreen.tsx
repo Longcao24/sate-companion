@@ -113,7 +113,14 @@ export function L816ConnectScreen({
         await l816.requestPermissions();
         api.listPatients().then((p) => !cancelled && setPatients(p)).catch(() => {});
         if (cancelled) return;
-        if (session.connectedId) return;
+        // 🛑 "Connected to SOMETHING" is not "connected to the one you asked
+        // for". This used to be a bare `if (session.connectedId) return`, and
+        // with two paired recorders — which this family now has, L816 and L815 —
+        // tapping the L816 opened a screen titled L815 listing the L815's files,
+        // silently, with no connect even attempted. That is worse than a
+        // duplicate row in the device list: the user believes they are looking
+        // at one recorder and are looking at another.
+        if (session.connectedId && (!targetId || session.connectedId === targetId)) return;
 
         const target = targetId;
         if (target) {
@@ -294,13 +301,14 @@ export function L816ConnectScreen({
                   ? "Found it — connecting…"
                   : "Which recorder is yours?"}
             </Text>
+            {/* Short, because this card is read while someone is holding a
+                recorder and waiting. The one-phone-at-a-time rule only matters
+                once the search is visibly failing, and it is said there instead
+                — see the "Can't find your recorder?" panel. */}
             <Muted>
               {foundList.length > 1
-                ? "More than one is in range, so pick the one in your hand."
-                : "Turn the SATE L816 or L815 on and keep it close. It pairs by itself — " +
-                  "there is nothing to tap. " +
-                  "If its own app is connected, close that first: the recorder only " +
-                  "talks to one phone at a time."}
+                ? "Pick the one in your hand."
+                : "Turn it on and keep it close — it pairs by itself."}
             </Muted>
 
             {foundList.length === 0 ? (
@@ -339,15 +347,13 @@ export function L816ConnectScreen({
           <Card>
             <Text style={s.sectionTitle}>Everything this phone can hear</Text>
             <Muted>
-              These recorders do not always broadcast their name, so yours may be in this
-              list without being recognised above. Look for a name starting “L81” or a row
-              marked “L816 service”, and tap it.
+              Yours may be here unnamed. Look for “L81” or “L816 service” and tap it. If its
+              own app is connected, close that first — the recorder talks to one phone at a time.
             </Muted>
             <Text style={[s.dim, { marginTop: 6 }]}>Bluetooth radio: {bleState}</Text>
             {seenList.length === 0 ? (
               <Text style={s.dim}>
-                Hearing no Bluetooth at all — the radio is off, or the Nearby devices
-                permission was denied. Check Android Settings → Apps → SATE → Permissions.
+                No Bluetooth at all — the radio is off, or Nearby devices permission was denied.
               </Text>
             ) : (
               seenList.map((sd) => (
@@ -371,7 +377,7 @@ export function L816ConnectScreen({
         {state === "connecting" && (
           <Card>
             <Text style={s.sectionTitle}>Connecting…</Text>
-            <Muted>Setting up the recorder and syncing its clock.</Muted>
+            <Muted>Syncing its clock…</Muted>
           </Card>
         )}
 
@@ -388,26 +394,20 @@ export function L816ConnectScreen({
           <>
             <Card>
               <Text style={s.sectionTitle}>{connectedName}</Text>
+              {/* ONE line. This card used to carry three paragraphs above the
+                  timer — how the recorder stores audio, when it transfers, that
+                  the link survives the screen — on a screen whose whole job is
+                  one button. Explanation nobody asked for is what makes a user
+                  stop reading the sentence that does matter, and the sentence
+                  that matters here is the state: is it recording, and will a
+                  take reach SATE without me. */}
               <Muted>
                 {recording
                   ? resumed
-                    ? `This ${connectedName} was already recording when we connected — it ` +
-                      "keeps going on its own. The timer below counts from now, not from " +
-                      "the start."
-                    : `Recording on the ${connectedName}. Audio is stored on the device and ` +
-                      "transferred when you stop."
-                  : `Press record to start. The ${connectedName} records on its own — the ` +
-                    "take is downloaded and uploaded to SATE when you stop."}
+                    ? "Already recording — the timer counts from now."
+                    : "Recording. The take transfers when you stop."
+                  : "Records on its own. Takes upload to SATE by themselves, even from another screen."}
               </Muted>
-
-              {/* The one thing a user cannot tell by looking at the phone: the
-                  link is kept up after this screen closes, so a take made later
-                  arrives by itself. Saying so is the difference between trusting
-                  the device in a pocket and checking the app after every take. */}
-              <Text style={s.keep}>
-                Stays connected in the background — recordings you start on the device upload
-                themselves, even from another screen.
-              </Text>
 
               <Text style={s.dur}>{fmtDur(session.elapsedMs)}</Text>
 
@@ -452,7 +452,7 @@ export function L816ConnectScreen({
                 later on the web report (it uploads as Standalone until then). */}
             <Card>
               <Text style={s.sectionTitle}>Assign to patient (optional)</Text>
-              <Muted>Leave blank to sort it out later — it saves as Standalone.</Muted>
+              <Muted>Blank saves as Standalone.</Muted>
               <FlatList
                 data={patients}
                 scrollEnabled={false}
@@ -485,11 +485,8 @@ export function L816ConnectScreen({
               </View>
               <Muted>
                 {session.pendingCount > 0
-                  ? `${session.pendingCount} recording${
-                      session.pendingCount === 1 ? "" : "s"
-                    } still to upload — this happens on its own while the device is connected.`
-                  : "Everything here is already in SATE. Recordings made with the phone " +
-                    "away upload themselves the next time it connects."}
+                  ? `${session.pendingCount} still to upload — this happens on its own.`
+                  : "All uploaded to SATE."}
               </Muted>
               {session.files.length === 0 ? (
                 <Text style={s.dim}>No recordings on this {connectedName}.</Text>

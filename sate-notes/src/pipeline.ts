@@ -67,7 +67,14 @@ const CF_HOSTED_VENDORS = new Set([
   'baai', 'google', 'mistral', 'qwen', 'microsoft', 'nvidia', 'zhipuai',
 ]);
 
-export interface TemplateSection { key: string; title: string; hint: string }
+export interface TemplateSection {
+  key: string; title: string; hint: string;
+  /** This section exists only to report what was said around the user's highlight presses. With
+   *  no presses there is nothing for it to be ABOUT, so it is removed from the prompt entirely
+   *  — a model asked for it anyway does not answer []; it picks three moments and calls them
+   *  highlights, which reads to the user as "these are the bits you marked". */
+  needsMarks?: boolean;
+}
 export interface TemplateDef {
   label: string;
   steer: string;
@@ -96,7 +103,7 @@ export const TEMPLATES: Record<string, TemplateDef> = {
     sections: [
       { key: 'bullets',    title: 'Key points',   hint: 'the substantive points actually made' },
       { key: 'actions',    title: 'Action items', hint: 'only a follow-up someone actually committed to or was asked to do' },
-      { key: 'highlights', title: 'Highlights',   hint: 'what was said around the moments the user marked' },
+      { key: 'highlights', title: 'Highlights',   hint: 'what was said around the moments the user marked', needsMarks: true },
     ],
   },
   supervision: {
@@ -161,6 +168,20 @@ const MAX_SUMMARY_CHARS = 48000;
 const MIN_AUDIO_SEC = 0.6;
 /** Below this many words a transcript is a fragment, not a meeting: summarise it as one. */
 const THIN_TRANSCRIPT_WORDS = 60;
+/**
+ * At or above this many words the recording is a full-length conversation and the summary is
+ * expected to COVER it rather than compress it.
+ *
+ * The anti-padding rules exist because a model handed a thin transcript invents to fill the
+ * shape it was asked for. They do not mean short is always right: a 36-minute, ~5,000-word
+ * meeting came back as six bullets and two chapters, which is the opposite failure — most of
+ * what was actually said simply never made it out. Both are the same mistake, a summary whose
+ * length is decided by the template instead of by the recording, so the prompt now states which
+ * of the two situations this is. Note what this instruction is careful NOT to be: it asks for
+ * COVERAGE of what exists, never for a number of items. Asking for "8-15 bullets" is what
+ * forces invention; asking for "every topic that was actually discussed" cannot.
+ */
+const LONG_TRANSCRIPT_WORDS = 700;
 
 interface NoteRow {
   id: string; user_id: string; bytes: number; sample_rate: number;
@@ -635,10 +656,16 @@ function systemFor(t: TemplateDef): string {
     + ' depth — most items have none.');
   lines.push('- Where an item has a natural label, write it as "Label: what was said" — the'
     + ' label is shown in bold. Do not invent a label to decorate a plain sentence.');
+  lines.push('- Say each thing ONCE. Do not restate the tldr as an item, and do not repeat the'
+    + ' same point in two sections. Every item should carry something the reader does not'
+    + ' already have — repetition is not detail, and it crowds out what was actually said.');
   if (t.chapters) {
     lines.push('- chapters: only for a recording long enough to have distinct stretches. "at" is'
       + ' seconds from the start and MUST be less than the recording length given below.'
-      + ' A short recording has none: return [].');
+      + ' A short recording has none: return []. On a long one, mark each point where the'
+      + ' conversation genuinely moves to a new topic — on the order of one every few minutes —'
+      + ' and never place one in the last minute, where it would point at nothing. Two markers'
+      + ' is not navigation; either the topics are really there or the answer is [].');
   }
   return `You summarise voice recordings for a personal note-taking app.
 ${t.steer}
@@ -659,7 +686,9 @@ THE TRANSCRIPT IS THE ONLY SOURCE. Report what was said and nothing else.
 ${lines.join('\n')}
 - title: 3-6 words naming this specific recording. If it is a fragment with no clear topic, say
   so plainly (e.g. "Brief unclear exchange").
-- tldr: one or two sentences. For a fragment, one sentence saying what little was said.`;
+- tldr: what the recording was about and where it ended up. One sentence for a fragment; a
+  short paragraph of three to five sentences for a full-length conversation. Scale it to how
+  much was actually said, not to a fixed length.`;
 }
 
 /** mm:ss, shared by the annotated transcript and the highlight markers so they line up. */
@@ -708,10 +737,73 @@ export function splitForMap(text: string, maxChars: number): string[] {
   return out.length ? out : [text];
 }
 
+/** "about 36 minutes" — the model reasons about chapter spacing far better in minutes. */
+function minutesOf(sec: number): string {
+  const m = Math.round(sec / 60);
+  return m < 1 ? 'under a minute' : `about ${m} minute${m === 1 ? '' : 's'}`;
+}
+
+/**
+ * How much detail this recording's summary should carry, stated as a fact about the recording.
+ *
+ * Three cases, because a fragment and a 36-minute meeting fail in opposite directions and the
+ * old prompt only guarded one of them. ⚠️ The long branch asks for COVERAGE, never for a count:
+ * "every distinct topic that was discussed" is checkable against the transcript, and a model
+ * that runs out of real topics stops. "Produce 8-15 bullets" is the version that invents, and
+ * it is the reason the fewer-is-correct rule exists — that rule is not relaxed here, it still
+ * sits in the system prompt above this and applies to every item.
+ */
+function depthDirective(words: number): string {
+  if (words < THIN_TRANSCRIPT_WORDS) {
+    return ' This is a SHORT FRAGMENT: return at most two items per section, no chapters, and'
+      + ' only what was explicitly stated.';
+  }
+  if (words < LONG_TRANSCRIPT_WORDS) return '';
+  return ' This is a FULL-LENGTH conversation, so a handful of bullets would leave most of it'
+    + ' out. Work through the recording in order and give every distinct topic that was actually'
+    + ' discussed its own item. Keep the specifics that were spoken — names, numbers, dates,'
+    + ' conditions, who committed to what, and the reason they gave — rather than collapsing'
+    + ' them into one general sentence; several distinct points must not be merged into a single'
+    + ' summary line. Being thorough here means covering what IS there. It is not permission to'
+    + ' add: every rule above still applies, every item must still be something that was said,'
+    + ' and a section the recording never touched is still [].';
+}
+
+/**
+ * Output budget for the final summary, in tokens, scaled to how much was said.
+ *
+ * This was a flat 2000 for every recording — roughly 1,200 words of JSON. That is generous for
+ * a 2-minute take and a hard ceiling on a 36-minute meeting: no prompt can produce a thorough
+ * summary that does not fit in the response, and a reply cut off mid-JSON does not even parse,
+ * so `parseSummary` falls back to prose and every section vanishes at once.
+ *
+ * The second term is why this takes the source length too: the transcript going in and the
+ * summary coming out share ONE context window, and the summary models on the catalog are 24k
+ * (llama-3.3-70b). Asking for 6000 output tokens on top of a 14k-token transcript is how you
+ * get a truncated reply rather than an error, so the budget yields to the input.
+ */
+const SUMMARY_CONTEXT_TOKENS = 24000;
+
+function summaryBudget(words: number, sourceChars: number): number {
+  const wanted = Math.min(6000, Math.max(2000, Math.round(words * 1.2)));
+  // ~3.5 chars per token is the usual rough rate for English prose; the slack covers the
+  // system prompt and the fact that this is an estimate, not a tokeniser.
+  const input = Math.ceil(sourceChars / 3.5) + 1200;
+  return Math.max(1500, Math.min(wanted, SUMMARY_CONTEXT_TOKENS - input));
+}
+
 async function summarise(
   env: Env, text: string, flagsMs: number[], template: string, model: string, durationSec: number,
 ): Promise<Summary> {
-  const t = TEMPLATES[template] || TEMPLATES[DEFAULT_TEMPLATE];
+  const base = TEMPLATES[template] || TEMPLATES[DEFAULT_TEMPLATE];
+
+  // A section that reports on the user's highlight presses is removed when there were none.
+  // Nothing on an L816 or a pendant can press that button, so on those recordings the section
+  // was pure invention — the model picked three sentences it liked and filed them under
+  // "Highlights", which says to the reader "these are the moments you marked".
+  const t: TemplateDef = flagsMs.length
+    ? base
+    : { ...base, sections: base.sections.filter((x) => !x.needsMarks) };
 
   // The word count MUST come from the real transcript, before any reduction. It used to be
   // measured on `source` — which after map-reduce is the summaries, not the recording — so a
@@ -732,7 +824,9 @@ async function summarise(
       // source of truth for the reduce step, and sanitise() cannot catch a fabrication that is
       // already sitting in its input. So the longest recordings — the ones a user is least able
       // to check by ear — were the ones with no protection at all.
-      const piece = await complete(env, model, MAP_SYSTEM, part, 1200);
+      // 1200 tokens is ~900 words out of a part that can be 48,000 characters in — a 40:1
+      // squeeze, and everything it drops is gone before the summary step ever sees it.
+      const piece = await complete(env, model, MAP_SYSTEM, part, 2400);
       pieces.push(typeof piece === 'string' ? piece : JSON.stringify(piece));
     }
     source = pieces.join('\n\n');
@@ -745,13 +839,13 @@ async function summarise(
   // Telling the model the length is what stops chapters landing past the end of the audio —
   // it was inventing 0:30 and 0:50 sections for an 11-second clip because it had no idea how
   // long the recording was.
-  const facts = `\nRECORDING LENGTH: ${Math.round(durationSec)} seconds. WORD COUNT: ${words}.`
-    + (words < THIN_TRANSCRIPT_WORDS
-      ? ' This is a SHORT FRAGMENT: return at most two items per section, no chapters, and only'
-        + ' what was explicitly stated.'
-      : '');
-  const out = await complete(env, model, systemFor(t), `TRANSCRIPT:\n${source}${marks}${facts}`, 2000, true);
-  return sanitise(parseSummary(out, t), t, durationSec, words);
+  const facts = `\nRECORDING LENGTH: ${Math.round(durationSec)} seconds (${minutesOf(durationSec)}).`
+    + ` WORD COUNT: ${words}.`
+    + depthDirective(words);
+  const out = await complete(
+    env, model, systemFor(t), `TRANSCRIPT:\n${source}${marks}${facts}`, summaryBudget(words, source.length), true,
+  );
+  return sanitise(parseSummary(out, t), t, durationSec, words, flagsMs.length > 0);
 }
 
 /**
@@ -852,14 +946,42 @@ function toItem(x: any): SummaryItem {
  * the end of the audio is the clearest tell there is: an 11-second clip came back with
  * sections at 0:30 and 0:50. Anything that cannot be true is dropped rather than shown.
  */
-function sanitise(sum: Summary, t: TemplateDef, durationSec: number, words: number): Summary {
+function sanitise(
+  sum: Summary, t: TemplateDef, durationSec: number, words: number, hadMarks = true,
+): Summary {
   const out: Summary = { ...sum };
 
-  // A chapter cannot start at or after the end of the recording, and a template that has no
-  // chapters cannot have any however many the model returned.
-  out.chapters = t.chapters && durationSec >= 60 && words >= THIN_TRANSCRIPT_WORDS
-    ? out.chapters.filter((c) => c.at >= 0 && c.at < durationSec)
-    : [];
+  // A chapter has to point AT something you can go and listen to. `at < durationSec` was too
+  // weak a test: a 35:50 recording came back with a chapter titled "Pilot Study and Next Steps"
+  // at 35:50 — inside the audio by a rounding error and zero seconds long. So a marker must
+  // leave real recording behind it, two markers closer together than a minute are the same
+  // place, and a lone marker is not navigation at all (a single "0:00 Introduction" is a label
+  // on the whole recording, which the title already is).
+  const MIN_TAIL = 30;
+  const MIN_GAP = 60;
+  if (!t.chapters || durationSec < 60 || words < THIN_TRANSCRIPT_WORDS) {
+    out.chapters = [];
+  } else {
+    const cutoff = durationSec - Math.min(MIN_TAIL, durationSec * 0.1);
+    const kept: Array<{ at: number; title: string }> = [];
+    for (const c of out.chapters
+      .map((c) => ({ at: Number(c.at), title: String(c.title ?? '').trim() }))
+      .filter((c) => Number.isFinite(c.at) && c.at >= 0 && c.at < cutoff && c.title)
+      .sort((a, b) => a.at - b.at)) {
+      if (kept.length && c.at - kept[kept.length - 1].at < MIN_GAP) continue;
+      kept.push(c);
+    }
+    out.chapters = kept.length >= 2 ? kept : [];
+  }
+
+  // With no highlight presses there is nothing a "Highlights" section could be reporting, so
+  // anything under one is invented. It is already dropped from the prompt; this is the floor,
+  // for the case where a model answers with a key it was never asked for.
+  if (!hadMarks) {
+    out.sections = out.sections.filter(
+      (sec) => !t.sections.some((x) => x.key === sec.key && x.needsMarks),
+    );
+  }
 
   // Strip placeholder items. Asked for a section the recording cannot fill, a model often
   // answers "none mentioned" instead of returning [] — which then renders as a bullet and

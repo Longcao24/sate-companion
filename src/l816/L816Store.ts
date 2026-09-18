@@ -8,6 +8,8 @@
 // known MAC, which is fine for one bench unit and wrong for anyone else's.
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
+// One-way: L816Link knows nothing about this file, so there is no cycle.
+import { l816ModelOf, l816Serial } from "./L816Link";
 
 const KEY = "l816.known";
 
@@ -35,12 +37,24 @@ export async function rememberL816(
   name: string,
   model?: string
 ): Promise<KnownL816[]> {
-  const prev = (await loadKnownL816s()).find((d) => d.id === id);
+  const all = await loadKnownL816s();
+  const prev = all.find((d) => d.id === id);
+  // 🛑 Heal a pairing whose `id` is a SERIAL rather than a BLE peripheral id.
+  //
+  // One was found in the wild: `l816-8470D00F660E` where `84:70:D0:0F:66:0E`
+  // belongs. `connect()` can never succeed on it, so the entry is a row the user
+  // can tap for ever with nothing happening — and pairing the same unit properly
+  // just ADDS a second row beside it, which is what "the same device is paired
+  // twice" actually was. `l816Serial(id, model)` recomputes exactly that string,
+  // so the stale row can be recognised and dropped the moment the real one
+  // arrives. The takes it uploaded are unaffected: they are keyed by the serial,
+  // which is what this string is.
+  const staleSerialKey = l816Serial(id, l816ModelOf(model ?? prev?.model));
   // Never let a re-pair DOWNGRADE a known model to undefined: the unit would
   // silently start uploading under the family-default serial instead of its own.
   const list = [
     { id, name, model: model ?? prev?.model },
-    ...(await loadKnownL816s()).filter((d) => d.id !== id),
+    ...all.filter((d) => d.id !== id && d.id !== staleSerialKey),
   ];
   try {
     await AsyncStorage.setItem(KEY, JSON.stringify(list));

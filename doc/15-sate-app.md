@@ -216,3 +216,42 @@ The bottom bar carries an **icon** per destination (Feather `home` / `file-text`
 inside the pill that fills on the active tab. It used to be an abstract dot: three identical
 dots make the bar a row of lights that only the labels tell apart, so the shape the eye catches
 first carried no information at all.
+
+---
+
+## 9. The device page, and why removing one is three taps away
+
+`SateDeviceScreen` is read-only except for two things: opening the L81x recorder,
+and forgetting the device. The second lives **behind the gear in the top-right**,
+not in the page. As a full-width button in the flow it sat between the section
+heading and the recordings — on the way to what the user came for, and one
+mis-tap from forgetting a recorder that may hold the only copy of a session. Gear
+→ sheet → confirmation is three deliberate acts, and the confirmation says what
+removing does NOT do (nothing is deleted, on the device or in SATE).
+
+🛑 **Plaud has no remove here.** Its binding is ACK-before-forget in the iOS
+Keychain and mishandling it can lock the hardware for the account (CLAUDE.md
+RULE #1), so that unbind belongs to `PlaudSettingsScreen`, which waits for the
+device to acknowledge before forgetting anything. A generic "remove" would forget
+locally with no ACK at all. The L81x and the pendant are local pairings with no
+binding; a Wi-Fi recorder is a server row and removing it is a server call.
+
+**A pairing whose stored `id` is not a BLE peripheral id can never connect.** One
+was found in the wild: `l816-8470D00F660E` — the SERIAL — where
+`84:70:D0:0F:66:0E` belongs. `connect()` fails on it every time, the reconnect
+loop hands the radio back to whatever else is paired, and the row does nothing
+when tapped no matter how many times you try. Pairing the same unit properly used
+to ADD a second row beside it, which is what "the same device is paired twice"
+actually was. `rememberL816` now recomputes `l816Serial(id, model)` and drops a
+row keyed by it, so the stale entry heals the moment the real pairing arrives —
+and the gear gives the user a way out in the meantime.
+
+**Two paired recorders, one radio.** `connect()` re-targets: it claims `wantId`
+BEFORE dropping the old link (the reconnect loop reads that ref, and setting it
+only after a successful connect meant the loop reconnected the old device within
+a second and the user's tap appeared to do nothing), and restores it if the new
+connect fails, so a recorder that cannot be reached never parks the loop on
+itself. `L816ConnectScreen` only skips connecting when it is already on the
+recorder it was ASKED for — `if (session.connectedId) return` meant tapping the
+L816 opened a screen titled L815, listing the L815's files, with no connect even
+attempted.

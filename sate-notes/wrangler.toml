@@ -41,7 +41,14 @@ binding = "AI"
 ASR_MODEL = "@cf/deepgram/nova-3"
 # BCP-47 hint. Was hardcoded 'en' in the pipeline, which turned every other language into noise.
 ASR_LANGUAGE = "en"
-SUMMARY_MODEL = "@cf/meta/llama-3.1-8b-instruct-fp8-fast"
+# An 8B model was the hard ceiling on how detailed a note can be. Handed a 36-minute, ~5,000-word
+# meeting it returned six generic bullets, restated its own tl;dr as two of them, and placed a
+# chapter at 35:50 of a 35:50 recording — not a prompt failure, just the size of the model doing
+# the reading. 3.3-70b follows a long instruction list and holds a long transcript; it is ~24k
+# context, which `summaryBudget()` sizes the reply against. The cost is noise next to ASR
+# (~$0.008 vs $0.31 per audio-hour), and the whole point of keeping the summariser behind one
+# call site is that this is the cheap half to upgrade. Roll back by putting the old id back.
+SUMMARY_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 # Seconds of audio per Whisper chunk, and the overlap that stops a word being cut in half at
 # the seam. 16 kHz mono s16le => 32000 B/s, so 60 s ~= 1.92 MB per chunk.
 # 60s was sized for Whisper's short attention window. Deepgram takes long audio natively, and
