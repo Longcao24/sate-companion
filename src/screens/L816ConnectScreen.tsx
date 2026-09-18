@@ -496,6 +496,10 @@ export function L816ConnectScreen({
               ) : (
                 session.files.map((f) => {
                   const done = session.uploaded.has(f.name);
+                  // Empty on the device — there is no audio in it. Still tappable,
+                  // because a take that was merely still flushing when we asked
+                  // becomes downloadable later and tapping it clears the note.
+                  const empty = !done && session.unusable.has(f.name);
                   return (
                     <Pressable
                       key={f.name}
@@ -510,8 +514,14 @@ export function L816ConnectScreen({
                       {/* Already-sent takes stay listed and stay tappable: the
                           device keeps them, and re-uploading one is a legitimate
                           thing to want after a delete on the SATE side. */}
-                      <Text style={[s.link, done && { color: D.green }]}>
-                        {done ? "In SATE ✓" : "Upload"}
+                      <Text
+                        style={[
+                          s.link,
+                          done && { color: D.green },
+                          empty && { color: D.faint },
+                        ]}
+                      >
+                        {done ? "In SATE ✓" : empty ? "Empty" : "Upload"}
                       </Text>
                     </Pressable>
                   );

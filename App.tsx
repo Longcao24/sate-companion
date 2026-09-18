@@ -13,6 +13,7 @@ import { makeL816Link } from "./src/l816/L816Link";
 import { KnownL816, loadKnownL816s, rememberL816 } from "./src/l816/L816Store";
 import { L816ConnectScreen } from "./src/screens/L816ConnectScreen";
 import { useL816Session } from "./src/l816/useL816Session";
+import { L816TransferModal } from "./src/l816/L816TransferModal";
 import { PLAUD_ENABLED, PENDANT_ENABLED, L816_ENABLED } from "./src/features";
 import { acquireRadio, registerRadio } from "./src/ble/radio";
 import { useManagedDevices } from "./src/devices/useManagedDevices";
@@ -385,6 +386,10 @@ function Root() {
         />
       )}
       {screen.name === "settings" && <SettingsScreen onClose={goHome} />}
+
+      {/* Over whatever screen is on top: the L816 link is app-level, so a take
+          transfers while the user is somewhere else entirely. */}
+      <L816TransferModal session={l816Session} />
     </>
   );
 }

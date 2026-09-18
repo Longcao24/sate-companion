@@ -249,7 +249,13 @@ function DeviceRow({
     // `kind`, and `useManagedDevices` puts `l816DisplayName(model)` in `fw`
     // precisely because that string is the only thing telling them apart on
     // screen — spelling "SATE L816" here labelled an L815 as the wrong device.
-    sub = `Paired ${device.fw || device.name} · tap to record & upload`;
+    //
+    // …and the address, because the label is NOT unique: two units of the same
+    // model draw two identical rows, which is what "the same device is paired
+    // twice" looks like from the outside even when they are two real recorders.
+    // The MAC is the only thing that distinguishes them, so it has to be on the
+    // row rather than one tap away.
+    sub = `Paired ${device.fw || device.name} · ${device.serial}`;
   }
 
   return (

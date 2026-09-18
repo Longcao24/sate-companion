@@ -111,3 +111,67 @@ export async function forgetL816(id: string): Promise<KnownL816[]> {
   }
   return list;
 }
+
+// ---------------------------------------------------------------- unusable
+
+// Takes this device offers that CANNOT be downloaded, per device, keyed by the
+// same file name as `uploaded`.
+//
+// 🛑 This is NOT "uploaded" and must never be merged with it. A take recorded
+// here is still on the recorder and is NOT in SATE — writing it into the
+// uploaded map would tell the user their recording is safe when it is not, which
+// is the one lie this whole subsystem exists to avoid.
+//
+// What lands here: a take the device ACKs with a size that cannot be audio —
+// `0` bytes, or a size that is not whole 82-byte ASC frames. The device really
+// does produce them (a record button pressed and released instantly). Before
+// this existed, one such file failed the download, `sweepOnce` stopped at the
+// first failure, and the four perfectly good takes behind it were never sent —
+// on every connect, forever, with an error banner each time.
+//
+// Remembering it is what stops that retry loop. It is only ever a local note: if
+// the device later reports a real size for the same name (it was still flushing),
+// nothing here prevents the upload — the sweep clears the note first.
+
+const BAD_KEY = "l816.unusable";
+
+async function loadBadMap(): Promise<UploadedMap> {
+  try {
+    const raw = await AsyncStorage.getItem(BAD_KEY);
+    return raw ? (JSON.parse(raw) as UploadedMap) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** File names this device could not hand over. Still ON the device. */
+export async function loadUnusable(deviceId: string): Promise<Set<string>> {
+  return new Set((await loadBadMap())[deviceId] ?? []);
+}
+
+export async function markUnusable(deviceId: string, name: string): Promise<void> {
+  try {
+    const map = await loadBadMap();
+    const list = map[deviceId] ?? [];
+    if (!list.includes(name)) {
+      map[deviceId] = [...list, name].slice(-500);
+      await AsyncStorage.setItem(BAD_KEY, JSON.stringify(map));
+    }
+  } catch {
+    /* best effort — a lost mark costs one retry, never a lost take */
+  }
+}
+
+/** Forget the note, so the take is attempted again (the manual Upload button). */
+export async function clearUnusable(deviceId: string, name: string): Promise<void> {
+  try {
+    const map = await loadBadMap();
+    const list = map[deviceId] ?? [];
+    if (list.includes(name)) {
+      map[deviceId] = list.filter((n) => n !== name);
+      await AsyncStorage.setItem(BAD_KEY, JSON.stringify(map));
+    }
+  } catch {
+    /* best effort */
+  }
+}

@@ -185,6 +185,30 @@ export type L816DeviceEvent =
   | { type: "started"; name?: string }
   | { type: "stopped"; file?: L816File };
 
+/**
+ * A take this recorder cannot hand over — a fault in the FILE, not the link.
+ *
+ * 🛑 The distinction is the whole point. `sweepOnce` stops at the first failure,
+ * which is right for a link going out of range (do not hammer a dying
+ * connection) and catastrophically wrong for one bad file: a take the device
+ * ACKs as `0` bytes fails identically on every connect, forever, and every good
+ * take queued behind it is never sent. Throw this and the sweep SKIPS the file
+ * and carries on; throw a plain Error and the sweep gives up.
+ */
+export class L816BadTake extends Error {
+  /** Survives the class being minified or crossing a bundle boundary. */
+  readonly badTake = true as const;
+  constructor(message: string) {
+    super(message);
+    this.name = "L816BadTake";
+  }
+}
+
+/** True for a fault that will repeat on every attempt at this same file. */
+export function isL816BadTake(e: unknown): boolean {
+  return !!e && typeof e === "object" && (e as { badTake?: boolean }).badTake === true;
+}
+
 export type L816Progress =
   | { phase: "waiting"; message: string }
   | { phase: "listing"; message: string }
@@ -629,7 +653,7 @@ class NativeL816Link implements L816Link {
   // ------------------------------------------------------------ commands
 
   private async send(opcode: number, payload: Buffer): Promise<void> {
-    if (!this.device) throw new Error("L816 is not connected");
+    if (!this.device) throw new Error("The recorder is not connected");
     // The length byte is a legacy field: opcode 07 always declares 0x13 (19)
     // although it carries 21 bytes. Mirroring the device's own quirk is what
     // makes it accept the request at all.
@@ -830,14 +854,14 @@ class NativeL816Link implements L816Link {
     dl.chunks.push(chunk);
     dl.bytes += chunk.length;
     if (dl.expected >= 0 && dl.bytes > dl.expected) {
-      this.failDownload(new Error("L816 sent more audio than it said it would"));
+      this.failDownload(new Error("The recorder sent more audio than it said it would"));
       return;
     }
     this.armDownloadTimeout();
     if (dl.expected > 0) {
       dl.onProgress?.({
         phase: "downloading",
-        message: "Downloading from L816",
+        message: "Downloading from the recorder",
         percent: Math.round((dl.bytes / dl.expected) * 100),
       });
     }
@@ -847,15 +871,15 @@ class NativeL816Link implements L816Link {
   // ------------------------------------------------------------ recording
 
   async startRecording(): Promise<string> {
-    if (this.recording) throw new Error("L816 is already recording");
+    if (this.recording) throw new Error("The recorder is already recording");
     const ack = await this.request(OP_START, Buffer.alloc(0), OP_START);
     return stripNuls(sub(ack, 0, NAME_BYTES).toString("ascii"));
   }
 
   async stopRecording(): Promise<L816File> {
-    if (!this.recording) throw new Error("L816 is not recording");
+    if (!this.recording) throw new Error("The recorder is not recording");
     const ack = await this.request(OP_STOP, Buffer.alloc(0), OP_STOP);
-    if (ack.length < NAME_BYTES + 4) throw new Error("L816 did not name the recording");
+    if (ack.length < NAME_BYTES + 4) throw new Error("The recorder did not name the recording");
     const file = {
       name: stripNuls(sub(ack, 0, NAME_BYTES).toString("ascii")),
       size: ack.readUInt32BE(NAME_BYTES),
@@ -886,7 +910,7 @@ class NativeL816Link implements L816Link {
     if (!dl) return;
     clearTimeout(dl.timer);
     dl.timer = setTimeout(
-      () => this.failDownload(new Error("L816 stopped sending audio (15 s of silence)")),
+      () => this.failDownload(new Error("The recorder stopped sending audio (15 s of silence)")),
       RESPONSE_TIMEOUT_MS
     );
   }
@@ -896,7 +920,7 @@ class NativeL816Link implements L816Link {
     if (!dl || payload.length < NAME_BYTES + 4) return;
     const name = stripNuls(sub(payload, 0, NAME_BYTES).toString("utf8"));
     if (name !== dl.name) {
-      this.failDownload(new Error(`L816 acknowledged a different file (${name})`));
+      this.failDownload(new Error(`The recorder acknowledged a different file (${name})`));
       return;
     }
     const expected = payload.readUInt32BE(NAME_BYTES);
@@ -904,7 +928,16 @@ class NativeL816Link implements L816Link {
     // A take that is not whole 82-byte frames cannot be decoded, so refuse it now
     // rather than after a minute of transfer.
     if (expected <= 0 || expected > MAX_TAKE_BYTES || expected % ASC_FRAME_BYTES !== 0) {
-      this.failDownload(new Error(`L816 reported an unusable size (${expected} bytes)`));
+      // 0 bytes is a real thing this hardware produces — the record button
+      // pressed and released instantly. It is not a broken link, and it must
+      // not be allowed to block the takes behind it.
+      this.failDownload(
+        new L816BadTake(
+          expected === 0
+            ? "This take is empty on the recorder (0 bytes) — there is no audio to upload."
+            : `The recorder reported a size that is not audio (${expected} bytes).`
+        )
+      );
       return;
     }
     dl.expected = expected;
@@ -949,7 +982,9 @@ class NativeL816Link implements L816Link {
   ): Promise<Buffer> {
     if (!/^\d{2}_\d{14}$/.test(file.name)) {
       return Promise.reject(
-        new Error(`Unexpected L816 file name "${file.name}" — expected NN_yyyyMMddHHmmss`)
+        new L816BadTake(
+          `Unexpected file name "${file.name}" — expected NN_yyyyMMddHHmmss`
+        )
       );
     }
     if (this.dl) return Promise.reject(new Error("A download is already running"));
@@ -965,7 +1000,7 @@ class NativeL816Link implements L816Link {
         reject,
         eof: false,
         timer: setTimeout(
-          () => this.failDownload(new Error("L816 did not start the download")),
+          () => this.failDownload(new Error("The recorder did not start the download")),
           RESPONSE_TIMEOUT_MS
         ),
       };

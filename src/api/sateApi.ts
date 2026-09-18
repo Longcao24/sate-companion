@@ -303,15 +303,38 @@ export class HttpApi implements SateApi {
 
       // BINARY_CONTENT streams the file as the request body straight from disk —
       // no base64, no Buffer, nothing proportional to the take in memory.
-      const res = await uploadAsync(slot.signed_url, wav_path, {
-        httpMethod: "PUT",
-        uploadType: FileSystemUploadType.BINARY_CONTENT,
-        headers: { "Content-Type": "audio/wav", "x-upsert": "true" },
-      });
-      if (res.status < 200 || res.status >= 300) {
-        // The take is still on the device and still unmarked, so this is a retry,
-        // not a loss — say which half failed so the log is worth reading.
-        throw new Error(`storage upload failed: ${res.status} ${res.body?.slice(0, 200) ?? ""}`);
+      //
+      // Retried on a transient status, because the caller cannot: the L816 sweep
+      // stops at the first failure, so a single 502 from the Storage gateway
+      // stranded every take queued behind this one. The PUT is an upsert to a
+      // path this session already owns, so repeating it is safe — worst case it
+      // overwrites its own half-written object.
+      let res: Awaited<ReturnType<typeof uploadAsync>> | null = null;
+      for (let attempt = 0; attempt < UPLOAD_RETRY_MS.length; attempt++) {
+        if (UPLOAD_RETRY_MS[attempt] > 0) {
+          await new Promise((r) => setTimeout(r, UPLOAD_RETRY_MS[attempt]));
+        }
+        try {
+          res = await uploadAsync(slot.signed_url, wav_path, {
+            httpMethod: "PUT",
+            uploadType: FileSystemUploadType.BINARY_CONTENT,
+            headers: { "Content-Type": "audio/wav", "x-upsert": "true" },
+          });
+        } catch (e: any) {
+          // A dropped socket is weather too. Out of attempts, rethrow as-is.
+          if (attempt === UPLOAD_RETRY_MS.length - 1) throw e;
+          continue;
+        }
+        if (res.status >= 200 && res.status < 300) break;
+        if (!isTransientStatus(res.status) || attempt === UPLOAD_RETRY_MS.length - 1) {
+          // The take is still on the device and still unmarked, so this is a
+          // retry, not a loss — say which half failed so the log is worth
+          // reading, and strip the gateway's HTML so the user sees a sentence.
+          throw new Error(
+            `SATE could not store the audio (HTTP ${res.status}). ` +
+              `The recording is still on the recorder. ${briefBody(res.body)}`.trim()
+          );
+        }
       }
       onProgress?.(1);
 
@@ -356,7 +379,8 @@ export class HttpApi implements SateApi {
     });
     if (!put.ok) {
       throw new Error(
-        `storage upload failed: ${put.status} ${await put.text().catch(() => "")}`
+        `SATE could not store the audio (HTTP ${put.status}). ` +
+          briefBody(await put.text().catch(() => ""))
       );
     }
     onProgress?.(1);
@@ -520,6 +544,31 @@ export class HttpApi implements SateApi {
       }),
     });
   }
+}
+
+
+/**
+ * Is this the kind of upload failure that WILL work on the next try?
+ *
+ * 🛑 The distinction decides whether a whole sync survives. Supabase's Storage
+ * gateway answers a `502 Bad Gateway` now and then — seen live on a 6-second
+ * take, with the service healthy before and after — and the L816 sweep stops at
+ * the first failure, so one hiccup left three good recordings on the device
+ * behind a red "Something went wrong". A 4xx is our fault and retrying it is
+ * just three ways to fail; a 5xx, a 408, a 429 or a dropped socket is the
+ * server's weather.
+ */
+function isTransientStatus(status: number): boolean {
+  return status >= 500 || status === 408 || status === 429;
+}
+
+/** 0 s, 1.5 s, 4 s — long enough for a gateway blip, short enough to still feel live. */
+const UPLOAD_RETRY_MS = [0, 1500, 4000];
+
+/** A short, readable version of a gateway's HTML error page. */
+function briefBody(body: string | null | undefined): string {
+  const s = (body ?? "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  return s.slice(0, 120);
 }
 
 export function makeApi(

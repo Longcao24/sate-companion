@@ -75,7 +75,13 @@ export function useManagedDevices(
     const l816Rows = knownL816s.map((d) =>
       synth("l816", d.id, d.name, l816DisplayName(d.model))
     );
-    return [...plaudRows, ...pendantRows, ...l816Rows];
+    const rows = [...plaudRows, ...pendantRows, ...l816Rows];
+    // 🛑 One row per device id. The paired stores already dedup on write, so a
+    // repeat here means something upstream is wrong — and two identical-looking
+    // rows is exactly the report "the same device can be paired twice". Render
+    // it once rather than showing the user a duplicate they cannot act on.
+    const seen = new Set<string>();
+    return rows.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
   }, [plaud, knownPendants, knownL816s]);
 
   const refresh = useCallback(async () => {

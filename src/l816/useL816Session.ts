@@ -7,6 +7,7 @@ import {
   L816Link,
   L816Progress,
   L816SeenDevice,
+  isL816BadTake,
   L816Model,
   L816_DEFAULT_MODEL,
   l816DisplayName,
@@ -17,6 +18,9 @@ import {
 import {
   loadUploaded,
   markUploaded,
+  loadUnusable,
+  markUnusable,
+  clearUnusable,
   forgetL816,
   rememberL816,
   KnownL816,
@@ -82,6 +86,10 @@ export interface L816Session {
   /** Take names already in SATE, so the file list can mark them. Kept as state
    *  (not just the ref the engine uses) so the list repaints as each one lands. */
   uploaded: Set<string>;
+  /** Takes the recorder cannot hand over — empty files, still ON the device.
+   *  Separate from `uploaded` because they are NOT in SATE; the list shows them
+   *  as empty rather than offering an Upload that can only fail. */
+  unusable: Set<string>;
   patientId: string | null;
   setPatientId: (id: string | null) => void;
   /** Which model the connected (or last paired) unit is. */
@@ -198,6 +206,7 @@ export function useL816Session(
   const [error, setError] = useState<string | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
   const [uploadedNames, setUploadedNames] = useState<string[]>([]);
+  const [unusableNames, setUnusableNames] = useState<string[]>([]);
   const [patientId, setPatientId] = useState<string | null>(null);
   // The connected unit's model. A ref as well as state because pushTake reads it
   // to build the SERIAL, and that must never be a render behind — a take filed
@@ -208,6 +217,11 @@ export function useL816Session(
   // Names already sent to SATE from this device, so a reconnect does not
   // re-upload the whole card. Loaded per device on connect.
   const uploadedRef = useRef<Set<string>>(new Set());
+  // Takes this device CANNOT hand over — see `markUnusable`. Kept apart from
+  // `uploadedRef` on purpose: these are still on the recorder and are NOT in
+  // SATE, and merging the two would tell the user a recording is safe when it
+  // is not. State as well as a ref so the file list repaints when one is found.
+  const unusableRef = useRef<Set<string>>(new Set());
   // The transfer lock. One BLE link means one download at a time, so every path
   // that fetches a take — the sweep, the device-event handler, the manual Upload
   // row and Stop & upload — claims this one ref.
@@ -341,8 +355,19 @@ export function useL816Session(
    * ONE pass: send everything in `all` that SATE does not have yet, oldest first.
    *
    * Sequential on purpose — one BLE link, one transfer at a time — and it stops
-   * at the first failure rather than hammering a device that has gone out of
-   * range. Whatever is left stays in the list and is retried on the next connect.
+   * at the first LINK failure rather than hammering a device that has gone out
+   * of range. Whatever is left stays in the list and is retried on the next
+   * connect.
+   *
+   * 🛑 A BAD TAKE IS NOT A LINK FAILURE, and conflating the two cost this
+   * account four recordings for two days. The recorder really does produce
+   * `0`-byte files (the record button pressed and released instantly). One of
+   * them sat at the head of the queue; the download failed; the sweep stopped at
+   * the first failure; and the four perfectly good takes behind it were never
+   * sent — on every single connect, with a "Something went wrong" banner each
+   * time, while the link itself was healthy enough to transfer at full speed.
+   * So `L816BadTake` is SKIPPED and remembered, and only a real link failure
+   * ends the pass.
    *
    * Returns false when it gave up, so the caller does not go round again on a
    * link that is already failing.
@@ -350,10 +375,14 @@ export function useL816Session(
   const sweepOnce = useCallback(
     async (all: L816File[]): Promise<boolean> => {
       const pending = all
-        .filter((f) => !uploadedRef.current.has(f.name))
+        .filter((f) => !uploadedRef.current.has(f.name) && !unusableRef.current.has(f.name))
         .sort((a, b) => takeTimestamp(a.name) - takeTimestamp(b.name));
       setPendingCount(pending.length);
       if (pending.length === 0) return true;
+
+      // Bad takes found in THIS pass, so the summary at the end can say so once
+      // instead of flashing a banner per file.
+      const skipped: string[] = [];
 
       for (let i = 0; i < pending.length; i++) {
         if (!connectedIdRef.current) return false;
@@ -369,6 +398,17 @@ export function useL816Session(
           await pushTake(take);
           setPendingCount(pending.length - i - 1);
         } catch (e: any) {
+          // A fault in the FILE: skip it, remember it, keep going. The link is
+          // fine and the takes behind this one are not hostages to it.
+          if (isL816BadTake(e)) {
+            unusableRef.current.add(file.name);
+            setUnusableNames([...unusableRef.current]);
+            const id = connectedIdRef.current;
+            if (id) markUnusable(id, file.name).catch(() => {});
+            skipped.push(file.name);
+            setPendingCount(pending.length - i - 1);
+            continue;
+          }
           setError(
             `${e?.message ?? "Transfer failed"}\n\n${pending.length - i} recording(s) are ` +
               `still on the ${l816DisplayName(modelRef.current)} and were not uploaded. They ` +
@@ -391,11 +431,22 @@ export function useL816Session(
       setProgress(null);
       setState("ready");
       bgStatus("Connected · waiting for a recording", undefined, true);
+      const sent = pending.length - skipped.length;
+      // Said plainly, and only once. An empty take is not a failure the user can
+      // do anything about — it is a file with no audio in it — so it must not
+      // look like a sync that went wrong.
+      if (skipped.length > 0) {
+        setStatus(
+          `${sent} recording(s) uploaded. ${skipped.length} on the device ` +
+            `${skipped.length === 1 ? "is" : "are"} empty (no audio) and ` +
+            `${skipped.length === 1 ? "was" : "were"} skipped.`
+        );
+      }
       if (backgrounded.current) {
         notifyOnce(
           0xfc,
           `${l816DisplayName(modelRef.current)} synced`,
-          `${pending.length} recording(s) uploaded to SATE.`
+          `${sent} recording(s) uploaded to SATE.`
         );
       }
       return true;
@@ -434,7 +485,7 @@ export function useL816Session(
     async (all: L816File[]) => {
       // Nothing to do — and with no transfer there is no busy window for a take
       // to be lost in, so there is nothing to re-list for either.
-      if (all.every((f) => uploadedRef.current.has(f.name))) {
+      if (all.every((f) => uploadedRef.current.has(f.name) || unusableRef.current.has(f.name))) {
         setPendingCount(0);
         return;
       }
@@ -461,7 +512,9 @@ export function useL816Session(
           if (!fresh) return;
           setFiles(fresh);
           list = fresh;
-          const unsent = fresh.some((f) => !uploadedRef.current.has(f.name));
+          const unsent = fresh.some(
+            (f) => !uploadedRef.current.has(f.name) && !unusableRef.current.has(f.name)
+          );
           // `resweep` covers the narrow race where the stop landed DURING the
           // listing above: nothing looks pending, but an event was dropped.
           if (!unsent && !resweep.current) return;
@@ -479,6 +532,8 @@ export function useL816Session(
       // below is a diff against it, so loading it late would re-upload the card.
       uploadedRef.current = await loadUploaded(id);
       setUploadedNames([...uploadedRef.current]);
+      unusableRef.current = await loadUnusable(id);
+      setUnusableNames([...unusableRef.current]);
       connectedIdRef.current = id;
       wantId.current = id;
       setConnectedId(id);
@@ -695,11 +750,35 @@ export function useL816Session(
   const boostRef = useRef(0);
   boostRef.current = boost;
 
+  // The scan callbacks outlive any one render, so the paired list they filter
+  // against has to be a ref or they publish against a stale copy.
+  const knownRef = useRef<KnownL816[]>(known);
+  knownRef.current = known;
+
   const publishFound = useCallback(() => {
     const out: Record<string, L816FoundDevice> = {};
-    for (const [id, v] of Object.entries(foundRef.current)) out[id] = v.d;
+    for (const [id, v] of Object.entries(foundRef.current)) {
+      // 🛑 A PAIRED recorder is not "nearby, tap to add". `nearby` has always
+      // been documented as the UNPAIRED ones and the filter was simply missing,
+      // so the app invited the user to pair a unit it was already holding a link
+      // to — which is exactly what "the same device can be added twice" looks
+      // like from the outside. `rememberL816` dedups by BLE id, so the second
+      // tap does not actually create a row; but offering it is still a promise
+      // about what the tap does that the app does not keep, and the day an id
+      // does change (a factory reset, a rotated private address) it becomes a
+      // real duplicate with no way to tell the two rows apart.
+      if (knownRef.current.some((k) => k.id === id)) continue;
+      out[id] = v.d;
+    }
     setFoundMap(out);
   }, []);
+
+  // Pairing one does not produce a new advertisement, so the "nearby" offer has
+  // to be recomputed when the PAIRED list changes or the unit the user just
+  // added keeps being offered as if it were not.
+  useEffect(() => {
+    publishFound();
+  }, [known, publishFound]);
 
   // 🛑 Discovery is only allowed to scan when NOTHING ELSE owns the radio.
   //
@@ -820,6 +899,12 @@ export function useL816Session(
       busyRef.current = true;
       setState("busy");
       setStatus(null);
+      // Tapping Upload on a take the sweep skipped is a deliberate retry: forget
+      // the note first, so a device that was merely still flushing gets a second
+      // chance. If it is genuinely empty the catch below writes the note again.
+      unusableRef.current.delete(file.name);
+      setUnusableNames([...unusableRef.current]);
+      if (connectedIdRef.current) clearUnusable(connectedIdRef.current, file.name).catch(() => {});
       try {
         const take = await l816.fetchTake(file, setProgress);
         setProgress({ phase: "decoding", message: "Uploading to SATE…" });
@@ -834,15 +919,27 @@ export function useL816Session(
           await syncPending(fresh);
         }
       } catch (e: any) {
-        // The recording is still ON the device — nothing has been lost, and the
-        // list below is the way back to it. Say so; a bare error reads like the
-        // take is gone.
-        setError(
-          `${e?.message ?? "Transfer failed"}\n\nThe recording is still on the ` +
-            `${l816DisplayName(modelRef.current)} — ` +
-            `pick it from the list below to try again.`
-        );
-        setState("error");
+        // An empty take is not a failure the user can retry their way out of.
+        // Say what it is, mark it, and leave the screen usable rather than
+        // throwing up "Something went wrong" over a file with no audio in it.
+        if (isL816BadTake(e)) {
+          unusableRef.current.add(file.name);
+          setUnusableNames([...unusableRef.current]);
+          if (connectedIdRef.current)
+            markUnusable(connectedIdRef.current, file.name).catch(() => {});
+          setStatus(e?.message ?? "This take is empty on the recorder.");
+          setState("ready");
+        } else {
+          // The recording is still ON the device — nothing has been lost, and the
+          // list below is the way back to it. Say so; a bare error reads like the
+          // take is gone.
+          setError(
+            `${e?.message ?? "Transfer failed"}\n\nThe recording is still on the ` +
+              `${l816DisplayName(modelRef.current)} — ` +
+              `pick it from the list below to try again.`
+          );
+          setState("error");
+        }
       } finally {
         busyRef.current = false;
         setProgress(null);
@@ -1012,6 +1109,7 @@ export function useL816Session(
       error,
       pendingCount,
       uploaded: new Set(uploadedNames),
+      unusable: new Set(unusableNames),
       patientId,
       setPatientId,
       nearby: Object.values(foundMap),

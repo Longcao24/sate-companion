@@ -9,6 +9,7 @@ import { makePlaudLink } from "../plaud/PlaudLink";
 import { KnownL816, loadKnownL816s, rememberL816 } from "../l816/L816Store";
 import { makeL816Link } from "../l816/L816Link";
 import { useL816Session } from "../l816/useL816Session";
+import { L816TransferModal } from "../l816/L816TransferModal";
 import { L816ConnectScreen } from "../screens/L816ConnectScreen";
 import { L816_ENABLED } from "../features";
 import { KnownPendant, loadKnownPendants } from "../pendant/PendantStore";
@@ -342,6 +343,12 @@ export function SateRoot() {
           onClose={() => setScreen({ name: "devices" })}
         />
       )}
+      {/* The transfer sheet lives at the ROOT, over whatever the user is on.
+          The link is app-level, so a take made with the phone in a pocket starts
+          uploading while they are reading a report — and from there the app used
+          to look completely idle. */}
+      <L816TransferModal session={l816Session} />
+
       {/* Only on tabs. A bar under a report would offer to jump away mid-read
           with no way back to where you were. */}
       {screen.name === "tab" && (
