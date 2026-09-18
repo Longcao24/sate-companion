@@ -13,7 +13,7 @@ import { Button, Card, Field, GlassBackground, Logo, Muted } from "../components
 import { IS_SATE_APP } from "../sate/variant";
 import { QrScannerModal } from "../components/QrScannerModal";
 import { useStore } from "../store";
-import { D } from "../theme";
+import { APP as D } from "../theme";
 
 // Two ways in: the traditional email + password, or a one-time code / QR
 // generated in the SATE web app ("sign in on phone").

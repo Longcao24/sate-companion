@@ -4,7 +4,7 @@ import { L816DeviceCard } from "../components/L816DeviceCard";
 import { PendantDeviceCard } from "../components/PendantDeviceCard";
 import { PlaudDeviceCard } from "../components/PlaudDeviceCard";
 import { ManagedDevice } from "../protocol";
-import { D } from "../theme";
+import { FONT, R, S } from "../theme";
 
 // The top-left control on Dashboard and Reports.
 //
@@ -24,14 +24,14 @@ function Glyph({ kind, width }: { kind: string; width: number }) {
   if (kind === "l816") return <L816DeviceCard width={width} />;
   if (kind === "pendant") return <PendantDeviceCard width={width} />;
   if (kind === "plaud") return <PlaudDeviceCard width={width} />;
-  return <Feather name="cpu" size={18} color={D.sky} />;
+  return <Feather name="cpu" size={18} color={S.teal} />;
 }
 
 function BatteryBar({ pct }: { pct: number }) {
   const clamped = Math.max(0, Math.min(100, Math.round(pct)));
   // Red only when it is genuinely a problem — a bar that turns red at 40% trains
   // people to ignore it by the time it matters.
-  const color = clamped <= 15 ? D.red : clamped <= 30 ? D.amber : D.green;
+  const color = clamped <= 15 ? S.badDot : clamped <= 30 ? S.warnDot : S.okDot;
   return (
     <View style={s.batWrap} accessibilityLabel={`Battery ${clamped} percent`}>
       <View style={s.batCap} />
@@ -64,7 +64,7 @@ export function SateDeviceChip({
         accessibilityLabel="Add device"
         style={({ pressed }) => [s.addBtn, { opacity: pressed ? 0.6 : 1 }]}
       >
-        <Feather name="plus-circle" size={20} color={D.ink} />
+        <Feather name="plus-circle" size={20} color={S.ink} />
         <Text style={s.addTxt}>Add device</Text>
       </Pressable>
     );
@@ -101,15 +101,15 @@ export function SateDeviceChip({
 
 const s = StyleSheet.create({
   addBtn: { flexDirection: "row", alignItems: "center", gap: 8 },
-  addTxt: { color: D.ink, fontSize: 16, fontWeight: "700" },
+  addTxt: { color: S.ink, fontSize: 16, fontFamily: FONT.extra },
   chip: {
     flexDirection: "row",
     alignItems: "center",
     gap: 9,
-    backgroundColor: D.tile,
+    backgroundColor: S.card,
     borderRadius: 999,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: D.line,
+    borderWidth: 1,
+    borderColor: S.line,
     paddingLeft: 8,
     paddingRight: 12,
     paddingVertical: 6,
@@ -118,25 +118,25 @@ const s = StyleSheet.create({
     width: 30,
     height: 30,
     borderRadius: 999,
-    backgroundColor: D.panel,
+    backgroundColor: S.tealTint,
     alignItems: "center",
     justifyContent: "center",
     overflow: "hidden",
   },
-  chipName: { color: D.ink, fontSize: 14, fontWeight: "700" },
-  chipSub: { color: D.faint, fontSize: 11, marginTop: 1 },
+  chipName: { color: S.ink, fontSize: 14, fontFamily: FONT.extra },
+  chipSub: { color: S.mute, fontSize: 11, marginTop: 1, fontFamily: FONT.regular },
   // Vertical battery: a little cap on top of a body that fills from the bottom.
   batWrap: { alignItems: "center", gap: 2 },
-  batCap: { width: 6, height: 2, borderRadius: 1, backgroundColor: D.faint },
+  batCap: { width: 6, height: 2, borderRadius: 1, backgroundColor: S.faint },
   batBody: {
     width: 12,
     height: 22,
     borderRadius: 3,
     borderWidth: 1,
-    borderColor: D.faint,
+    borderColor: S.faint,
     justifyContent: "flex-end",
     overflow: "hidden",
   },
   batFill: { width: "100%" },
-  batTxt: { fontSize: 9, fontWeight: "700" },
+  batTxt: { fontSize: 9, fontFamily: FONT.extra },
 });

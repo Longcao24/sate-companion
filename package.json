@@ -14,6 +14,7 @@
     "companion:android": "npm run companion:prebuild && npm run companion:build && adb install -r android/app/build/outputs/apk/release/app-release.apk"
   },
   "dependencies": {
+    "@expo-google-fonts/manrope": "^0.4.2",
     "@react-native-async-storage/async-storage": "2.2.0",
     "babel-preset-expo": "~54.0.10",
     "buffer": "^6.0.3",
@@ -23,6 +24,7 @@
     "expo-camera": "~17.0.10",
     "expo-dev-client": "~6.0.21",
     "expo-file-system": "~19.0.24",
+    "expo-font": "~14.0.12",
     "expo-status-bar": "~3.0.9",
     "react": "19.1.0",
     "react-native": "0.81.5",

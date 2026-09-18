@@ -3,7 +3,7 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-nati
 import { L816DeviceCard } from "../components/L816DeviceCard";
 import { l816DisplayName } from "../l816/L816Link";
 import { L816Session } from "../l816/useL816Session";
-import { D } from "../theme";
+import { FONT, R, S } from "../theme";
 
 // "There is a recorder in the room."
 //
@@ -69,7 +69,7 @@ export function SateNearbyBanner({ session }: { session: L816Session }) {
               : "Tap to connect — recordings upload themselves once it is"}
         </Text>
       </View>
-      {busy ? <ActivityIndicator color={D.sky} /> : <Text style={s.cta}>Connect</Text>}
+      {busy ? <ActivityIndicator color={S.teal} /> : <Text style={s.cta}>Connect</Text>}
     </Pressable>
   );
 }
@@ -79,10 +79,10 @@ const s = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    backgroundColor: D.skyBg,
-    borderRadius: 14,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: D.sky,
+    backgroundColor: S.tealTint,
+    borderRadius: R.panel,
+    borderWidth: 1,
+    borderColor: S.teal,
     padding: 12,
     marginBottom: 14,
   },
@@ -90,15 +90,15 @@ const s = StyleSheet.create({
     width: 38,
     height: 38,
     borderRadius: 10,
-    backgroundColor: D.panel,
+    backgroundColor: S.card,
     alignItems: "center",
     justifyContent: "center",
     overflow: "hidden",
   },
-  title: { color: D.ink, fontSize: 15, fontWeight: "700" },
-  sub: { color: D.sub, fontSize: 12, marginTop: 3 },
-  subFail: { color: D.amber },
+  title: { color: S.ink, fontSize: 15, fontFamily: FONT.extra },
+  sub: { color: S.sub, fontSize: 12, marginTop: 3, fontFamily: FONT.regular },
+  subFail: { color: S.warnInk },
   // A generous box: Android's Bold text setting clips a label sized to its own
   // measured width (see the pairing screen's `close` style).
-  cta: { color: D.sky, fontSize: 15, fontWeight: "700", minWidth: 86, textAlign: "right" },
+  cta: { color: S.teal, fontSize: 15, fontFamily: FONT.extra, minWidth: 86, textAlign: "right" },
 });

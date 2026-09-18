@@ -2,7 +2,7 @@ import React from "react";
 import { Pressable, StyleSheet, Switch, Text, View } from "react-native";
 import { Button, Card, GlassBackground, Muted, Title } from "../components/ui";
 import { useStore } from "../store";
-import { D } from "../theme";
+import { APP as D } from "../theme";
 
 export function SettingsScreen({ onClose }: { onClose: () => void }) {
   const { settings, update, signOut } = useStore();

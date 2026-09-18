@@ -19,7 +19,15 @@ import { SateReportScreen } from "./SateReportScreen";
 import { SateDashboardScreen } from "./SateDashboardScreen";
 import { SateNavBar, SateTab } from "./SateNavBar";
 import { SettingsScreen } from "../screens/SettingsScreen";
-import { D } from "../theme";
+import { FONT, R, S } from "../theme";
+import {
+  useFonts,
+  Manrope_400Regular,
+  Manrope_500Medium,
+  Manrope_600SemiBold,
+  Manrope_700Bold,
+  Manrope_800ExtraBold,
+} from "@expo-google-fonts/manrope";
 import { useEffect, useRef } from "react";
 
 // Root of the **SATE** app — the reading half of the product.
@@ -184,11 +192,24 @@ export function SateRoot() {
     if (d.kind === "l816" && L816_ENABLED) setScreen({ name: "l816", targetId: d.serial });
   };
 
-  if (!ready) return <View style={{ flex: 1, backgroundColor: D.bg }} />;
+  // Manrope is the redesign's voice, and the app is unreadable in the wrong one
+  // for the frame or two before it lands — so hold the splash rather than flash
+  // the system font. `error` is treated as loaded on purpose: a missing font
+  // file must degrade to the fallback stack, never to a blank app.
+  const [fontsReady, fontError] = useFonts({
+    Manrope_400Regular,
+    Manrope_500Medium,
+    Manrope_600SemiBold,
+    Manrope_700Bold,
+    Manrope_800ExtraBold,
+  });
+
+  if (!ready || (!fontsReady && !fontError))
+    return <View style={{ flex: 1, backgroundColor: S.bg }} />;
   if (!settings.token) {
     return (
       <>
-        <StatusBar style="light" />
+        <StatusBar style="dark" />
         <LoginScreen />
       </>
     );
@@ -196,7 +217,7 @@ export function SateRoot() {
 
   return (
     <>
-      <StatusBar style="light" />
+      <StatusBar style="dark" />
       {screen.name === "tab" && screen.tab === "dashboard" && (
         <SateDashboardScreen
           api={api}
@@ -309,10 +330,13 @@ const s = StyleSheet.create({
   devBack: { position: "absolute", top: 54, left: 12, right: 0 },
   backPill: {
     alignSelf: "flex-start",
-    backgroundColor: D.chip,
-    borderRadius: 999,
-    paddingHorizontal: 14,
-    paddingVertical: 7,
+    backgroundColor: S.card,
+    borderRadius: R.pill,
+    borderWidth: 1,
+    borderColor: S.line,
+    paddingHorizontal: 16,
+    minHeight: 40,
+    justifyContent: "center",
   },
-  backTxt: { color: D.sky, fontSize: 15, fontWeight: "700" },
+  backTxt: { color: S.teal, fontSize: 15, fontFamily: FONT.extra },
 });

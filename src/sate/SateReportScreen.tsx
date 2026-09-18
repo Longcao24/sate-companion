@@ -17,7 +17,7 @@ import { SateApi, TranscriptConflict } from "../api/sateApi";
 import { Recording, TranscriptSegment } from "../protocol";
 import { checkName, renameSpeaker, SpeakerRow, speakersOf } from "./speakers";
 import { recordingLabel } from "./label";
-import { D } from "../theme";
+import { FONT, R, S } from "../theme";
 
 // One report, read from the server, laid out as the web app lays it out:
 // Overview / Transcript / Analysis / Language / Issues.
@@ -255,7 +255,7 @@ export function SateReportScreen({
 
       {!rec ? (
         <View style={s.center}>
-          <ActivityIndicator color={D.sky} />
+          <ActivityIndicator color={S.teal} />
         </View>
       ) : (
         <ScrollView style={s.scroll} contentContainerStyle={s.content}>
@@ -484,7 +484,7 @@ export function SateReportScreen({
               onChangeText={setDraft}
               autoFocus
               placeholder="e.g. Clinician, or the child's name"
-              placeholderTextColor={D.faint}
+              placeholderTextColor={S.mute}
               style={s.input}
             />
             <View style={s.mRow}>
@@ -507,154 +507,194 @@ export function SateReportScreen({
 }
 
 const s = StyleSheet.create({
-  flex: { flex: 1, backgroundColor: D.bg },
-  head: { paddingTop: 56, paddingHorizontal: 16, paddingBottom: 6 },
-  back: { color: D.sky, fontSize: 15, fontWeight: "600" },
-  headTitle: { color: D.ink, fontSize: 20, fontWeight: "800", marginTop: 6 },
-  tabsWrap: { flexGrow: 0, paddingHorizontal: 12, paddingVertical: 8 },
-  tab: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, marginHorizontal: 4 },
-  tabOn: { backgroundColor: D.skyBg },
-  tabTxt: { color: D.sub, fontSize: 14, fontWeight: "600" },
-  tabTxtOn: { color: D.sky },
+  flex: { flex: 1, backgroundColor: S.bg },
+  head: { paddingTop: 56, paddingHorizontal: 20, paddingBottom: 6 },
+  back: { color: S.teal, fontSize: 15, fontFamily: FONT.bold, minWidth: 90 },
+  headTitle: { color: S.ink, fontSize: 22, fontFamily: FONT.extra, letterSpacing: -0.4, marginTop: 6 },
+
+  // Five tabs will not fit a segmented control at phone width, so they stay a
+  // horizontal scroller — dressed as the design's control: a sunken track with
+  // the active chip lifted out of it in white.
+  tabsWrap: { flexGrow: 0, paddingHorizontal: 16, paddingVertical: 10 },
+  tab: {
+    minHeight: 40,
+    paddingHorizontal: 15,
+    justifyContent: "center",
+    borderRadius: 11,
+    marginRight: 6,
+    backgroundColor: S.sunken,
+  },
+  tabOn: {
+    backgroundColor: S.card,
+    shadowColor: "#12211F",
+    shadowOpacity: 0.08,
+    shadowRadius: 3,
+    shadowOffset: { width: 0, height: 1 },
+    elevation: 2,
+  },
+  tabTxt: { color: S.mute, fontSize: 13.5, fontFamily: FONT.extra },
+  tabTxtOn: { color: S.ink },
+
   scroll: { flex: 1, backgroundColor: "transparent" },
-  content: { padding: 16, paddingBottom: 56 },
-  grid: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginBottom: 10 },
+  content: { padding: 20, paddingBottom: 56 },
+
+  grid: { flexDirection: "row", flexWrap: "wrap", gap: 9, marginBottom: 10 },
   metric: {
     flexGrow: 1,
     minWidth: "45%",
-    backgroundColor: D.panel,
-    borderRadius: 14,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: D.line,
-    padding: 14,
+    backgroundColor: S.tile,
+    borderRadius: R.tile,
+    padding: 13,
   },
-  metricVal: { color: D.ink, fontSize: 22, fontWeight: "800" },
-  metricLabel: { color: D.sub, fontSize: 12, marginTop: 4, fontWeight: "600" },
-  metricHint: { color: D.faint, fontSize: 11, marginTop: 2 },
-  section: { color: D.ink, fontSize: 16, fontWeight: "700", marginTop: 16, marginBottom: 4 },
-  hint: { color: D.faint, fontSize: 12, lineHeight: 17, marginTop: 10 },
-  big: { color: D.ink, fontSize: 30, fontWeight: "800", marginTop: 4 },
-  dim: { color: D.sub, fontSize: 13, marginTop: 6 },
-  link: { color: D.sky, fontSize: 14, fontWeight: "600" },
+  metricVal: { color: S.ink, fontSize: 24, fontFamily: FONT.extra, letterSpacing: -0.6 },
+  metricLabel: { color: S.mute, fontSize: 12, marginTop: 4, fontFamily: FONT.bold },
+  metricHint: { color: S.faint, fontSize: 11, marginTop: 2, fontFamily: FONT.regular },
+
+  section: { color: S.ink, fontSize: 17.5, fontFamily: FONT.extra, marginTop: 20, marginBottom: 6 },
+  hint: { color: S.mute, fontSize: 12.5, lineHeight: 19, marginTop: 12, fontFamily: FONT.regular },
+  big: { color: S.ink, fontSize: 30, fontFamily: FONT.extra, letterSpacing: -1, marginTop: 4 },
+  dim: { color: S.sub, fontSize: 13, marginTop: 6, fontFamily: FONT.regular },
+  link: { color: S.teal, fontSize: 14, fontFamily: FONT.extra },
+
   spRow: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: D.panel,
-    borderRadius: 12,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: D.line,
-    padding: 12,
-    marginTop: 8,
+    backgroundColor: S.card,
+    borderRadius: R.tile,
+    borderWidth: 1,
+    borderColor: S.line,
+    padding: 14,
+    marginTop: 9,
   },
-  spName: { color: D.ink, fontSize: 15, fontWeight: "700" },
+  spName: { color: S.ink, fontSize: 15, fontFamily: FONT.extra },
+
+  // One utterance. `segLive` is the line under the playhead.
   seg: {
-    backgroundColor: D.panel,
-    borderRadius: 12,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: D.line,
-    padding: 12,
-    marginBottom: 8,
+    backgroundColor: S.card,
+    borderRadius: R.tile,
+    borderWidth: 1,
+    borderColor: S.line,
+    padding: 14,
+    marginBottom: 9,
   },
-  segLive: { borderColor: D.sky, backgroundColor: D.skyBg },
-  segHead: { flexDirection: "row", justifyContent: "space-between", marginBottom: 4 },
+  segLive: { borderColor: S.teal, backgroundColor: S.tealTint },
+  segHead: { flexDirection: "row", justifyContent: "space-between", marginBottom: 5 },
   segWhoTap: { textDecorationLine: "underline" },
-  segWho: { color: D.sky, fontSize: 12, fontWeight: "700" },
-  segAt: { color: D.faint, fontSize: 12 },
-  segText: { color: D.ink, fontSize: 15, lineHeight: 21 },
+  segWho: { color: S.teal, fontSize: 11.5, fontFamily: FONT.extra, letterSpacing: 0.4 },
+  segAt: { color: S.ghost, fontSize: 11.5, fontFamily: FONT.regular },
+  segText: { color: S.ink, fontSize: 14.5, lineHeight: 22, fontFamily: FONT.regular },
+
   issueRow: {
     flexDirection: "row",
     justifyContent: "space-between",
-    paddingVertical: 11,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: D.line,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: S.hair,
   },
-  issueName: { color: D.ink, fontSize: 14 },
-  issueCount: { color: D.amber, fontSize: 14, fontWeight: "700" },
+  issueName: { color: S.sub, fontSize: 14, fontFamily: FONT.regular },
+  issueCount: { color: S.warnInk, fontSize: 14, fontFamily: FONT.extra },
+
   player: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 10,
-    marginHorizontal: 16,
+    gap: 11,
+    marginHorizontal: 20,
     marginBottom: 8,
-    padding: 10,
-    backgroundColor: D.panel,
-    borderRadius: 14,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: D.line,
+    padding: 11,
+    backgroundColor: S.card,
+    borderRadius: R.tile,
+    borderWidth: 1,
+    borderColor: S.line,
   },
   playBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: D.sky,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: S.teal,
     alignItems: "center",
     justifyContent: "center",
   },
-  barTrack: { flex: 1, height: 5, borderRadius: 3, backgroundColor: D.tile, overflow: "hidden" },
-  barFill: { height: 5, borderRadius: 3, backgroundColor: D.sky },
+  barTrack: { flex: 1, height: 7, borderRadius: 99, backgroundColor: S.sunken, overflow: "hidden" },
+  barFill: { height: 7, borderRadius: 99, backgroundColor: S.teal },
   // Fixed width and no shrinking: the progress bar is flex:1 and was squeezing
   // the total duration off the end, so the player read "0:04 /" — a clock with
   // nothing to measure against.
   playTime: {
-    color: D.sub,
+    color: S.sub,
     fontSize: 12,
+    fontFamily: FONT.bold,
     fontVariant: ["tabular-nums"],
     minWidth: 86,
     flexShrink: 0,
     textAlign: "right",
   },
+
   group: {
-    color: D.faint,
-    fontSize: 11,
-    fontWeight: "800",
-    letterSpacing: 1.1,
-    marginTop: 18,
-    marginBottom: 2,
+    color: S.mute,
+    fontSize: 12,
+    fontFamily: FONT.extra,
+    letterSpacing: 0.9,
+    marginTop: 22,
+    marginBottom: 4,
   },
   metRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: 12,
-    paddingVertical: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: D.line,
+    paddingVertical: 13,
+    borderBottomWidth: 1,
+    borderBottomColor: S.hair,
   },
-  mLabel: { color: D.ink, fontSize: 15, fontWeight: "700" },
-  mHint: { color: D.faint, fontSize: 11, marginTop: 2 },
-  mValue: { color: D.ink, fontSize: 17, fontWeight: "800", fontVariant: ["tabular-nums"] },
+  mLabel: { color: S.ink, fontSize: 15, fontFamily: FONT.extra },
+  mHint: { color: S.mute, fontSize: 11.5, marginTop: 2, fontFamily: FONT.regular },
+  mValue: { color: S.ink, fontSize: 18, fontFamily: FONT.extra, fontVariant: ["tabular-nums"] },
   // Deliberately quiet: absent is information, not an error.
-  mAbsent: { color: D.faint, fontSize: 12, fontStyle: "italic" },
-  notice: { backgroundColor: D.skyBg, borderRadius: 10, padding: 11, marginBottom: 12 },
-  noticeTxt: { color: D.sky, fontSize: 13 },
-  center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 28 },
-  emptyTitle: { color: D.ink, fontSize: 18, fontWeight: "700", marginBottom: 8 },
-  emptySub: { color: D.sub, fontSize: 14, textAlign: "center", lineHeight: 20 },
-  cta: { marginTop: 20, backgroundColor: D.sky, borderRadius: 12, paddingVertical: 13, paddingHorizontal: 30 },
-  ctaTxt: { color: "#fff", fontWeight: "700" },
-  mWrap: { flex: 1, justifyContent: "center", padding: 22 },
-  mBack: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.6)" },
-  mCard: {
-    backgroundColor: D.hero,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: D.line,
-    padding: 18,
-  },
-  mTitle: { color: D.ink, fontSize: 18, fontWeight: "800", marginBottom: 6 },
-  input: {
-    backgroundColor: D.tile,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: D.line,
-    color: D.ink,
-    fontSize: 16,
+  mAbsent: { color: S.faint, fontSize: 12, fontStyle: "italic", fontFamily: FONT.regular },
+
+  notice: {
+    backgroundColor: S.goBg,
+    borderRadius: R.tile,
     padding: 13,
+    marginBottom: 12,
+  },
+  noticeTxt: { color: S.goInk, fontSize: 13, lineHeight: 19, fontFamily: FONT.medium },
+
+  center: { flex: 1, alignItems: "center", justifyContent: "center", padding: 28 },
+  emptyTitle: { color: S.ink, fontSize: 18, fontFamily: FONT.extra, marginBottom: 8 },
+  emptySub: { color: S.sub, fontSize: 14, textAlign: "center", lineHeight: 21, fontFamily: FONT.regular },
+  cta: {
+    marginTop: 20,
+    backgroundColor: S.teal,
+    borderRadius: R.button,
+    paddingVertical: 14,
+    paddingHorizontal: 30,
+  },
+  ctaTxt: { color: "#FFFFFF", fontFamily: FONT.bold, fontSize: 15.5 },
+
+  // The rename sheet. Bottom-anchored like the design's confirm sheet.
+  mWrap: { flex: 1, justifyContent: "flex-end", padding: 16 },
+  mBack: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(18,33,31,0.42)" },
+  mCard: {
+    backgroundColor: S.card,
+    borderRadius: R.card,
+    padding: 20,
+  },
+  mTitle: { color: S.ink, fontSize: 18, fontFamily: FONT.extra, marginBottom: 6 },
+  input: {
+    backgroundColor: "#FBFCFC",
+    borderRadius: R.button,
+    borderWidth: 1.5,
+    borderColor: "#E3E9E8",
+    color: S.ink,
+    fontSize: 16,
+    fontFamily: FONT.medium,
+    padding: 15,
     marginTop: 14,
   },
-  mRow: { flexDirection: "row", gap: 10, marginTop: 16 },
-  mBtn: { flex: 1, borderRadius: 12, paddingVertical: 13, alignItems: "center" },
-  mGhost: { backgroundColor: D.tile },
-  mGhostTxt: { color: D.sub, fontWeight: "700" },
-  mGo: { backgroundColor: D.sky },
-  mGoTxt: { color: "#fff", fontWeight: "700" },
+  mRow: { flexDirection: "row", gap: 10, marginTop: 18 },
+  mBtn: { flex: 1, minHeight: 50, borderRadius: R.button, alignItems: "center", justifyContent: "center" },
+  mGhost: { backgroundColor: S.card, borderWidth: 1.5, borderColor: "#DDE5E4" },
+  mGhostTxt: { color: S.ink, fontFamily: FONT.bold, fontSize: 15.5 },
+  mGo: { backgroundColor: S.teal },
+  mGoTxt: { color: "#FFFFFF", fontFamily: FONT.bold, fontSize: 15.5 },
 });

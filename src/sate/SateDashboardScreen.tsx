@@ -1,30 +1,34 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  ActivityIndicator,
-  Pressable,
-  RefreshControl,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
+import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
-import { Feather } from "@expo/vector-icons";
-import { GlassBackground, Logo } from "../components/ui";
-import { ManagedDevice, Recording } from "../protocol";
 import { SateDeviceChip } from "./SateDeviceChip";
 import { SateNearbyBanner } from "./SateNearbyBanner";
+import { Body, Card, H1, H2, H3, Meta, Pill, SectionLabel, Stat, Tile, Tone } from "./ui";
 import { SateApi } from "../api/sateApi";
-import { recordingLabel } from "./label";
 import { L816Session } from "../l816/useL816Session";
-import { D } from "../theme";
+import { ManagedDevice, Recording } from "../protocol";
+import { recordingLabel } from "./label";
+import { FONT, R, S } from "../theme";
 
-// Dashboard: what the account has right now, in two numbers and a list.
+// The SATE app's home.
 //
-// Everything is read from the server or from the paired-device store. Nothing
-// here is computed on the phone, and nothing here can be acted on destructively:
-// it answers "is my hardware fine and did my recordings arrive", which is the
-// question a clinician actually opens the app with.
+// The redesign's shape — a greeting, one device card, then the most recent work
+// — with this app's own numbers. Every figure is counted from rows the server
+// returned: the report total, the last seven days, and the live state of the
+// recorder. Nothing is illustrative.
+
+function when(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? ""
+    : d.toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+function greeting(): string {
+  const h = new Date().getHours();
+  return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+}
 
 export function SateDashboardScreen({
   api,
@@ -44,12 +48,11 @@ export function SateDashboardScreen({
   onOpenReport: (r: Recording) => void;
   onAddDevice: () => void;
   onOpenDevice?: (d: ManagedDevice) => void;
-  /** The live L816 session, for the "a recorder is nearby" offer. */
-  l816?: L816Session;
   /** What the L816 session is doing RIGHT NOW. A paired row that only ever says
    *  "paired over Bluetooth" cannot answer the one question the dashboard is
    *  for — is the recorder connected, and is anything still waiting to upload? */
   liveL816?: { connectedId: string | null; line: string; busy: boolean } | null;
+  l816?: L816Session;
 }) {
   const [rows, setRows] = useState<Recording[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -80,27 +83,39 @@ export function SateDashboardScreen({
   const recent = (rows ?? []).filter(
     (r) => r.created_at && new Date(r.created_at).getTime() >= weekAgo
   ).length;
+  const latest = (rows ?? []).slice(0, 3);
 
   return (
     <View style={s.flex}>
-      <GlassBackground />
-      <StatusBar style="light" />
+      <StatusBar style="dark" />
 
       <View style={s.top}>
         <SateDeviceChip devices={devices} onPress={onAddDevice} />
-        <Logo size={24} />
       </View>
 
       <ScrollView
         style={s.scroll}
         contentContainerStyle={s.content}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={D.sub} />
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={S.mute} />
         }
       >
-        <Text style={s.title}>Dashboard</Text>
+        <Meta style={{ fontFamily: FONT.bold, color: S.sub }}>{greeting()}</Meta>
+        <H1 style={{ marginTop: 3 }}>
+          {rows === null
+            ? "Loading your reports…"
+            : rows.length === 0
+              ? "No reports yet"
+              : recent > 0
+                ? `${recent} new report${recent === 1 ? "" : "s"} this week`
+                : "Everything is up to date"}
+        </H1>
 
-        {l816 && <SateNearbyBanner session={l816} />}
+        {l816 && (
+          <View style={{ marginTop: 16 }}>
+            <SateNearbyBanner session={l816} />
+          </View>
+        )}
 
         {error && (
           <View style={s.warn}>
@@ -108,103 +123,137 @@ export function SateDashboardScreen({
           </View>
         )}
 
-        <View style={s.grid}>
-          <Pressable onPress={onOpenReports} style={s.card}>
-            <Text style={s.big}>{rows === null ? "—" : rows.length}</Text>
-            <Text style={s.cardLabel}>Reports</Text>
-            <Text style={s.cardHint}>tap to see them all</Text>
-          </Pressable>
-          <View style={s.card}>
-            <Text style={s.big}>{rows === null ? "—" : recent}</Text>
-            <Text style={s.cardLabel}>This week</Text>
-            <Text style={s.cardHint}>last 7 days</Text>
-          </View>
+        {/* Two counts, both real: everything stored, and what landed this week. */}
+        <View style={s.statRow}>
+          <Card onPress={onOpenReports} style={s.statCard}>
+            <Stat>{rows === null ? "—" : rows.length}</Stat>
+            <Meta style={s.statLabel}>Reports</Meta>
+            <Meta style={s.statHint}>tap to see them all</Meta>
+          </Card>
+          <Card style={s.statCard}>
+            <Stat>{rows === null ? "—" : recent}</Stat>
+            <Meta style={s.statLabel}>This week</Meta>
+            <Meta style={s.statHint}>last 7 days</Meta>
+          </Card>
         </View>
 
-        <Text style={s.section}>Devices</Text>
+        <SectionLabel style={{ marginTop: 26, marginBottom: 10 }}>YOUR RECORDER</SectionLabel>
+
         {!devicesLoaded ? (
-          <ActivityIndicator color={D.sky} style={{ marginTop: 14 }} />
+          <ActivityIndicator color={S.teal} style={{ marginTop: 14 }} />
         ) : devices.length === 0 ? (
-          <Pressable onPress={onAddDevice} style={s.emptyDev}>
-            <Feather name="plus-circle" size={18} color={D.sky} />
-            <View style={{ flex: 1 }}>
-              <Text style={s.rowTitle}>No device paired</Text>
-              <Text style={s.rowSub}>
-                You can still read every report — a device is only needed to make new ones.
-              </Text>
-            </View>
-          </Pressable>
+          <Card onPress={onAddDevice} style={s.emptyDev}>
+            <H3>No device paired</H3>
+            <Body style={{ marginTop: 5 }}>
+              You can still read every report — a device is only needed to make new ones.
+            </Body>
+            <Meta style={{ color: S.teal, fontFamily: FONT.extra, marginTop: 12 }}>
+              Add a device →
+            </Meta>
+          </Card>
         ) : (
-          devices.map((d) => {
-            const kind = d.kind ?? "sate";
-            const external = kind !== "sate";
-            // Live only for the L816 that is actually connected right now.
-            const live =
-              kind === "l816" && liveL816 && liveL816.connectedId === d.serial ? liveL816 : null;
-            const dot = live
-              ? live.busy
-                ? D.amber
-                : D.green
-              : external
-                ? D.sky
-                : d.online
-                  ? D.green
-                  : D.faint;
-            return (
-              <Pressable
-                key={d.id}
-                onPress={() => onOpenDevice?.(d)}
-                disabled={!onOpenDevice}
-                style={({ pressed }) => [s.devRow, { opacity: pressed ? 0.7 : 1 }]}
-              >
-                <View style={[s.dot, { backgroundColor: dot }]} />
-                <View style={{ flex: 1 }}>
-                  <Text style={s.rowTitle}>{d.name}</Text>
-                  <Text style={s.rowSub}>
-                    {live
-                      ? live.line
-                      : external
-                        ? // A Plaud / Pendant / L816 has no Wi-Fi and no heartbeat, so
-                          // "offline" would be wrong rather than merely unhelpful.
-                          `${d.fw} · paired over Bluetooth`
-                        : d.online
-                          ? "Online"
-                          : "Offline · it keeps recording on its own"}
-                  </Text>
-                </View>
-                {onOpenDevice && <Feather name="chevron-right" size={18} color={D.faint} />}
-              </Pressable>
-            );
-          })
+          <View style={{ gap: 11 }}>
+            {devices.map((d) => {
+              const kind = d.kind ?? "sate";
+              const external = kind !== "sate";
+              const live =
+                kind === "l816" && liveL816 && liveL816.connectedId === d.serial ? liveL816 : null;
+              const tone: Tone = live
+                ? live.busy
+                  ? "go"
+                  : "ok"
+                : external
+                  ? "idle"
+                  : d.online
+                    ? "ok"
+                    : "idle";
+              const label = live
+                ? live.busy
+                  ? "Working"
+                  : "Connected"
+                : external
+                  ? "Paired"
+                  : d.online
+                    ? "Online"
+                    : "Offline";
+              return (
+                <Card key={d.id} onPress={() => onOpenDevice?.(d)}>
+                  <View style={s.devTop}>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <H2 numberOfLines={1}>{d.name}</H2>
+                      <Meta style={{ marginTop: 2 }} numberOfLines={2}>
+                        {live
+                          ? live.line
+                          : external
+                            ? `${d.fw} · paired over Bluetooth`
+                            : d.online
+                              ? "Online"
+                              : "Offline · it keeps recording on its own"}
+                      </Meta>
+                    </View>
+                    <Pill tone={tone}>{label}</Pill>
+                  </View>
+
+                  {/* 🛑 The battery tile is drawn ONLY when the battery is known.
+                      It arrives in the SATE recorder's Wi-Fi heartbeat; an L816,
+                      a pendant and a Plaud have no Wi-Fi and send none. A guessed
+                      bar would say "flat" about a device that may be full, and a
+                      clinician deciding whether to take it to a session would act
+                      on that. */}
+                  {typeof d.battery_pct === "number" && (
+                    <View style={s.tileRow}>
+                      <Tile label="Battery">
+                        <Text style={s.tileVal}>{Math.round(d.battery_pct)}%</Text>
+                      </Tile>
+                      <Tile label="Status">
+                        <Text style={s.tileVal}>{d.online ? "Online" : "Offline"}</Text>
+                      </Tile>
+                    </View>
+                  )}
+
+                  {onOpenDevice && (
+                    <View style={s.devMore}>
+                      <Text style={s.devMoreTxt}>View device →</Text>
+                    </View>
+                  )}
+                </Card>
+              );
+            })}
+          </View>
         )}
 
-        <Text style={s.section}>Latest</Text>
+        <View style={s.latestHead}>
+          <SectionLabel>RECENT SESSIONS</SectionLabel>
+          <Pressable onPress={onOpenReports} hitSlop={10} accessibilityRole="button">
+            <Text style={s.seeAll}>See all</Text>
+          </Pressable>
+        </View>
+
         {rows === null ? (
-          <ActivityIndicator color={D.sky} style={{ marginTop: 14 }} />
-        ) : rows.length === 0 ? (
-          <Text style={s.rowSub}>No reports yet.</Text>
+          <ActivityIndicator color={S.teal} style={{ marginTop: 14 }} />
+        ) : latest.length === 0 ? (
+          <Card style={s.emptyDev}>
+            <H3>Nothing recorded yet</H3>
+            <Body style={{ marginTop: 5 }}>
+              Your completed sessions appear here once SATE has processed one.
+            </Body>
+          </Card>
         ) : (
-          rows.slice(0, 3).map((r) => (
-            <Pressable key={r.id} onPress={() => onOpenReport(r)} style={s.devRow}>
-              <Feather name="file-text" size={16} color={D.sky} />
-              <View style={{ flex: 1 }}>
-                <Text style={s.rowTitle} numberOfLines={1}>
-                  {recordingLabel(r)}
-                </Text>
-                <Text style={s.rowSub}>
-                  {r.created_at
-                    ? new Date(r.created_at).toLocaleString([], {
-                        day: "numeric",
-                        month: "short",
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })
-                    : ""}
-                </Text>
-              </View>
-              <Feather name="chevron-right" size={18} color={D.faint} />
-            </Pressable>
-          ))
+          <View style={{ gap: 11 }}>
+            {latest.map((r) => (
+              <Card key={r.id} onPress={() => onOpenReport(r)} style={s.row}>
+                <View style={s.devTop}>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <H3 numberOfLines={1}>{recordingLabel(r)}</H3>
+                    <Meta style={{ marginTop: 3 }}>{when(r.created_at)}</Meta>
+                  </View>
+                  <Pill tone={r.needs_review ? "warn" : "ok"}>
+                    {r.needs_review ? "Needs review" : "Ready"}
+                  </Pill>
+                </View>
+              </Card>
+            ))}
+          </View>
         )}
       </ScrollView>
     </View>
@@ -212,57 +261,36 @@ export function SateDashboardScreen({
 }
 
 const s = StyleSheet.create({
-  flex: { flex: 1, backgroundColor: D.bg },
-  top: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 16,
-    paddingTop: 56,
-  },
-  addBtn: { flexDirection: "row", alignItems: "center", gap: 8 },
-  addTxt: { color: D.ink, fontSize: 16, fontWeight: "700" },
-  scroll: { flex: 1, backgroundColor: "transparent" },
-  content: { padding: 16, paddingTop: 18, paddingBottom: 30 },
-  title: { color: D.ink, fontSize: 40, fontWeight: "800", letterSpacing: -0.5, marginBottom: 16 },
-  warn: { backgroundColor: D.amberBg, borderRadius: 12, padding: 12, marginBottom: 14 },
-  warnTxt: { color: D.amber, fontSize: 13 },
-  grid: { flexDirection: "row", gap: 10 },
-  card: {
-    flex: 1,
-    backgroundColor: D.panel,
-    borderRadius: 16,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: D.line,
-    padding: 16,
-  },
-  big: { color: D.ink, fontSize: 34, fontWeight: "800" },
-  cardLabel: { color: D.ink, fontSize: 14, fontWeight: "700", marginTop: 2 },
-  cardHint: { color: D.faint, fontSize: 11, marginTop: 2 },
-  section: { color: D.ink, fontSize: 17, fontWeight: "700", marginTop: 22, marginBottom: 6 },
-  devRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 11,
-    backgroundColor: D.panel,
-    borderRadius: 12,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: D.line,
-    padding: 12,
-    marginTop: 8,
-  },
-  emptyDev: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 11,
-    borderRadius: 12,
+  flex: { flex: 1, backgroundColor: S.bg },
+  top: { flexDirection: "row", alignItems: "center", paddingHorizontal: 20, paddingTop: 56 },
+  scroll: { flex: 1 },
+  content: { padding: 20, paddingTop: 14, paddingBottom: 40 },
+  warn: {
+    backgroundColor: S.warnBg,
     borderWidth: 1,
-    borderStyle: "dashed",
-    borderColor: D.line,
-    padding: 12,
-    marginTop: 8,
+    borderColor: S.warnLine,
+    borderRadius: R.panel,
+    padding: 14,
+    marginTop: 16,
   },
-  dot: { width: 9, height: 9, borderRadius: 5 },
-  rowTitle: { color: D.ink, fontSize: 15, fontWeight: "700" },
-  rowSub: { color: D.sub, fontSize: 12, marginTop: 2 },
+  warnTxt: { fontFamily: FONT.medium, fontSize: 13.5, lineHeight: 20, color: S.warnInk },
+  statRow: { flexDirection: "row", gap: 11, marginTop: 20 },
+  statCard: { flex: 1, padding: 16, borderRadius: R.panel },
+  statLabel: { fontFamily: FONT.extra, fontSize: 14, color: S.ink, marginTop: 2 },
+  statHint: { fontSize: 12, color: S.mute, marginTop: 1 },
+  emptyDev: { borderStyle: "dashed", borderColor: S.dash },
+  devTop: { flexDirection: "row", alignItems: "flex-start", gap: 12 },
+  tileRow: { flexDirection: "row", gap: 9, marginTop: 16 },
+  tileVal: { fontFamily: FONT.extra, fontSize: 14, color: S.ink },
+  devMore: { flexDirection: "row", justifyContent: "flex-end", marginTop: 14 },
+  devMoreTxt: { fontFamily: FONT.extra, fontSize: 13.5, color: S.teal },
+  latestHead: {
+    flexDirection: "row",
+    alignItems: "baseline",
+    justifyContent: "space-between",
+    marginTop: 26,
+    marginBottom: 10,
+  },
+  seeAll: { fontFamily: FONT.extra, fontSize: 13.5, color: S.teal, minWidth: 60, textAlign: "right" },
+  row: { padding: 16, borderRadius: R.panel },
 });

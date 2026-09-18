@@ -1,35 +1,26 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  ActivityIndicator,
-  Pressable,
-  RefreshControl,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from "react-native";
+import { ActivityIndicator, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
-import { Feather } from "@expo/vector-icons";
-import { GlassBackground, Logo } from "../components/ui";
 import { SateDeviceChip } from "./SateDeviceChip";
 import { SateNearbyBanner } from "./SateNearbyBanner";
+import { Body, Card, H1, H3, Meta, Pill, SectionLabel, Tone } from "./ui";
 import { SateApi } from "../api/sateApi";
+import { L816Session } from "../l816/useL816Session";
 import { ManagedDevice, Recording } from "../protocol";
 import { recordingLabel } from "./label";
-import { L816Session } from "../l816/useL816Session";
-import { D } from "../theme";
+import { FONT, R, S } from "../theme";
 
-// The SATE app's home: the reports that ALREADY EXIST on the server.
+// The SATE app's report list — the reports that ALREADY EXIST on the server.
 //
 // This app does not produce a report. The clinical pipeline transcribes and
 // analyses every recording; everything here is read back from `recordings`. So
 // an empty list means "the server has none yet", never "tap here to make one" —
 // offering a button that cannot work is worse than an honest empty state.
 //
-// Devices are deliberately demoted to the small button in the top-left corner.
-// In SATE Companion the device list IS the app because the job is managing
-// hardware; here the job is reading what the hardware produced, and hardware
-// setup is the rare errand.
+// The 2026-09 redesign changed how this looks, not what it says: every row is
+// still a real stored recording, named by the ONE naming rule (`recordingLabel`),
+// dated and measured from its own row. No figure here is invented for the sake
+// of filling a card.
 
 function when(iso: string | null): string {
   if (!iso) return "";
@@ -43,6 +34,12 @@ function duration(sec: number | null): string {
   if (!sec || sec <= 0) return "";
   const m = Math.floor(sec / 60);
   return `${m}:${String(Math.round(sec % 60)).padStart(2, "0")}`;
+}
+
+/** The pill is DERIVED FROM THE ROW, never decorative. `needs_review` is a real
+ *  column a clinician sets; everything else in this list has been processed. */
+function statusOf(r: Recording): { tone: Tone; label: string } {
+  return r.needs_review ? { tone: "warn", label: "Needs review" } : { tone: "ok", label: "Ready" };
 }
 
 export function SateHomeScreen({
@@ -87,32 +84,31 @@ export function SateHomeScreen({
 
   return (
     <View style={s.flex}>
-      <GlassBackground />
-      <StatusBar style="light" />
+      <StatusBar style="dark" />
 
-      {/* Top-left is "Add device", labelled. Hardware is the errand you do once;
-          the reports are the app. A bare icon here made the one action a new
-          user needs the least discoverable thing on the screen. */}
       <View style={s.top}>
         <SateDeviceChip devices={devices} onPress={onOpenDevices} />
-        <Logo size={24} />
       </View>
 
       <ScrollView
         style={s.scroll}
         contentContainerStyle={s.content}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={D.sub} />
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={S.mute} />
         }
       >
-        {l816 && <SateNearbyBanner session={l816} />}
-
-        <Text style={s.title}>Reports</Text>
-        <Text style={s.sub}>
+        <H1>Reports</H1>
+        <Meta style={{ marginTop: 4 }}>
           {rows === null
             ? "Loading…"
             : `${rows.length} recording${rows.length === 1 ? "" : "s"} analysed by SATE`}
-        </Text>
+        </Meta>
+
+        {l816 && (
+          <View style={{ marginTop: 16 }}>
+            <SateNearbyBanner session={l816} />
+          </View>
+        )}
 
         {error && (
           <View style={s.warn}>
@@ -122,92 +118,74 @@ export function SateHomeScreen({
 
         {rows === null && (
           <View style={s.center}>
-            <ActivityIndicator color={D.sky} />
+            <ActivityIndicator color={S.teal} />
           </View>
         )}
 
         {rows !== null && rows.length === 0 && !error && (
-          <View style={s.center}>
-            <Text style={s.emptyTitle}>No reports yet</Text>
-            <Text style={s.emptySub}>
+          <View style={s.empty}>
+            <H3>No reports yet</H3>
+            <Body style={{ textAlign: "center", marginTop: 6 }}>
               A report appears here once SATE has finished processing a recording. Nothing is
               generated on this phone.
-            </Text>
+            </Body>
           </View>
         )}
 
-        {(rows ?? []).map((r) => (
-          <Pressable
-            key={r.id}
-            onPress={() => onOpenReport(r)}
-            accessibilityRole="button"
-            style={({ pressed }) => [s.row, { opacity: pressed ? 0.85 : 1 }]}
-          >
-            <View style={s.rowIcon}>
-              <Feather name="file-text" size={18} color={D.sky} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={s.rowTitle} numberOfLines={1}>
-                {recordingLabel(r)}
-              </Text>
-              <Text style={s.rowSub} numberOfLines={1}>
-                {[when(r.created_at), duration(r.duration), r.patient_id || "Standalone"]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </Text>
-            </View>
-            <Feather name="chevron-right" size={20} color={D.faint} />
-          </Pressable>
-        ))}
+        {rows !== null && rows.length > 0 && (
+          <SectionLabel style={{ marginTop: 24, marginBottom: 10 }}>ALL SESSIONS</SectionLabel>
+        )}
+
+        <View style={{ gap: 11 }}>
+          {(rows ?? []).map((r) => {
+            const st = statusOf(r);
+            return (
+              <Card key={r.id} onPress={() => onOpenReport(r)} style={s.row}>
+                <View style={s.rowTop}>
+                  <View style={{ flex: 1, minWidth: 0 }}>
+                    <H3 numberOfLines={1}>{recordingLabel(r)}</H3>
+                    <Meta style={{ marginTop: 3 }} numberOfLines={1}>
+                      {[when(r.created_at), duration(r.duration), r.patient_id || "Standalone"]
+                        .filter(Boolean)
+                        .join(" · ")}
+                    </Meta>
+                  </View>
+                  <Pill tone={st.tone}>{st.label}</Pill>
+                </View>
+              </Card>
+            );
+          })}
+        </View>
       </ScrollView>
     </View>
   );
 }
 
 const s = StyleSheet.create({
-  flex: { flex: 1, backgroundColor: D.bg },
-  top: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 16,
-    paddingTop: 56,
-  },
-  addBtn: { flexDirection: "row", alignItems: "center", gap: 8 },
-  addTxt: { color: D.ink, fontSize: 16, fontWeight: "700" },
-  scroll: { flex: 1, backgroundColor: "transparent" },
-  content: { padding: 16, paddingTop: 18, paddingBottom: 48 },
-  title: { color: D.ink, fontSize: 40, fontWeight: "800", letterSpacing: -0.5 },
-  sub: { color: D.sub, fontSize: 13, marginTop: 4, marginBottom: 16 },
+  flex: { flex: 1, backgroundColor: S.bg },
+  top: { flexDirection: "row", alignItems: "center", paddingHorizontal: 20, paddingTop: 56 },
+  scroll: { flex: 1 },
+  content: { padding: 20, paddingTop: 14, paddingBottom: 40 },
   warn: {
-    backgroundColor: D.amberBg,
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 14,
+    backgroundColor: S.warnBg,
+    borderWidth: 1,
+    borderColor: S.warnLine,
+    borderRadius: R.panel,
+    padding: 14,
+    marginTop: 16,
   },
-  warnTxt: { color: D.amber, fontSize: 13 },
-  center: { alignItems: "center", paddingVertical: 48, paddingHorizontal: 24 },
-  emptyTitle: { color: D.ink, fontSize: 18, fontWeight: "700", marginBottom: 8 },
-  emptySub: { color: D.sub, fontSize: 14, textAlign: "center", lineHeight: 20 },
-  row: {
-    flexDirection: "row",
+  warnTxt: { fontFamily: FONT.medium, fontSize: 13.5, lineHeight: 20, color: S.warnInk },
+  center: { alignItems: "center", paddingVertical: 48 },
+  empty: {
+    marginTop: 20,
+    backgroundColor: S.card,
+    borderWidth: 1,
+    borderStyle: "dashed",
+    borderColor: S.dash,
+    borderRadius: R.panel,
+    padding: 28,
     alignItems: "center",
-    gap: 12,
-    backgroundColor: D.panel,
-    borderRadius: 14,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: D.line,
-    padding: 12,
-    marginBottom: 10,
   },
-  rowIcon: {
-    width: 38,
-    height: 38,
-    borderRadius: 10,
-    backgroundColor: D.tile,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  rowTitle: { color: D.ink, fontSize: 15, fontWeight: "700" },
-  rowSub: { color: D.sub, fontSize: 12, marginTop: 3 },
+  row: { padding: 16, borderRadius: R.panel },
+  rowTop: { flexDirection: "row", alignItems: "flex-start", gap: 12 },
 });

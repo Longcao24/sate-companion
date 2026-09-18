@@ -1,6 +1,5 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import { Feather } from "@expo/vector-icons";
-import { D } from "../theme";
+import { FONT, R, S, TAP } from "../theme";
 
 // The SATE app's bottom navigation.
 //
@@ -11,15 +10,19 @@ import { D } from "../theme";
 // promise the app cannot keep.
 //
 // Devices are NOT a tab. Their status is on the dashboard, and pairing one is
-// the "+ Add device" control in the top-left — an errand, not a place. The bar
-// is for moving between sections; that button is for doing something.
+// the control in the top-left — an errand, not a place. The bar is for moving
+// between sections; that button is for doing something.
+//
+// The redesign replaces the icon+label pair with a pill that fills when active:
+// at this size a filled shape reads as "you are here" from further away than a
+// tinted glyph does, and it keeps the three labels on one baseline.
 
 export type SateTab = "dashboard" | "reports" | "settings";
 
-const ITEMS: Array<{ id: SateTab; icon: keyof typeof Feather.glyphMap; label: string }> = [
-  { id: "dashboard", icon: "grid", label: "Dashboard" },
-  { id: "reports", icon: "file-text", label: "Reports" },
-  { id: "settings", icon: "settings", label: "Settings" },
+const ITEMS: Array<{ id: SateTab; label: string }> = [
+  { id: "dashboard", label: "Home" },
+  { id: "reports", label: "Reports" },
+  { id: "settings", label: "Settings" },
 ];
 
 export function SateNavBar({
@@ -40,10 +43,12 @@ export function SateNavBar({
             accessibilityRole="tab"
             accessibilityState={{ selected: on }}
             accessibilityLabel={it.label}
-            style={({ pressed }) => [s.item, { opacity: pressed ? 0.6 : 1 }]}
+            style={({ pressed }) => [s.item, pressed && { backgroundColor: "#F2F6F6" }]}
           >
-            <Feather name={it.icon} size={21} color={on ? D.sky : D.faint} />
-            <Text style={[s.label, on && s.labelOn]}>{it.label}</Text>
+            <View style={[s.chip, on && s.chipOn]}>
+              <View style={[s.dot, { backgroundColor: on ? S.teal : S.faint }]} />
+            </View>
+            <Text style={[s.label, { color: on ? S.teal : S.faint }]}>{it.label}</Text>
           </Pressable>
         );
       })}
@@ -54,14 +59,31 @@ export function SateNavBar({
 const s = StyleSheet.create({
   bar: {
     flexDirection: "row",
-    backgroundColor: D.hero,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: D.line,
-    paddingTop: 9,
+    backgroundColor: S.card,
+    borderTopWidth: 1,
+    borderTopColor: "#E4EAEA",
+    paddingTop: 6,
     // Clears the gesture bar without a safe-area dependency.
-    paddingBottom: 26,
+    paddingBottom: 22,
+    paddingHorizontal: 8,
   },
-  item: { flex: 1, alignItems: "center", gap: 3 },
-  label: { color: D.faint, fontSize: 11, fontWeight: "600" },
-  labelOn: { color: D.sky },
+  item: {
+    flex: 1,
+    minHeight: TAP.primary,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 4,
+    borderRadius: R.button,
+  },
+  chip: {
+    width: 44,
+    height: 26,
+    borderRadius: R.pill,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "transparent",
+  },
+  chipOn: { backgroundColor: S.tealTint },
+  dot: { width: 9, height: 9, borderRadius: 99 },
+  label: { fontFamily: FONT.extra, fontSize: 11.5 },
 });
