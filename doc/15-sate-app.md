@@ -156,7 +156,7 @@ cannot install pods), and then signing, which needs an Apple Developer account a
 
 ## 7. Navigation
 
-Bottom bar: **Dashboard · Reports · Settings**. Three destinations because the app has three;
+Bottom bar: **Home · Reports · Settings**, each an icon over its label (see §8). Three destinations because the app has three;
 inventing a fourth to fill the bar would put something in the user's way that leads nowhere.
 There is deliberately **no centre record button** — SATE reads what the hardware produced and
 cannot record anything, so that button would be a promise the app cannot keep.
@@ -166,3 +166,37 @@ a tab and come back from, and putting them in the bar would make "back" ambiguou
 list is Companion's screen reused — it has no "back" of its own, because it *is* that app's
 home, so SATE floats a real back pill over it rather than wiring "return to reports" onto a
 button labelled Settings.
+
+---
+
+## 8. The skin — and the one trap in it
+
+The app's look lives in three files and nowhere else: `src/theme.ts` (the `S` palette, `R`
+radii, `TAP` touch targets, `FONT` — Manrope), `src/sate/ui.tsx` (the type scale, `Card`,
+`Tile`, `Pill`, `Meter`, `Button`, `Segmented`), and each screen's own `StyleSheet`. No screen
+invents a colour.
+
+🛑 **The shared component library `src/components/ui.tsx` is the trap.** `GlassBackground`,
+`Card`, `Field` and `Button` in that file are used by BOTH apps, and they carry their own
+surfaces — so restyling a screen's `StyleSheet` to the light palette while those components
+still painted the dark one produced a **black screen with white cards floating on it**, and
+section labels that were dark-on-dark and effectively invisible. That is exactly what shipped
+in the first redesign build: the Report screen rendered on black and Settings was unreadable.
+
+The fix is systemic, not per-screen: that file imports **`APP`**, the variant-aware palette in
+`theme.ts`, under the name `D`. `APP` *is* `D` in SATE Companion — that build is byte-identical
+— and the light palette in SATE. **Never import `D` into `src/components/ui.tsx` again**, and
+the same applies to any shared screen SATE renders (`LoginScreen`, `DeviceListScreen`,
+`L816ConnectScreen`, `QrScannerModal`). A light screen also needs `StatusBar style="dark"`, or
+the clock and battery are white on white; the shared screens branch on `IS_SATE_APP` for it.
+
+**Settings is SATE's own screen** (`src/sate/SateSettingsScreen.tsx`), not a restyle of
+Companion's. The two apps do not have the same settings — Companion sets hardware up, SATE
+reads reports — and sharing one screen meant every addition to either had to be justified to
+the other. Account, auto-sync, paired recorders, version, support, sign out; sign-out asks
+first, because it is the one control here that needs the account password to undo.
+
+The bottom bar carries an **icon** per destination (Feather `home` / `file-text` / `settings`),
+inside the pill that fills on the active tab. It used to be an abstract dot: three identical
+dots make the bar a row of lights that only the labels tell apart, so the shape the eye catches
+first carried no information at all.

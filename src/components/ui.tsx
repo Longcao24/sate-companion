@@ -10,7 +10,15 @@ import {
   View,
 } from "react-native";
 import { Feather } from "@expo/vector-icons";
-import { D, radius } from "../theme";
+// 🛑 The palette is `APP`, not `D`.
+//
+// These components are shared by BOTH apps, and they are the reason the
+// redesign leaked a black screen into a white one: `GlassBackground` paints a
+// solid backdrop and `Card`/`Field`/`Button` carry their own surfaces, so a
+// screen restyled to the light palette still came out dark underneath. `APP`
+// IS `D` in SATE Companion — that build is byte-identical — and the light
+// palette in SATE. Do not import `D` here again.
+import { APP as D, radius } from "../theme";
 
 // Apple-style grouped surface: a solid elevated card on the dark background with
 // a hairline border. `raised` is a brighter fill for nested/elevated controls.

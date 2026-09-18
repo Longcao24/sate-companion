@@ -1,4 +1,5 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Feather } from "@expo/vector-icons";
 import { FONT, R, S, TAP } from "../theme";
 
 // The SATE app's bottom navigation.
@@ -13,16 +14,21 @@ import { FONT, R, S, TAP } from "../theme";
 // the control in the top-left — an errand, not a place. The bar is for moving
 // between sections; that button is for doing something.
 //
-// The redesign replaces the icon+label pair with a pill that fills when active:
-// at this size a filled shape reads as "you are here" from further away than a
-// tinted glyph does, and it keeps the three labels on one baseline.
+// The active tab is a filled pill: at this size a filled shape reads as "you
+// are here" from further away than a tinted glyph does, and it keeps the three
+// labels on one baseline. The pill holds an ICON, not an abstract dot — three
+// identical dots make the bar a row of lights that only the labels distinguish,
+// so the shape that catches the eye first carries no information at all.
 
 export type SateTab = "dashboard" | "reports" | "settings";
 
-const ITEMS: Array<{ id: SateTab; label: string }> = [
-  { id: "dashboard", label: "Home" },
-  { id: "reports", label: "Reports" },
-  { id: "settings", label: "Settings" },
+// `home` / `file-text` / `settings` are Feather's, already bundled for the
+// report screen — no new font asset, and the same stroke weight as every other
+// glyph in the app.
+const ITEMS: Array<{ id: SateTab; label: string; icon: keyof typeof Feather.glyphMap }> = [
+  { id: "dashboard", label: "Home", icon: "home" },
+  { id: "reports", label: "Reports", icon: "file-text" },
+  { id: "settings", label: "Settings", icon: "settings" },
 ];
 
 export function SateNavBar({
@@ -46,7 +52,7 @@ export function SateNavBar({
             style={({ pressed }) => [s.item, pressed && { backgroundColor: "#F2F6F6" }]}
           >
             <View style={[s.chip, on && s.chipOn]}>
-              <View style={[s.dot, { backgroundColor: on ? S.teal : S.faint }]} />
+              <Feather name={it.icon} size={17} color={on ? S.teal : S.faint} />
             </View>
             <Text style={[s.label, { color: on ? S.teal : S.faint }]}>{it.label}</Text>
           </Pressable>
@@ -72,18 +78,17 @@ const s = StyleSheet.create({
     minHeight: TAP.primary,
     alignItems: "center",
     justifyContent: "center",
-    gap: 4,
+    gap: 3,
     borderRadius: R.button,
   },
   chip: {
-    width: 44,
-    height: 26,
+    width: 52,
+    height: 28,
     borderRadius: R.pill,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "transparent",
   },
   chipOn: { backgroundColor: S.tealTint },
-  dot: { width: 9, height: 9, borderRadius: 99 },
   label: { fontFamily: FONT.extra, fontSize: 11.5 },
 });

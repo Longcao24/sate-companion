@@ -903,6 +903,16 @@ setup + prebuilt flash assets: `SETUP.md` + the **GitHub Release** (`gh release 
   same way.
 
 **Dev environment**
+- 🛑 **`npm run sate:build` FAILS SILENTLY without `JAVA_HOME` — and then `adb install` happily
+  installs the PREVIOUS apk.** There is no JDK on this Mac's PATH (openjdk@17 is brew keg-only)
+  and no Android SDK at the usual place, so gradle prints *"Unable to locate a Java Runtime"*,
+  the npm script exits, and a `&& adb install …` chained after a pipe still runs. The app then
+  launches showing the OLD build, which reads exactly like "my change had no effect" — an hour
+  was lost to that here. Export both before any gradle run:
+  `JAVA_HOME=/opt/homebrew/opt/openjdk@17 ANDROID_HOME=/opt/homebrew/share/android-commandlinetools`.
+  **Verify the bundle, don't trust the build log**: `unzip -p <apk> assets/index.android.bundle |
+  grep -c '<a string only the new code has>'`. A string the change introduced is the only proof
+  the JS was re-bundled; Hermes keeps some literals as UTF-16, so grep both encodings.
 - **A MAC-allowlist Wi-Fi looks exactly like a working connection.** A campus/device-registration
   SSID hands out a DHCP lease and then silently drops every packet until the MAC is registered:
   the recorder logs `[CONN] Online (Wi-Fi) - <ip>`, the UI says online, and NOTHING reaches the

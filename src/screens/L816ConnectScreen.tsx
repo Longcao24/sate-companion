@@ -21,7 +21,7 @@ import {
 } from "../l816/L816Link";
 import { KnownL816 } from "../l816/L816Store";
 import { L816Session, fmtDur, fmtTakeName } from "../l816/useL816Session";
-import { D } from "../theme";
+import { APP as D } from "../theme";
 
 // Connect-with-SATE-L816: find the recorder over BLE -> connect -> drive its record
 // button from the phone -> pull the finished take off the device -> decode the

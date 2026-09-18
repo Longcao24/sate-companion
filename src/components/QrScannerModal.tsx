@@ -2,7 +2,7 @@ import React, { useRef } from "react";
 import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { Button } from "./ui";
-import { D } from "../theme";
+import { APP as D } from "../theme";
 
 // Full-screen camera modal that reads the QR shown in the SATE web app and hands
 // the decoded one-time code back to the caller. The QR payload is the raw code

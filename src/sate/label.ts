@@ -13,8 +13,18 @@ import { Recording } from "../protocol";
 // `device_SATE-443EAC_s13.wav`, so matching the pattern IS the proof it was generated.
 // Anything that does not match is a person's name and is returned untouched.
 
-const DEVICE_FILE = /^device_(SATE|pendant|plaud|l816)[^_]*_s(\d+)/i;
-const PREFIX: Record<string, string> = { sate: "R", pendant: "P", plaud: "PL", l816: "L" };
+// 🛑 The L81x family is `l81[56]`, not `l816`. The L815 shipped as "the same
+// mechanism as the L816" and this pattern was not widened with it, so every
+// L815 take fell through to "a person named this" and the list printed
+// `device_l815-19409D91ABAF_s1789…` beside the L816's `L-10:19 AM`.
+const DEVICE_FILE = /^device_(SATE|pendant|plaud|l81[56])[^_]*_s(\d+)/i;
+const PREFIX: Record<string, string> = {
+  sate: "R",
+  pendant: "P",
+  plaud: "PL",
+  l816: "L",
+  l815: "L",
+};
 
 export function recordingLabel(r: Recording): string {
   const raw = (r.recording_name || "").trim();

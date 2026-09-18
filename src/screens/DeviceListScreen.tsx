@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { StatusBar } from "expo-status-bar";
+import { IS_SATE_APP } from "../sate/variant";
 import { Feather } from "@expo/vector-icons";
 import { GlassBackground, Logo } from "../components/ui";
 import { AddDeviceSheet } from "../components/AddDeviceSheet";
@@ -8,7 +9,7 @@ import { PlaudDeviceCard } from "../components/PlaudDeviceCard";
 import { PendantDeviceCard } from "../components/PendantDeviceCard";
 import { L816DeviceCard } from "../components/L816DeviceCard";
 import { ManagedDevice } from "../protocol";
-import { D } from "../theme";
+import { APP as D } from "../theme";
 
 // The account's devices, one row each, whatever family they are. The list is fed
 // by ONE registry (useManagedDevices in App) that merges SATE recorders from the
@@ -102,7 +103,7 @@ export function DeviceListScreen({
     return (
       <View style={s.flex}>
         <GlassBackground />
-        <StatusBar style="light" />
+        <StatusBar style={IS_SATE_APP ? "dark" : "light"} />
       </View>
     );
   }
@@ -113,7 +114,7 @@ export function DeviceListScreen({
     return (
       <View style={s.flex}>
         <GlassBackground />
-        <StatusBar style="light" />
+        <StatusBar style={IS_SATE_APP ? "dark" : "light"} />
         {header}
         <View style={s.empty}>
           <Text style={s.emptyTitle}>Can't reach SATE</Text>
@@ -138,7 +139,7 @@ export function DeviceListScreen({
     return (
       <View style={s.flex}>
         <GlassBackground />
-        <StatusBar style="light" />
+        <StatusBar style={IS_SATE_APP ? "dark" : "light"} />
         {header}
         <View style={s.empty}>
           <Text style={s.emptyTitle}>Connect your first device</Text>
@@ -165,7 +166,7 @@ export function DeviceListScreen({
   return (
     <View style={s.flex}>
       <GlassBackground />
-      <StatusBar style="light" />
+      <StatusBar style={IS_SATE_APP ? "dark" : "light"} />
       <ScrollView style={s.scroll} contentContainerStyle={s.content}>
         <View style={s.headerBlock}>
           <View style={{ flex: 1 }}>
@@ -241,7 +242,11 @@ function DeviceRow({
     sub = "Paired pendant · tap to connect & stream";
   } else if (kind === "l816") {
     glyph = <L816DeviceCard width={44} />;
-    sub = "Paired SATE L816 · tap to record & upload";
+    // The FAMILY LABEL, not a hardcoded model. An L815 and an L816 share one
+    // `kind`, and `useManagedDevices` puts `l816DisplayName(model)` in `fw`
+    // precisely because that string is the only thing telling them apart on
+    // screen — spelling "SATE L816" here labelled an L815 as the wrong device.
+    sub = `Paired ${device.fw || device.name} · tap to record & upload`;
   }
 
   return (

@@ -12,7 +12,6 @@ import {
 import { StatusBar } from "expo-status-bar";
 import { Feather } from "@expo/vector-icons";
 import { useAudioPlayer, useAudioPlayerStatus } from "expo-audio";
-import { GlassBackground } from "../components/ui";
 import { SateApi, TranscriptConflict } from "../api/sateApi";
 import { Recording, TranscriptSegment } from "../protocol";
 import { checkName, renameSpeaker, SpeakerRow, speakersOf } from "./speakers";
@@ -181,7 +180,6 @@ export function SateReportScreen({
   if (error && !rec) {
     return (
       <View style={s.flex}>
-        <GlassBackground />
         <View style={s.center}>
           <Text style={s.emptyTitle}>Could not open this report</Text>
           <Text style={s.emptySub}>{error}</Text>
@@ -195,8 +193,7 @@ export function SateReportScreen({
 
   return (
     <View style={s.flex}>
-      <GlassBackground />
-      <StatusBar style="light" />
+      <StatusBar style="dark" />
 
       <View style={s.head}>
         <Pressable onPress={onClose} hitSlop={10} accessibilityRole="button">
@@ -445,7 +442,10 @@ export function SateReportScreen({
               <View style={s.grid}>
                 <Metric
                   label="Error rate"
-                  value={typeof a.errorRate === "number" ? `${(a.errorRate * 100).toFixed(1)}%` : "—"}
+                  // `errorRate` is ALREADY a percentage — the analysis service
+                  // sends 38.3, not 0.383. Scaling it again printed "3827.2%".
+                  // Companion has always rendered it bare; this must match.
+                  value={typeof a.errorRate === "number" ? `${a.errorRate.toFixed(1)}%` : "—"}
                 />
                 <Metric
                   label="Marked issues"

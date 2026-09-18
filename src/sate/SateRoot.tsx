@@ -18,7 +18,7 @@ import { SateHomeScreen } from "./SateHomeScreen";
 import { SateReportScreen } from "./SateReportScreen";
 import { SateDashboardScreen } from "./SateDashboardScreen";
 import { SateNavBar, SateTab } from "./SateNavBar";
-import { SettingsScreen } from "../screens/SettingsScreen";
+import { SateSettingsScreen } from "./SateSettingsScreen";
 import { FONT, R, S } from "../theme";
 import {
   useFonts,
@@ -240,7 +240,12 @@ export function SateRoot() {
           l816={l816Session}
         />
       )}
-      {screen.name === "tab" && screen.tab === "settings" && <SettingsScreen onClose={() => {}} />}
+      {screen.name === "tab" && screen.tab === "settings" && (
+        <SateSettingsScreen
+          deviceCount={devices.length + knownL816s.length}
+          onOpenDevices={() => setScreen({ name: "devices" })}
+        />
+      )}
       {screen.name === "report" && (
         <SateReportScreen
           api={api}
