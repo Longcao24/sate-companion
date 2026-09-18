@@ -888,6 +888,17 @@ setup + prebuilt flash assets: `SETUP.md` + the **GitHub Release** (`gh release 
   Don't reintroduce reads of `settings.refreshToken` there — it is a render behind.
 
 **Mobile UI**
+- 🛑 **NOTHING HANDLED ANDROID'S BACK BUTTON, so back — and the left-edge swipe, which
+  Android delivers as the SAME event — QUIT THE APP (2026-09-18).** Neither app uses a
+  navigation library: both keep the current screen in a `useState` and render it directly
+  (`App.tsx` `Screen`, `src/sate/SateRoot.tsx` `Screen`), so React Navigation's automatic back
+  handling was never there to inherit and `BackHandler` appeared ZERO times in the repo. With
+  no JS listener the event falls through to the Activity, which finishes — reading a report and
+  swiping back closed SATE. `src/ui/useAndroidBack.ts` is the one helper; the handler returns
+  **true when it consumed the event** and false at the ROOT screen, because an app you cannot
+  back out of is its own bug. Any new screen added to either `Screen` union needs a case, or it
+  becomes a dead end that exits the app. `Modal` registers its own handler and is called first,
+  so a sheet's `onRequestClose` still wins.
 - 🛑 **THE APP IS EDGE-TO-EDGE, AND NOTHING HAD A BOTTOM INSET (2026-09-18).**
   `android/gradle.properties` carries `edgeToEdgeEnabled=true` (Android 15 forces it for SDK 35
   targets), so the system status and navigation bars are painted **over** the app rather than

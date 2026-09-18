@@ -14,6 +14,7 @@ import { KnownL816, loadKnownL816s, rememberL816 } from "./src/l816/L816Store";
 import { L816ConnectScreen } from "./src/screens/L816ConnectScreen";
 import { useL816Session } from "./src/l816/useL816Session";
 import { L816TransferModal } from "./src/l816/L816TransferModal";
+import { useAndroidBack } from "./src/ui/useAndroidBack";
 import { PLAUD_ENABLED, PENDANT_ENABLED, L816_ENABLED } from "./src/features";
 import { acquireRadio, registerRadio } from "./src/ble/radio";
 import { useManagedDevices } from "./src/devices/useManagedDevices";
@@ -226,6 +227,23 @@ function Root() {
     acquireRadio("l816"); // shares SATE's manager — stopScan only, no destroy
     setScreen({ name: "l816", targetId });
   }, []);
+  // Android back / left-edge swipe — see useAndroidBack. `goHome` is the right
+  // target for almost everything here because it is also what every screen's own
+  // Close does, and it hands the radio back to auto-sync (for Plaud that is
+  // disconnect(), never depair — RULE #1).
+  const goBack = useCallback(() => {
+    if (screen.name === "home") return false; // the root: backing out is leaving
+    // Plaud's settings sit ON TOP of its connect screen, so back returns there
+    // rather than dropping the user two levels and the link with it.
+    if (screen.name === "plaudSettings") {
+      setScreen({ name: "plaud" });
+      return true;
+    }
+    goHome();
+    return true;
+  }, [screen, goHome]);
+  useAndroidBack(goBack);
+
   const openSateFg = useCallback((next: Screen) => {
     acquireRadio("sate-fg"); // setup/restart needs the radio alone: pauses auto-sync
     setScreen(next);

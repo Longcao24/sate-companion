@@ -10,6 +10,7 @@ import { KnownL816, forgetL816, loadKnownL816s, rememberL816 } from "../l816/L81
 import { makeL816Link } from "../l816/L816Link";
 import { useL816Session } from "../l816/useL816Session";
 import { L816TransferModal } from "../l816/L816TransferModal";
+import { useAndroidBack } from "../ui/useAndroidBack";
 import { L816ConnectScreen } from "../screens/L816ConnectScreen";
 import { L816_ENABLED } from "../features";
 import { KnownPendant, forgetPendant, loadKnownPendants } from "../pendant/PendantStore";
@@ -125,6 +126,35 @@ export function SateRoot() {
     })();
     return refreshing.current;
   }, []);
+
+  // Android back / left-edge swipe. Without this the event reached the Activity
+  // and closed the app from wherever the user was — see useAndroidBack.
+  const goBack = useCallback(() => {
+    switch (screen.name) {
+      case "report":
+        setScreen({ name: "tab", tab: "reports" });
+        return true;
+      case "device":
+        setScreen(screen.back);
+        return true;
+      case "l816":
+        setScreen({ name: "devices" });
+        return true;
+      case "devices":
+        setScreen({ name: "tab", tab: "dashboard" });
+        return true;
+      case "tab":
+        // The dashboard is the root. Backing out of the root is LEAVING, and an
+        // app you cannot back out of is its own bug — so this one is not
+        // consumed.
+        if (screen.tab === "dashboard") return false;
+        setScreen({ name: "tab", tab: "dashboard" });
+        return true;
+      default:
+        return false;
+    }
+  }, [screen]);
+  useAndroidBack(goBack);
 
   const api = useMemo(
     () => makeApi(settings.serverUrl, settings.token, doRefresh),
